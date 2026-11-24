@@ -3,6 +3,7 @@ package desktop
 import (
 	"fmt"
 	"math"
+	"sort"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -381,16 +382,13 @@ func (a *App) View(c *ui.Context) {
 			p.Fill(r, pal.ShellBg, 0)
 		})
 	} else {
-		shell.Background(pal.ShellBg)
+		shell.Draw(func(p *ui.Painter, r ui.Rect) {
+			theme.DrawVibrantLiquidWash(p, r, pal)
+		})
 	}
 
-	// Subtle top drag strip for TitleBarHidden windows (stays out of interactive clicks).
-	topPad := float32(12)
-	if bar.Height > 0 && bar.Right > 0 {
-		// Windows/Linux top-right window controls clearance.
-		topPad = max(float32(12), bar.Height-4)
-	}
-
+	// Keep the floating glass sidebar cleanly aligned at 12px from the top edge
+	// (matching prototype.html); only add top-right clearance inside the main header.
 	shell.Children(func() {
 		// Full-width invisible top drag handle when titlebar is hidden.
 		if bar.Height > 0 {
@@ -401,7 +399,7 @@ func (a *App) View(c *ui.Context) {
 
 		ui.Row(c.Key("desktop-layout")).
 			Fill().
-			Padding(topPad, 12, 12, 12).
+			Padding(12, 12, 12, 12).
 			Gap(12).
 			AlignItems(ui.Stretch).
 			Children(func() {
@@ -584,23 +582,19 @@ func (a *App) updateAnimationTargets(conv model.ConversationSnapshot, vm scopeVi
 		set("tpsSub", vm.metrics.WeightedDecodeTPS)
 	}
 
-	// Sync morphing curve targets.
+	// Sync morphing curve targets with robust outlier-resistant Y-scaling so a single
+	// micro-burst spike (e.g. 1000 t/s on 29 tokens) never crushes normal 120-160 t/s waves.
 	slice := tailRequests(vm.requests, chartWindowLen)
 	vals := make([]float64, len(slice))
-	maxVal := 0.001
 	for i, r := range slice {
-		v := metricValue(a.metric, r)
-		vals[i] = v
-		if v > maxVal {
-			maxVal = v
-		}
+		vals[i] = metricValue(a.metric, r)
 	}
 	if a.metric == MetricCache {
-		maxVal = 100
+		a.morpher.SetTargets(vals, 100)
 	} else {
-		maxVal *= 1.18
+		scaled, ceiling := robustChartScale(vals)
+		a.morpher.SetTargets(scaled, ceiling)
 	}
-	a.morpher.SetTargets(vals, maxVal)
 
 	_, idx, _ := a.inspectedRequest(vm.requests)
 	if idx >= 0 && len(slice) > 0 {
@@ -630,6 +624,48 @@ func tailRequests(reqs []model.RequestRecord, maxN int) []model.RequestRecord {
 		return reqs
 	}
 	return reqs[len(reqs)-maxN:]
+}
+
+// robustChartScale compresses extreme single-request outliers via a smooth soft-knee
+// above 1.6x P85 so normal telemetry waves remain readable while preserving relative peaks.
+func robustChartScale(vals []float64) ([]float64, float64) {
+	if len(vals) == 0 {
+		return vals, 1
+	}
+	sorted := make([]float64, 0, len(vals))
+	rawMax := 0.0
+	for _, v := range vals {
+		if v > rawMax {
+			rawMax = v
+		}
+		if v > 0 {
+			sorted = append(sorted, v)
+		}
+	}
+	if rawMax <= 0 {
+		return vals, 1
+	}
+	if len(sorted) < 4 {
+		return vals, rawMax * 1.18
+	}
+	sort.Float64s(sorted)
+	p85 := sorted[int(float64(len(sorted)-1)*0.85)]
+	knee := p85 * 1.45
+	if knee <= 0 || rawMax <= knee*1.25 {
+		return vals, rawMax * 1.18
+	}
+	// Soft-knee compress values exceeding knee into [knee, knee*1.25].
+	ceiling := knee * 1.32
+	out := make([]float64, len(vals))
+	for i, v := range vals {
+		if v <= knee {
+			out[i] = v
+		} else {
+			excess := (v - knee) / (rawMax - knee)
+			out[i] = knee + (ceiling*0.95-knee)*math.Sqrt(excess)
+		}
+	}
+	return out, ceiling
 }
 
 func metricTitle(m MetricKind) string {

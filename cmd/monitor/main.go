@@ -182,14 +182,14 @@ func newDesktopHost(provider model.SnapshotProvider, store *config.Store, onSett
 
 	h.win = mygo.NewWindow(mygo.WindowOptions{
 		Title:          "Antigravity Monitor",
-		Width:          980,
-		Height:         700,
-		MinWidth:       780,
-		MinHeight:      580,
+		Width:          900,
+		Height:         590,
+		MinWidth:       760,
+		MinHeight:      520,
 		Hidden:         true,
 		AlwaysOnTop:    s.AlwaysOnTop,
 		TitleBarStyle:  mygo.TitleBarHidden,
-		TitleBarHeight: 36,
+		TitleBarHeight: 32,
 		Vibrancy:       mygo.VibrancyGlass,
 		Content:        ui.View(h.app.View),
 	})
@@ -213,6 +213,9 @@ func (h *desktopHost) Show() {
 		if h.win == nil {
 			return
 		}
+		if h.win.IsMinimized() {
+			h.win.Restore()
+		}
 		h.win.Show()
 		h.win.Focus()
 		h.win.Invalidate()
@@ -225,6 +228,9 @@ func (h *desktopHost) FocusAgent(convID, agentID string) {
 			h.app.FocusConversationAgent(convID, agentID)
 		}
 		if h.win != nil {
+			if h.win.IsMinimized() {
+				h.win.Restore()
+			}
 			h.win.Show()
 			h.win.Focus()
 			h.win.Invalidate()

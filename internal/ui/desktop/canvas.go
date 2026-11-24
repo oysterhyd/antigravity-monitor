@@ -44,6 +44,14 @@ func (a *App) renderMainHeader(c *ui.Context, pal theme.Palette, conv model.Conv
 		recentHint = fmt.Sprintf("最近 #%d · %s", vm.latestReq.Seq, src)
 	}
 
+	// On Windows/Linux TitleBarHidden, add subtle top clearance on the right column
+	// so the activity indicator never overlaps the native minimize/maximize/close buttons.
+	bar := c.TitleBar()
+	rightTopPad := float32(0)
+	if bar.Right > 0 && bar.Height > 0 {
+		rightTopPad = max(float32(18), bar.Height-10)
+	}
+
 	ui.Row(c.Key("main-header")).
 		Padding(2, 4, 0, 4).
 		Justify(ui.SpaceBetween).
@@ -69,7 +77,7 @@ func (a *App) renderMainHeader(c *ui.Context, pal theme.Palette, conv model.Conv
 			})
 
 			// Right: quiet activity hint + optional dev harness controls.
-			ui.Column(c).AlignItems(ui.End).Gap(6).Shrink(0).Children(func() {
+			ui.Column(c).Padding(rightTopPad, 0, 0, 0).AlignItems(ui.End).Gap(6).Shrink(0).Children(func() {
 				if a.opts.ShowDevToolbar {
 					a.renderDevControls(c, pal)
 				}

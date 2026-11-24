@@ -135,6 +135,8 @@ func GlassCard(c *ui.Context, pal Palette, opts CardOptions) ui.Element {
 }
 
 // GlassSidebar creates the macOS-26-style inset floating Liquid Glass sidebar.
+// Uses crisp milky-white translucent layering directly over OS Acrylic/atmospheric glass
+// (avoiding premultiplied-alpha black bleed from nested blur shaders over transparent shells).
 func GlassSidebar(c *ui.Context, pal Palette, width float32) ui.Element {
 	side := ui.Column(c).
 		Width(width).
@@ -143,14 +145,10 @@ func GlassSidebar(c *ui.Context, pal Palette, width float32) ui.Element {
 		Padding(14).
 		Justify(ui.SpaceBetween).
 		Gap(14).
-		Material(glass.Glass{
-			Style:   glass.Regular,
-			Tint:    pal.SidebarTint,
-			Clarity: 0.45,
-		}).
+		Background(pal.SidebarBg).
 		Border(1, pal.RimEdge).
 		InsetShadow(0, 1, 0, 0, pal.RimTop).
-		Shadow(0, 6, 20, 0, pal.ShadowCard)
+		Shadow(0, 8, 24, 0, pal.ShadowCard)
 	return side
 }
 
@@ -162,11 +160,6 @@ func GlassPopover(panel ui.Element, pal Palette, width float32) ui.Element {
 	return panel.
 		Radius(16).
 		Padding(8).
-		Material(glass.Glass{
-			Style:   glass.Regular,
-			Tint:    pal.PopoverTint,
-			Clarity: 0.25,
-		}).
 		Background(pal.PopoverBg).
 		Border(1, pal.RimEdge).
 		InsetShadow(0, 1, 0, 0, pal.RimTop).
@@ -335,6 +328,60 @@ func LiquidProgressBar(c *ui.Context, pal Palette, key string, ratio float32, fi
 		}
 	})
 	return bar
+}
+
+// DrawVibrantLiquidWash paints a luminous translucent Apple Liquid Glass wash
+// on top of real OS Acrylic/Liquid Glass vibrancy so the window keeps crisp
+// sky-to-lavender glass depth (even over stark white windows) while still
+// letting real blurred desktop content shine through underneath.
+func DrawVibrantLiquidWash(p *ui.Painter, r ui.Rect, pal Palette) {
+	if pal.Dark {
+		p.FillGradient(r, ui.LinearGradient{
+			Angle: 135,
+			Stops: []ui.GradientStop{
+				{Color: ui.RGBA(14, 24, 48, 0.56), At: 0},
+				{Color: ui.RGBA(22, 27, 52, 0.52), At: 0.52},
+				{Color: ui.RGBA(16, 22, 42, 0.58), At: 1},
+			},
+		}, 0)
+	} else {
+		p.FillGradient(r, ui.LinearGradient{
+			Angle: 135,
+			Stops: []ui.GradientStop{
+				{Color: ui.RGBA(162, 198, 248, 0.46), At: 0},
+				{Color: ui.RGBA(206, 218, 248, 0.40), At: 0.50},
+				{Color: ui.RGBA(214, 196, 238, 0.46), At: 1},
+			},
+		}, 0)
+	}
+
+	maxDim := float32(math.Max(float64(r.W), float64(r.H)))
+	p.FillRadialGradient(r, ui.RadialGradient{
+		Center: ui.Point{X: 0.18, Y: 0.20},
+		Radius: maxDim * 0.55,
+		Stops: []ui.GradientStop{
+			{Color: pal.BackdropGlow1.Alpha(0.24), At: 0},
+			{Color: ui.Transparent, At: 1},
+		},
+	}, 0)
+	p.FillRadialGradient(r, ui.RadialGradient{
+		Center: ui.Point{X: 0.84, Y: 0.24},
+		Radius: maxDim * 0.50,
+		Stops: []ui.GradientStop{
+			{Color: pal.BackdropGlow2.Alpha(0.20), At: 0},
+			{Color: ui.Transparent, At: 1},
+		},
+	}, 0)
+	p.FillRadialGradient(r, ui.RadialGradient{
+		Center: ui.Point{X: 0.56, Y: 0.86},
+		Radius: maxDim * 0.48,
+		Stops: []ui.GradientStop{
+			{Color: pal.BackdropGlow3.Alpha(0.14), At: 0},
+			{Color: ui.Transparent, At: 1},
+		},
+	}, 0)
+	// Crisp 1px top specular glass rim along the window edge.
+	p.Line(r.X, r.Y+0.5, r.X+r.W, r.Y+0.5, 1, pal.RimTop.Alpha(0.75))
 }
 
 // DrawAtmosphericBackdrop paints a subtle Apple-inspired organic gradient backdrop

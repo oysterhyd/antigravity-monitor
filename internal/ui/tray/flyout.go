@@ -36,13 +36,31 @@ func (ctl *Controller) buildView(c *ui.Context) {
 	shell := ui.Column(c.Key("tray-shell")).Width(flyoutWidth).Padding(16).Gap(14)
 	switch {
 	case vibrant:
-		// Subtle tinted wash + top specular hairline over real OS Acrylic/Glass.
-		shell.Background(pal.FlyoutGlass)
+		// Luminous translucent Apple Liquid Glass wash over real OS Acrylic.
+		dark := pal.Dark
+		shell.Draw(func(p *ui.Painter, r ui.Rect) {
+			if dark {
+				p.FillGradient(r, ui.LinearGradient{
+					Angle: 145,
+					Stops: []ui.GradientStop{
+						{Color: ui.RGBA(22, 28, 46, 0.72), At: 0},
+						{Color: ui.RGBA(28, 26, 46, 0.74), At: 1},
+					},
+				}, 0)
+			} else {
+				p.FillGradient(r, ui.LinearGradient{
+					Angle: 145,
+					Stops: []ui.GradientStop{
+						{Color: ui.RGBA(240, 246, 255, 0.74), At: 0},
+						{Color: ui.RGBA(248, 244, 254, 0.76), At: 1},
+					},
+				}, 0)
+			}
+		})
 		if runtime.GOOS != "windows" {
 			shell.Radius(flyoutRadius).Border(1, pal.RimEdge)
 		}
 	case runtime.GOOS == "windows":
-		// Windows 11 rounds and outlines the flyout window itself.
 		shell.Background(pal.FlyoutOpaque)
 	default:
 		shell.Radius(flyoutRadius).Material(glass.Glass{
