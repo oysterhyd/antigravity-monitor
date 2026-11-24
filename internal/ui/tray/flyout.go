@@ -9,6 +9,7 @@ import (
 	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
+	appupdater "github.com/oysterhyd/antigravity-monitor/internal/updater"
 )
 
 const (
@@ -719,6 +720,32 @@ func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 									}
 								}
 							})
+						})
+
+						ui.Box(c).AlignSelf(ui.Stretch).Height(1).Background(pal.Divider)
+
+						// Version & Check for Updates row
+						ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
+							verText := appupdater.VersionLabel()
+							if avail := appupdater.AvailableVersion(); avail != "" {
+								verText = fmt.Sprintf("%s → v%s", verText, avail)
+							}
+							ui.Text(c, verText).FontSize(11).FontFeatures("tnum").TextColor(pal.Ink3).SingleLine()
+
+							checkBtn := ui.ButtonBase(c.Key("tray-check-updates")).
+								Padding(3, 9).Radius(8).Background(pal.SegBg).Cursor(ui.CursorPointer).
+								Label("检查更新")
+							if checkBtn.Hovered() {
+								checkBtn.Background(pal.CardHover)
+							}
+							checkBtn.Children(func() {
+								ui.Text(c, "检查更新").FontSize(11).FontWeight(500).TextColor(pal.Accent).SingleLine()
+							})
+							if checkBtn.Clicked() {
+								st.SettingsOpen = false
+								ctl.HideFlyout()
+								appupdater.CheckNow()
+							}
 						})
 					})
 				})

@@ -5,6 +5,8 @@ package deps
 import (
 	_ "github.com/egoist/mygo"
 	_ "github.com/egoist/mygo/plugins/glass"
+	_ "github.com/egoist/mygo/plugins/updater"
+	_ "github.com/egoist/mygo/plugins/updater/native"
 	_ "github.com/egoist/mygo/ui"
 	_ "github.com/egoist/mygo/ui/chart"
 	_ "github.com/fsnotify/fsnotify"

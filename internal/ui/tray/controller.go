@@ -10,6 +10,7 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/oysterhyd/antigravity-monitor/internal/config"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
+	appupdater "github.com/oysterhyd/antigravity-monitor/internal/updater"
 )
 
 // Callbacks connects tray actions to the host application shell (e.g. Track 2's
@@ -117,6 +118,7 @@ func (ctl *Controller) Start() error {
 		},
 		mygo.Separator(),
 		ctl.followItem,
+		appupdater.MenuItem(),
 		mygo.Separator(),
 		{
 			ID:    "quit",
