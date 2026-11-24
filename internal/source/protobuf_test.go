@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oysterhyd/antigravity-monitor/internal/model"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -203,5 +204,92 @@ func TestDecodeStepTimestamp(t *testing.T) {
 	got := DecodeStepTimestamp(meta)
 	if !got.Equal(want) {
 		t.Fatalf("DecodeStepTimestamp = %v, want %v", got, want)
+	}
+}
+
+func TestDecodeGenMetadata_ContextBreakdown(t *testing.T) {
+	cat := func(name string, total uint64, subs ...struct {
+		label string
+		toks  uint64
+	}) []byte {
+		return buildProtoMsg(func(b []byte) []byte {
+			b = appendStringField(b, 1, name)
+			b = appendVarintField(b, 4, total)
+			for _, sub := range subs {
+				sb := buildProtoMsg(func(sb []byte) []byte {
+					sb = appendStringField(sb, 1, sub.label)
+					sb = appendVarintField(sb, 3, sub.toks)
+					return sb
+				})
+				b = appendSubMsg(b, 5, sb)
+			}
+			return b
+		})
+	}
+
+	breakdown := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 1, cat("System Prompt", 3981))
+		b = appendSubMsg(b, 1, cat("Rules", 439))
+		b = appendSubMsg(b, 1, cat("Skills", 4826))
+		b = appendSubMsg(b, 1, cat("Tools", 10903))
+		b = appendSubMsg(b, 1, cat("Mcp Tools", 575))
+		b = appendSubMsg(b, 1, cat("Chat Messages", 120964,
+			struct {
+				label string
+				toks  uint64
+			}{"477: CHECKPOINT", 11895},
+			struct {
+				label string
+				toks  uint64
+			}{"478: PLANNER_RESPONSE", 26302},
+			struct {
+				label string
+				toks  uint64
+			}{"479: USER_INPUT", 1333},
+			struct {
+				label string
+				toks  uint64
+			}{"482: GENERIC", 77432},
+			struct {
+				label string
+				toks  uint64
+			}{"538: SYSTEM_MESSAGE", 4002},
+		))
+		return b
+	})
+
+	ctxWin := buildProtoMsg(func(b []byte) []byte {
+		b = appendVarintField(b, 1, 141688)
+		b = appendSubMsg(b, 3, breakdown)
+		b = appendVarintField(b, 4, 512000)
+		return b
+	})
+	ctxContainer := appendSubMsg(nil, 10, ctxWin)
+	inner := appendSubMsg(nil, 9, ctxContainer)
+	raw := appendSubMsg(nil, 1, inner)
+
+	gm, err := DecodeGenMetadata(42, raw)
+	if err != nil {
+		t.Fatalf("DecodeGenMetadata error: %v", err)
+	}
+	if gm.ContextUsed != 141688 || gm.ContextLimit != 512000 {
+		t.Fatalf("unexpected context window: used=%d limit=%d", gm.ContextUsed, gm.ContextLimit)
+	}
+
+	got := map[model.ContextSegmentKey]int64{}
+	for _, s := range gm.ContextSegments {
+		got[s.Key] = s.Tokens
+	}
+	want := map[model.ContextSegmentKey]int64{
+		model.ContextSegSystem:     3981 + 439,
+		model.ContextSegTools:      4826 + 10903 + 575,
+		model.ContextSegToolOutput: 77432 + 4002,
+		model.ContextSegMessages:   26302 + 1333,
+		model.ContextSegSummary:    11895,
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Fatalf("segment %s = %d, want %d (all=%+v)", k, got[k], w, gm.ContextSegments)
+		}
 	}
 }

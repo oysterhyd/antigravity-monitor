@@ -2,7 +2,7 @@
   "name": "Antigravity Monitor",
   "slug": "antigravity-monitor",
   "identifier": "com.oysterhyd.antigravity-monitor",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "publisher": "oysterhyd",
   "copyright": "© 2026 oysterhyd",
   "main": "./cmd/monitor",

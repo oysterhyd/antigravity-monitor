@@ -9,6 +9,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/oysterhyd/antigravity-monitor/internal/config"
+	"github.com/oysterhyd/antigravity-monitor/internal/i18n"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
 	appupdater "github.com/oysterhyd/antigravity-monitor/internal/updater"
 )
@@ -79,7 +80,7 @@ func (ctl *Controller) Start() error {
 		IconIsTemplate:  runtime.GOOS == "darwin",
 		Title:           ctl.macTrayTitle(),
 		MonospacedTitle: true,
-		ToolTip:         TrayTooltip(ctl.state.Snapshot, ctl.state.SelectedConvID),
+		ToolTip:         TrayTooltipLang(ctl.state.Snapshot, ctl.state.SelectedConvID, ctl.state.Settings.Language),
 	})
 	if err != nil {
 		return fmt.Errorf("create system tray: %w", err)
@@ -92,46 +93,7 @@ func (ctl *Controller) Start() error {
 		}
 	})
 
-	ctl.followItem = &mygo.MenuItem{
-		ID:      "auto-follow",
-		Label:   "自动跟随活跃对话",
-		Type:    mygo.MenuItemCheckbox,
-		Checked: ctl.state.Settings.AutoFollowActive,
-		Click: func(it *mygo.MenuItem, _ *mygo.Window) {
-			checked := it.IsChecked()
-			ctl.updateSettings(func(s *model.Settings) {
-				s.AutoFollowActive = checked
-			})
-		},
-	}
-
-	ctl.menu = mygo.NewMenu([]*mygo.MenuItem{
-		{
-			ID:    "toggle-flyout",
-			Label: "打开实时弹层",
-			Click: func(*mygo.MenuItem, *mygo.Window) { ctl.ToggleFlyout() },
-		},
-		{
-			ID:    "open-desktop",
-			Label: "打开主面板",
-			Click: func(*mygo.MenuItem, *mygo.Window) { ctl.openDesktop() },
-		},
-		mygo.Separator(),
-		ctl.followItem,
-		appupdater.MenuItem(),
-		mygo.Separator(),
-		{
-			ID:    "quit",
-			Label: "退出 Antigravity Monitor",
-			Click: func(*mygo.MenuItem, *mygo.Window) {
-				if ctl.opts.Callbacks.OnQuit != nil {
-					ctl.opts.Callbacks.OnQuit()
-					return
-				}
-				mygo.App.Quit()
-			},
-		},
-	})
+	ctl.rebuildMenu()
 
 	if runtime.GOOS == "linux" {
 		ctl.tray.SetMenu(ctl.menu)
@@ -139,6 +101,7 @@ func (ctl *Controller) Start() error {
 		ctl.tray.OnClick(ctl.ToggleFlyout)
 		ctl.tray.OnRightClick(func() {
 			ctl.HideFlyout()
+			ctl.rebuildMenu()
 			ctl.tray.SetMenu(ctl.menu)
 			defer ctl.tray.SetMenu(nil)
 			ctl.tray.PopUpMenu()
@@ -218,6 +181,10 @@ func (ctl *Controller) ApplySettings(s model.Settings) {
 		applyThemeSource(s.ThemeMode)
 		if ctl.followItem != nil {
 			ctl.followItem.SetChecked(s.AutoFollowActive)
+		}
+		if runtime.GOOS == "linux" && ctl.tray != nil {
+			ctl.rebuildMenu()
+			ctl.tray.SetMenu(ctl.menu)
 		}
 		ctl.dotMatrix.markDirty()
 		ctl.syncTrayMetadata()
@@ -304,7 +271,12 @@ func (ctl *Controller) updateSettings(mut func(*model.Settings)) {
 	if ctl.followItem != nil {
 		ctl.followItem.SetChecked(next.AutoFollowActive)
 	}
+	if runtime.GOOS == "linux" && ctl.tray != nil {
+		ctl.rebuildMenu()
+		ctl.tray.SetMenu(ctl.menu)
+	}
 	ctl.dotMatrix.markDirty()
+	ctl.syncTrayMetadata()
 	if ctl.flyout != nil {
 		ctl.flyout.Invalidate()
 	}
@@ -331,11 +303,60 @@ func (ctl *Controller) focusAgent(convID, agentID string) {
 	}
 }
 
+func (ctl *Controller) rebuildMenu() {
+	tr := i18n.Get(ctl.state.Settings.Language)
+	ctl.followItem = &mygo.MenuItem{
+		ID:      "auto-follow",
+		Label:   tr.MenuAutoFollow,
+		Type:    mygo.MenuItemCheckbox,
+		Checked: ctl.state.Settings.AutoFollowActive,
+		Click: func(it *mygo.MenuItem, _ *mygo.Window) {
+			checked := it.IsChecked()
+			ctl.updateSettings(func(s *model.Settings) {
+				s.AutoFollowActive = checked
+			})
+		},
+	}
+
+	updItem := appupdater.MenuItem()
+	if updItem != nil && i18n.Normalize(ctl.state.Settings.Language) == i18n.LangEN {
+		updItem.Label = tr.CheckUpdates
+	}
+
+	ctl.menu = mygo.NewMenu([]*mygo.MenuItem{
+		{
+			ID:    "toggle-flyout",
+			Label: tr.MenuToggleFlyout,
+			Click: func(*mygo.MenuItem, *mygo.Window) { ctl.ToggleFlyout() },
+		},
+		{
+			ID:    "open-desktop",
+			Label: tr.MenuOpenDesktop,
+			Click: func(*mygo.MenuItem, *mygo.Window) { ctl.openDesktop() },
+		},
+		mygo.Separator(),
+		ctl.followItem,
+		updItem,
+		mygo.Separator(),
+		{
+			ID:    "quit",
+			Label: tr.MenuQuit,
+			Click: func(*mygo.MenuItem, *mygo.Window) {
+				if ctl.opts.Callbacks.OnQuit != nil {
+					ctl.opts.Callbacks.OnQuit()
+					return
+				}
+				mygo.App.Quit()
+			},
+		},
+	})
+}
+
 func (ctl *Controller) syncTrayMetadata() {
 	if ctl.tray == nil {
 		return
 	}
-	ctl.tray.SetToolTip(TrayTooltip(ctl.state.Snapshot, ctl.state.SelectedConvID))
+	ctl.tray.SetToolTip(TrayTooltipLang(ctl.state.Snapshot, ctl.state.SelectedConvID, ctl.state.Settings.Language))
 	if runtime.GOOS == "darwin" {
 		ctl.tray.SetTitle(ctl.macTrayTitle())
 	}

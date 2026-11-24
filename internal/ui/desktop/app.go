@@ -10,6 +10,7 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
+	"github.com/oysterhyd/antigravity-monitor/internal/i18n"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/anim"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/theme"
@@ -80,6 +81,7 @@ type App struct {
 	pinnedReqSeq        int // 0 = auto-follow latest
 	expandedReqSeq      int
 	hoverChartIdx       int
+	hoverCtxSegIdx      int
 	sessionPopoverOpen  bool
 	settingsPopoverOpen bool
 	liveRunning         bool
@@ -114,9 +116,10 @@ func New(provider model.SnapshotProvider, opts Options) *App {
 		settings:      settings,
 		scope:         scopeAll,
 		metric:        MetricTPS,
-		reqView:       ReqViewCurve,
-		hoverChartIdx: -1,
-		liveRunning:   opts.LiveRunning,
+		reqView:        ReqViewCurve,
+		hoverChartIdx:  -1,
+		hoverCtxSegIdx: -1,
+		liveRunning:    opts.LiveRunning,
 		springs:       anim.NewSpringBank(anim.DefaultSpringConfig()),
 		morpher:       anim.NewCurveMorpher(chartWindowLen),
 		lastSeenSeq:   make(map[string]int, 4),
@@ -226,6 +229,20 @@ func (a *App) SetThemeMode(mode string) {
 	}
 	a.settings.ThemeMode = mode
 	a.emitSettings()
+}
+
+// SetLanguage updates the UI language ("zh" | "en").
+func (a *App) SetLanguage(lang string) {
+	lang = i18n.Normalize(lang)
+	if i18n.Normalize(a.settings.Language) == lang {
+		return
+	}
+	a.settings.Language = lang
+	a.emitSettings()
+}
+
+func (a *App) tr() i18n.Strings {
+	return i18n.Get(a.settings.Language)
 }
 
 // SelectMetric switches the active KPI metric driving the morphing chart.
@@ -612,10 +629,11 @@ func (a *App) snapAllAnimations(conv model.ConversationSnapshot, vm scopeView) {
 }
 
 func (a *App) renderEmptyState(c *ui.Context, pal theme.Palette) {
+	tr := a.tr()
 	c.Root().Background(pal.BackdropFrom)
 	ui.Column(c).Fill().Center().Gap(8).TextColor(pal.Ink1).Children(func() {
 		ui.Text(c, "Antigravity Monitor").FontSize(18).Bold()
-		ui.Text(c, "等待本地会话遥测数据…").FontSize(13).TextColor(pal.Ink2)
+		ui.Text(c, tr.WaitingData).FontSize(13).TextColor(pal.Ink2)
 	})
 }
 
@@ -668,16 +686,16 @@ func robustChartScale(vals []float64) ([]float64, float64) {
 	return out, ceiling
 }
 
-func metricTitle(m MetricKind) string {
+func metricTitle(tr i18n.Strings, m MetricKind) string {
 	switch m {
 	case MetricTTFT:
-		return "首字时长 TTFT · 逐次请求"
+		return tr.MetricTTFT
 	case MetricCache:
-		return "缓存命中率 · 逐次请求"
+		return tr.MetricCache
 	case MetricCost:
-		return "单次费用 · 逐次请求"
+		return tr.MetricCost
 	default:
-		return "纯吐字速度 · 逐次请求"
+		return tr.MetricTPS
 	}
 }
 

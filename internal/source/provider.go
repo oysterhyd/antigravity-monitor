@@ -680,6 +680,7 @@ func (p *Provider) buildAgentRecords(
 				ResponseTokens:   g.ResponseTokens,
 				ContextUsed:      g.ContextUsed,
 				ContextLimit:     g.ContextLimit,
+				ContextSegments:  g.ContextSegments,
 				TTFT:             g.TTFT,
 				TotalDuration:    g.TotalDuration,
 			}
@@ -792,6 +793,29 @@ func (p *Provider) buildAgentNode(id, parentID, name, role string, active bool, 
 		actualTokens := node.ContextCache + node.ContextInput + node.ContextOutput
 		if actualTokens > node.ContextUsed {
 			node.ContextUsed = actualTokens
+		}
+		// Attach latest semantic context breakdown from gen_metadata (f1.f9.f10.f3),
+		// falling back gracefully to exact API Cache / Input / Output buckets if unavailable.
+		for i := len(reqs) - 1; i >= 0; i-- {
+			if len(reqs[i].ContextSegments) > 0 {
+				segs := make([]model.ContextSegment, len(reqs[i].ContextSegments))
+				copy(segs, reqs[i].ContextSegments)
+				node.ContextSegments = segs
+				break
+			}
+		}
+		if len(node.ContextSegments) == 0 && actualTokens > 0 {
+			fallback := make([]model.ContextSegment, 0, 3)
+			if node.ContextCache > 0 {
+				fallback = append(fallback, model.ContextSegment{Key: model.ContextSegCache, Tokens: node.ContextCache})
+			}
+			if node.ContextInput > 0 {
+				fallback = append(fallback, model.ContextSegment{Key: model.ContextSegInput, Tokens: node.ContextInput})
+			}
+			if node.ContextOutput > 0 {
+				fallback = append(fallback, model.ContextSegment{Key: model.ContextSegOutput, Tokens: node.ContextOutput})
+			}
+			node.ContextSegments = fallback
 		}
 		if node.ContextLimit > 0 {
 			r := float64(node.ContextUsed) / float64(node.ContextLimit)

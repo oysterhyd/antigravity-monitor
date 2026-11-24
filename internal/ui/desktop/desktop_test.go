@@ -262,6 +262,61 @@ func TestSessionPopoverManyConversations(t *testing.T) {
 	savePreview(t, tt, "06_light_many_sessions_popover.png")
 }
 
+func TestContextBreakdownAndEnglishToggle(t *testing.T) {
+	p := mock.New(0)
+	defer p.Close()
+
+	app := desktop.New(p, desktop.Options{ThemeMode: theme.ModeLight})
+	defer app.Close()
+
+	tt := ui.NewTester(app.View, 900, 590)
+	tt.Advance(250 * time.Millisecond)
+
+	// Focus root agent to inspect Single-Node 5-segment macOS Storage bar in Chinese.
+	app.FocusAgent(model.RootAgentID)
+	tt.Frame()
+	tt.Advance(250 * time.Millisecond)
+	mustHaveText(t, tt, "系统")
+	mustHaveText(t, tt, "工具返回")
+	mustHaveText(t, tt, "对话")
+	mustHaveText(t, tt, "摘要")
+	savePreview(t, tt, "07_light_single_ctx_breakdown_zh.png")
+
+	// Open settings popover and switch language to English via the EN pill.
+	if err := tt.Click("设置"); err != nil {
+		t.Fatalf("click settings gear: %v", err)
+	}
+	tt.Advance(150 * time.Millisecond)
+	mustHaveText(t, tt, "语言")
+	if err := tt.Click("EN"); err != nil {
+		t.Fatalf("click EN pill: %v", err)
+	}
+	tt.Advance(250 * time.Millisecond)
+	mustHaveText(t, tt, "Settings")
+	mustHaveText(t, tt, "Language")
+	mustHaveText(t, tt, "Context Window")
+	mustHaveText(t, tt, "Tool Out")
+
+	// Close settings and switch to Tree View in English.
+	if err := tt.Click("Done"); err != nil {
+		t.Fatalf("click Done: %v", err)
+	}
+	app.FocusAgent("all")
+	tt.Frame()
+	tt.Advance(250 * time.Millisecond)
+	mustHaveText(t, tt, "Session Tree")
+	mustHaveText(t, tt, "Pure Decode TPS · Per Request")
+	savePreview(t, tt, "08_light_tree_en.png")
+
+	// Also render Dark Mode single-node English view.
+	app.SetThemeMode(theme.ModeDark)
+	app.FocusAgent(model.RootAgentID)
+	tt.Frame()
+	tt.Advance(250 * time.Millisecond)
+	mustHaveText(t, tt, "Main Agent")
+	savePreview(t, tt, "09_dark_single_en.png")
+}
+
 func savePreview(t *testing.T, tt *ui.Tester, filename string) {
 	t.Helper()
 	dir := os.Getenv("DESKTOP_UI_PREVIEW_DIR")

@@ -58,6 +58,13 @@ func Normalize(s model.Settings) model.Settings {
 		s.ThemeMode = "system"
 	}
 
+	switch strings.ToLower(strings.TrimSpace(s.Language)) {
+	case "en", "en-us", "en_us", "english":
+		s.Language = "en"
+	default:
+		s.Language = "zh"
+	}
+
 	if s.ContextWarnThreshold < minWarnFraction {
 		s.ContextWarnThreshold = model.DefaultSettings().ContextWarnThreshold
 	} else if s.ContextWarnThreshold > maxWarnFraction {

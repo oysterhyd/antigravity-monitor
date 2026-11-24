@@ -5,30 +5,53 @@ import "time"
 // RootAgentID is the canonical AgentNode.ID for the root/parent agent of a conversation.
 const RootAgentID = "root"
 
+// ContextSegmentKey identifies a canonical semantic bucket in the context window bar.
+type ContextSegmentKey string
+
+const (
+	ContextSegSystem     ContextSegmentKey = "system"      // System Prompt + Rules + Subagents + Plugins
+	ContextSegTools      ContextSegmentKey = "tools"       // Tools + MCP Tools + Skills
+	ContextSegToolOutput ContextSegmentKey = "tool_output" // Chat Messages: tool outputs / file reads / system messages
+	ContextSegMessages   ContextSegmentKey = "messages"    // Chat Messages: user inputs + planner responses
+	ContextSegSummary    ContextSegmentKey = "summary"     // Chat Messages: compaction checkpoints / summaries
+
+	// Fallback keys when only API token usage is available (no gen_metadata breakdown):
+	ContextSegCache  ContextSegmentKey = "cache"
+	ContextSegInput  ContextSegmentKey = "input"
+	ContextSegOutput ContextSegmentKey = "output"
+)
+
+// ContextSegment represents one colored slice of the context window breakdown bar.
+type ContextSegment struct {
+	Key    ContextSegmentKey `json:"key"`
+	Tokens int64             `json:"tokens"`
+}
+
 // RequestRecord represents a single LLM generation call from gen_metadata (or transcript fallback).
 // This struct is FROZEN during parallel track development.
 type RequestRecord struct {
-	Seq              int           `json:"seq"`
-	GenIndex         int           `json:"gen_index"`
-	StepIndex        int           `json:"step_index"`
-	TurnIndex        int           `json:"turn_index"`
-	InCurrentTurn    bool          `json:"in_current_turn"`
-	ConversationID   string        `json:"conversation_id"`
-	AgentID          string        `json:"agent_id"`
-	AgentName        string        `json:"agent_name"`
-	ModelSlug        string        `json:"model_slug"`
-	ModelDisplay     string        `json:"model_display"`
-	Timestamp        time.Time     `json:"timestamp"`
-	InputTokens      int64         `json:"input_tokens"`
-	CacheReadTokens  int64         `json:"cache_read_tokens"`
-	CacheWriteTokens int64         `json:"cache_write_tokens"`
-	OutputTokens     int64         `json:"output_tokens"`
-	ThinkingTokens   int64         `json:"thinking_tokens"`
-	ResponseTokens   int64         `json:"response_tokens"`
-	ContextUsed      int64         `json:"context_used"`
-	ContextLimit     int64         `json:"context_limit"`
-	TTFT             time.Duration `json:"ttft"`
-	TotalDuration    time.Duration `json:"total_duration"`
+	Seq              int              `json:"seq"`
+	GenIndex         int              `json:"gen_index"`
+	StepIndex        int              `json:"step_index"`
+	TurnIndex        int              `json:"turn_index"`
+	InCurrentTurn    bool             `json:"in_current_turn"`
+	ConversationID   string           `json:"conversation_id"`
+	AgentID          string           `json:"agent_id"`
+	AgentName        string           `json:"agent_name"`
+	ModelSlug        string           `json:"model_slug"`
+	ModelDisplay     string           `json:"model_display"`
+	Timestamp        time.Time        `json:"timestamp"`
+	InputTokens      int64            `json:"input_tokens"`
+	CacheReadTokens  int64            `json:"cache_read_tokens"`
+	CacheWriteTokens int64            `json:"cache_write_tokens"`
+	OutputTokens     int64            `json:"output_tokens"`
+	ThinkingTokens   int64            `json:"thinking_tokens"`
+	ResponseTokens   int64            `json:"response_tokens"`
+	ContextUsed      int64            `json:"context_used"`
+	ContextLimit     int64            `json:"context_limit"`
+	ContextSegments  []ContextSegment `json:"context_segments,omitempty"`
+	TTFT             time.Duration    `json:"ttft"`
+	TotalDuration    time.Duration    `json:"total_duration"`
 	// DecodeTPS is strictly Pure Decode TPS: OutputTokens / max((TotalDuration - TTFT).Seconds(), 0.05).
 	DecodeTPS     float64 `json:"decode_tps"`
 	CacheHitRate  float64 `json:"cache_hit_rate"` // [0.0, 1.0]
@@ -53,19 +76,20 @@ type ScopeMetrics struct {
 
 // AgentNode represents either the root agent or a dispatched subagent within a conversation tree.
 type AgentNode struct {
-	ID            string       `json:"id"`
-	ParentID      string       `json:"parent_id,omitempty"`
-	Name          string       `json:"name"`
-	Role          string       `json:"role,omitempty"`
-	ModelDisplay  string       `json:"model_display"`
-	Active        bool         `json:"active"`
-	ContextUsed   int64        `json:"context_used"`
-	ContextLimit  int64        `json:"context_limit"`
-	ContextCache  int64        `json:"context_cache"`
-	ContextInput  int64        `json:"context_input"`
-	ContextOutput int64        `json:"context_output"`
-	ContextRatio  float64      `json:"context_ratio"` // [0.0, 1.0]
-	Metrics       ScopeMetrics `json:"metrics"`
+	ID              string           `json:"id"`
+	ParentID        string           `json:"parent_id,omitempty"`
+	Name            string           `json:"name"`
+	Role            string           `json:"role,omitempty"`
+	ModelDisplay    string           `json:"model_display"`
+	Active          bool             `json:"active"`
+	ContextUsed     int64            `json:"context_used"`
+	ContextLimit    int64            `json:"context_limit"`
+	ContextCache    int64            `json:"context_cache"`
+	ContextInput    int64            `json:"context_input"`
+	ContextOutput   int64            `json:"context_output"`
+	ContextSegments []ContextSegment `json:"context_segments,omitempty"`
+	ContextRatio    float64          `json:"context_ratio"` // [0.0, 1.0]
+	Metrics         ScopeMetrics     `json:"metrics"`
 }
 
 // PeakContextInfo highlights the agent with the highest context utilization in a conversation tree.
@@ -150,6 +174,7 @@ type Settings struct {
 	ContextWarnThreshold float64 `json:"context_warn_threshold"`
 	AutoFollowActive     bool    `json:"auto_follow_active"`
 	ThemeMode            string  `json:"theme_mode"` // "system" | "light" | "dark"
+	Language             string  `json:"language"`   // "zh" | "en"
 	PricingOverridePath  string  `json:"pricing_override_path,omitempty"`
 }
 
@@ -162,6 +187,7 @@ func DefaultSettings() Settings {
 		ContextWarnThreshold: 0.80,
 		AutoFollowActive:     true,
 		ThemeMode:            "system",
+		Language:             "zh",
 	}
 }
 

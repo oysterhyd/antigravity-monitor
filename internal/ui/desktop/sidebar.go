@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/oysterhyd/antigravity-monitor/internal/i18n"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/theme"
 	appupdater "github.com/oysterhyd/antigravity-monitor/internal/updater"
@@ -41,6 +42,7 @@ func (a *App) renderSidebar(c *ui.Context, pal theme.Palette, snap model.AppSnap
 }
 
 func (a *App) renderSidebarHeader(c *ui.Context, pal theme.Palette, snap model.AppSnapshot, now time.Time) {
+	tr := a.tr()
 	bar := c.TitleBar()
 	topInset := float32(0)
 	if bar.Left > 0 && bar.Bottom > 0 {
@@ -64,12 +66,13 @@ func (a *App) renderSidebarHeader(c *ui.Context, pal theme.Palette, snap model.A
 		// Multi-conversation concurrency badge: ONLY visible when > 1 running conversation.
 		if snap.RunningCount > 1 {
 			pulseAlpha := a.badgePulse.Alpha(now)
+			badgeText := fmt.Sprintf(tr.RunningBadge, snap.RunningCount)
 			badge := ui.ButtonBase(c.Key("concurrent-badge")).
 				Padding(3, 8).
 				Radius(999).
 				Cursor(ui.CursorPointer).
-				Label(fmt.Sprintf("%d 进行中", snap.RunningCount)).
-				Tooltip("切换并行对话")
+				Label(badgeText).
+				Tooltip(tr.SwitchParallel)
 
 			if badge.Hovered() || a.sessionPopoverOpen {
 				badge.Background(pal.SegBg)
@@ -81,7 +84,7 @@ func (a *App) renderSidebarHeader(c *ui.Context, pal theme.Palette, snap model.A
 			badge.Children(func() {
 				ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
 					statusDot(c, "conc-dot", 6, pal.Accent, true)
-					ui.Textf(c, "%d 进行中", snap.RunningCount).
+					ui.Text(c, badgeText).
 						FontSize(11).
 						FontWeight(500).
 						FontFeatures("tnum").
@@ -98,6 +101,7 @@ func (a *App) renderSidebarHeader(c *ui.Context, pal theme.Palette, snap model.A
 }
 
 func (a *App) renderSessionSwitcher(c *ui.Context, pal theme.Palette, snap model.AppSnapshot, conv model.ConversationSnapshot) {
+	tr := a.tr()
 	picker := ui.ButtonBase(c.Key("session-picker")).
 		FillWidth().
 		Padding(8, 12).
@@ -105,7 +109,7 @@ func (a *App) renderSessionSwitcher(c *ui.Context, pal theme.Palette, snap model
 		Cursor(ui.CursorPointer).
 		Border(1, pal.RimEdge).
 		InsetShadow(0, 1, 0, 0, pal.RimTop).
-		Label("切换对话")
+		Label(tr.SwitchSession)
 
 	bg := pal.CardBg
 	if picker.Hovered() || a.sessionPopoverOpen {
@@ -113,9 +117,9 @@ func (a *App) renderSessionSwitcher(c *ui.Context, pal theme.Palette, snap model
 	}
 	picker.Background(bg)
 
-	followText := "自动跟随活跃对话"
+	followText := tr.AutoFollowFull
 	if !a.settings.AutoFollowActive {
-		followText = "已锁定当前对话"
+		followText = tr.PinnedSession
 	}
 
 	picker.Children(func() {
@@ -153,13 +157,13 @@ func (a *App) renderSessionSwitcher(c *ui.Context, pal theme.Palette, snap model
 			BorderColor(pal.Divider).
 			Children(func() {
 				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, "自动跟随活跃").FontSize(11.5).FontWeight(500).TextColor(pal.Ink2).NoWrap()
+					ui.Text(c, tr.AutoFollowShort).FontSize(11.5).FontWeight(500).TextColor(pal.Ink2).NoWrap()
 					if len(snap.Conversations) > 0 {
-						ui.Textf(c, "· %d 个对话", len(snap.Conversations)).
+						ui.Textf(c, tr.ConvCountFmt, len(snap.Conversations)).
 							FontSize(10.5).FontFeatures("tnum").TextColor(pal.Ink3).NoWrap()
 					}
 				})
-				sw := ui.Switch(c.Key("auto-follow-sw"), &a.settings.AutoFollowActive).Label("自动跟随活跃")
+				sw := ui.Switch(c.Key("auto-follow-sw"), &a.settings.AutoFollowActive).Label(tr.AutoFollowShort)
 				if sw.Changed() {
 					a.emitSettings()
 				}
@@ -180,7 +184,7 @@ func (a *App) renderSessionSwitcher(c *ui.Context, pal theme.Palette, snap model
 			Children(func() {
 				ui.Column(c.Key("session-list")).FillWidth().Padding(2, 2, 4, 2).Gap(3).Children(func() {
 					if len(snap.Conversations) == 0 {
-						ui.Text(c, "暂无本地会话记录").FontSize(11).TextColor(pal.Ink3).Padding(10, 8)
+						ui.Text(c, tr.NoLocalSessions).FontSize(11).TextColor(pal.Ink3).Padding(10, 8)
 						return
 					}
 					for _, item := range snap.Conversations {
@@ -199,10 +203,7 @@ func (a *App) renderSessionSwitcher(c *ui.Context, pal theme.Palette, snap model
 							row.Background(pal.SegBg)
 						}
 
-						subLabel := "单 Agent"
-						if len(item.Subagents) > 0 {
-							subLabel = fmt.Sprintf("1 主 · %d 子", len(item.Subagents))
-						}
+						subLabel := tr.SubagentSummary(len(item.Subagents))
 						ctxRatio := item.Root.ContextRatio
 						if item.PeakContext.Ratio > ctxRatio {
 							ctxRatio = item.PeakContext.Ratio
@@ -254,13 +255,14 @@ func (a *App) renderSessionSwitcher(c *ui.Context, pal theme.Palette, snap model
 }
 
 func (a *App) renderCombinedNode(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot) {
+	tr := a.tr()
 	active := a.scope == scopeAll
 	row := ui.ButtonBase(c.Key("node-combined")).
 		FillWidth().
 		Padding(9, 11).
 		Radius(14).
 		Cursor(ui.CursorPointer).
-		Label("整棵会话树")
+		Label(tr.WholeTree)
 
 	if active {
 		row.Background(pal.SegPill).
@@ -280,8 +282,8 @@ func (a *App) renderCombinedNode(c *ui.Context, pal theme.Palette, conv model.Co
 			ui.Row(c).Grow(1).MinWidth(0).Gap(9).AlignItems(ui.Center).Children(func() {
 				ui.Icon(c, theme.IconTree).Size(15, 15).TextColor(iconCol)
 				ui.Column(c).Grow(1).MinWidth(0).Gap(1).Children(func() {
-					ui.Text(c, "整棵会话树").FontSize(12).FontWeight(600).TextColor(pal.Ink1).SingleLine()
-					ui.Text(c, "合并统计").FontSize(10.5).TextColor(pal.Ink3).SingleLine()
+					ui.Text(c, tr.WholeTree).FontSize(12).FontWeight(600).TextColor(pal.Ink1).SingleLine()
+					ui.Text(c, tr.CombinedStats).FontSize(10.5).TextColor(pal.Ink3).SingleLine()
 				})
 			})
 			ui.Text(c, fmtUSD(conv.TreeMetrics.SessionCostUSD)).
@@ -299,15 +301,16 @@ func (a *App) renderCombinedNode(c *ui.Context, pal theme.Palette, conv model.Co
 }
 
 func (a *App) renderAgentTopologyTree(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot) {
+	tr := a.tr()
 	subs := conv.Subagents
-	countLabel := "仅主 Agent"
+	countLabel := tr.RootOnly
 	if len(subs) > 0 {
-		countLabel = fmt.Sprintf("1 主 · %d 子", len(subs))
+		countLabel = fmt.Sprintf(tr.RootAndSubs, len(subs))
 	}
 
 	ui.Column(c.Key("agent-tree-section")).Gap(6).Grow(1).MinHeight(0).Children(func() {
 		ui.Row(c).Padding(0, 6).Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "父子 Agent 结构").FontSize(11).TextColor(pal.Ink3).NoWrap()
+			ui.Text(c, tr.AgentStructure).FontSize(11).TextColor(pal.Ink3).NoWrap()
 			ui.Text(c, countLabel).FontSize(11).FontFeatures("tnum").TextColor(pal.Ink3).NoWrap()
 		})
 
@@ -398,6 +401,8 @@ func (a *App) renderAgentTopologyTree(c *ui.Context, pal theme.Palette, conv mod
 }
 
 func (a *App) renderAgentRow(c *ui.Context, pal theme.Palette, ag model.AgentNode, isRoot bool, selected bool, hot bool) {
+	tr := a.tr()
+	dispName := tr.AgentName(ag.ID, ag.Name)
 	h := float32(subRowH)
 	leftMargin := float32(20)
 	dotSize := float32(6)
@@ -414,7 +419,7 @@ func (a *App) renderAgentRow(c *ui.Context, pal theme.Palette, ag model.AgentNod
 		Padding(0, 10).
 		Radius(14).
 		Cursor(ui.CursorPointer).
-		Label(ag.Name)
+		Label(dispName)
 	if leftMargin > 0 {
 		row.Margin(0, 0, 0, leftMargin)
 	}
@@ -444,7 +449,7 @@ func (a *App) renderAgentRow(c *ui.Context, pal theme.Palette, ag model.AgentNod
 			ui.Row(c).Grow(1).MinWidth(0).Gap(8).AlignItems(ui.Center).Children(func() {
 				statusDot(c, "ad-"+ag.ID, dotSize, dotCol, hot)
 				ui.Column(c).Grow(1).MinWidth(0).Gap(1).Children(func() {
-					ui.Text(c, ag.Name).FontSize(12).FontWeight(titleWeight).TextColor(pal.Ink1).SingleLine()
+					ui.Text(c, dispName).FontSize(12).FontWeight(titleWeight).TextColor(pal.Ink1).SingleLine()
 					ui.Text(c, subLine).FontSize(10.5).FontFeatures("tnum").TextColor(pal.Ink3).SingleLine()
 				})
 			})
@@ -463,6 +468,7 @@ func (a *App) renderAgentRow(c *ui.Context, pal theme.Palette, ag model.AgentNod
 }
 
 func (a *App) renderSidebarFooter(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot) {
+	tr := a.tr()
 	ui.Row(c.Key("sidebar-footer")).
 		Padding(10, 4, 0, 4).
 		BorderWidth(1, 0, 0, 0).
@@ -483,8 +489,8 @@ func (a *App) renderSidebarFooter(c *ui.Context, pal theme.Palette, conv model.C
 				Radius(8).
 				Center().
 				Cursor(ui.CursorPointer).
-				Label("设置").
-				Tooltip("设置")
+				Label(tr.Settings).
+				Tooltip(tr.Settings)
 
 			if gear.Hovered() || a.settingsPopoverOpen {
 				gear.Background(pal.CardHover)
@@ -499,13 +505,13 @@ func (a *App) renderSidebarFooter(c *ui.Context, pal theme.Palette, conv model.C
 
 			// Ultra-minimal Apple Liquid Glass Settings Popover (no redundant TPS mode toggle).
 			ui.PopoverBase(c.Key("settings-popover"), gear, &a.settingsPopoverOpen, func(panel ui.Element) {
-				theme.GlassPopover(panel, pal, 244).Margin(0, 0, 8, 0).Padding(14).Gap(12)
+				theme.GlassPopover(panel, pal, 252).Margin(0, 0, 8, 0).Padding(14).Gap(11)
 
 				ui.Row(c).Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, "设置").FontSize(12.5).FontWeight(600).TextColor(pal.Ink1)
-					doneBtn := ui.ButtonBase(c.Key("settings-done")).Cursor(ui.CursorPointer).Label("完成")
+					ui.Text(c, tr.Settings).FontSize(12.5).FontWeight(600).TextColor(pal.Ink1)
+					doneBtn := ui.ButtonBase(c.Key("settings-done")).Cursor(ui.CursorPointer).Label(tr.Done)
 					doneBtn.Children(func() {
-						ui.Text(c, "完成").FontSize(12).FontWeight(500).TextColor(pal.Accent)
+						ui.Text(c, tr.Done).FontSize(12).FontWeight(500).TextColor(pal.Accent)
 					})
 					if doneBtn.Clicked() {
 						a.settingsPopoverOpen = false
@@ -520,7 +526,7 @@ func (a *App) renderSidebarFooter(c *ui.Context, pal theme.Palette, conv model.C
 				case theme.ModeDark:
 					modeIdx = 2
 				}
-				if theme.SegmentedPill(c, pal, "settings-theme-seg", &modeIdx, []string{"系统", "浅色", "深色"}, theme.SegmentedOptions{
+				if theme.SegmentedPill(c, pal, "settings-theme-seg", &modeIdx, []string{tr.ThemeSystem, tr.ThemeLight, tr.ThemeDark}, theme.SegmentedOptions{
 					Height:   28,
 					FontSize: 11,
 					PaddingX: 6,
@@ -529,18 +535,39 @@ func (a *App) renderSidebarFooter(c *ui.Context, pal theme.Palette, conv model.C
 					a.SetThemeMode(modes[modeIdx])
 				}
 
-				a.renderSettingSwitchRow(c, pal, "set-launch", "开机驻留托盘", &a.settings.LaunchAtLogin, func() {
+				// Language selector row (中文 / English).
+				ui.Row(c.Key("set-lang-row")).Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
+					ui.Text(c, tr.LanguageLabel).FontSize(12).TextColor(pal.Ink2).NoWrap()
+					langIdx := 0
+					if i18n.Normalize(a.settings.Language) == i18n.LangEN {
+						langIdx = 1
+					}
+					if theme.SegmentedPill(c, pal, "settings-lang-seg", &langIdx, []string{"中文", "EN"}, theme.SegmentedOptions{
+						Width:    112,
+						Height:   26,
+						FontSize: 11,
+						PaddingX: 8,
+					}) {
+						if langIdx == 1 {
+							a.SetLanguage(i18n.LangEN)
+						} else {
+							a.SetLanguage(i18n.LangZH)
+						}
+					}
+				})
+
+				a.renderSettingSwitchRow(c, pal, "set-launch", tr.LaunchAtLogin, &a.settings.LaunchAtLogin, func() {
 					a.emitSettings()
 				})
-				a.renderSettingSwitchRow(c, pal, "set-tray", "关闭主窗驻留托盘", &a.settings.KeepInTrayOnClose, func() {
+				a.renderSettingSwitchRow(c, pal, "set-tray", tr.KeepInTray, &a.settings.KeepInTrayOnClose, func() {
 					a.emitSettings()
 				})
-				a.renderSettingSwitchRow(c, pal, "set-ontop", "主窗始终置顶", &a.settings.AlwaysOnTop, func() {
+				a.renderSettingSwitchRow(c, pal, "set-ontop", tr.AlwaysOnTop, &a.settings.AlwaysOnTop, func() {
 					a.toggleAlwaysOnTop()
 				})
 
 				warnEnabled := a.settings.ContextWarnThreshold > 0
-				a.renderSettingSwitchRow(c, pal, "set-warn", "上下文 80% 预警", &warnEnabled, func() {
+				a.renderSettingSwitchRow(c, pal, "set-warn", tr.ContextWarn80, &warnEnabled, func() {
 					if warnEnabled {
 						a.settings.ContextWarnThreshold = 0.80
 					} else {
@@ -561,12 +588,12 @@ func (a *App) renderSidebarFooter(c *ui.Context, pal theme.Palette, conv model.C
 
 					checkBtn := ui.ButtonBase(c.Key("desk-check-updates")).
 						Padding(4, 10).Radius(8).Background(pal.SegBg).Cursor(ui.CursorPointer).
-						Label("检查更新")
+						Label(tr.CheckUpdates)
 					if checkBtn.Hovered() {
 						checkBtn.Background(pal.CardHover)
 					}
 					checkBtn.Children(func() {
-						ui.Text(c, "检查更新").FontSize(11).FontWeight(500).TextColor(pal.Accent).SingleLine()
+						ui.Text(c, tr.CheckUpdates).FontSize(11).FontWeight(500).TextColor(pal.Accent).SingleLine()
 					})
 					if checkBtn.Clicked() {
 						a.settingsPopoverOpen = false

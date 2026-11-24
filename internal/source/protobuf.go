@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/oysterhyd/antigravity-monitor/internal/model"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -34,8 +36,9 @@ type GenMetadata struct {
 	ThinkingTokens   int64
 	ResponseTokens   int64
 
-	ContextUsed  int64
-	ContextLimit int64
+	ContextUsed     int64
+	ContextLimit    int64
+	ContextSegments []model.ContextSegment
 
 	// Empirically verified against steps.metadata timestamps across local Antigravity DBs:
 	//   f1.f11 = TTFT (t_first_token - t_start)
@@ -357,6 +360,17 @@ func decodeContextWindow(b []byte, m *GenMetadata) error {
 			}
 			continue
 		}
+		if num == 3 && typ == protowire.BytesType {
+			val, vn := protowire.ConsumeBytes(b)
+			if vn < 0 {
+				return protowire.ParseError(vn)
+			}
+			b = b[vn:]
+			if segs := decodeContextBreakdown(val); len(segs) > 0 {
+				m.ContextSegments = segs
+			}
+			continue
+		}
 
 		sn, err := skipField(num, typ, b)
 		if err != nil {
@@ -365,6 +379,181 @@ func decodeContextWindow(b []byte, m *GenMetadata) error {
 		b = b[sn:]
 	}
 	return nil
+}
+
+// decodeContextBreakdown decodes Antigravity's native context breakdown (f1.f9.f10.f3)
+// into 5 clean semantic buckets: system, tools, tool_output, messages, and summary.
+func decodeContextBreakdown(b []byte) []model.ContextSegment {
+	var systemToks, toolsToks, toolOutToks, msgToks, summaryToks int64
+
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return nil
+		}
+		b = b[n:]
+
+		if num == 1 && typ == protowire.BytesType {
+			val, vn := protowire.ConsumeBytes(b)
+			if vn < 0 {
+				return nil
+			}
+			b = b[vn:]
+			decodeContextCategory(val, &systemToks, &toolsToks, &toolOutToks, &msgToks, &summaryToks)
+			continue
+		}
+
+		sn, err := skipField(num, typ, b)
+		if err != nil {
+			return nil
+		}
+		b = b[sn:]
+	}
+
+	out := make([]model.ContextSegment, 0, 5)
+	if systemToks > 0 {
+		out = append(out, model.ContextSegment{Key: model.ContextSegSystem, Tokens: systemToks})
+	}
+	if toolsToks > 0 {
+		out = append(out, model.ContextSegment{Key: model.ContextSegTools, Tokens: toolsToks})
+	}
+	if toolOutToks > 0 {
+		out = append(out, model.ContextSegment{Key: model.ContextSegToolOutput, Tokens: toolOutToks})
+	}
+	if msgToks > 0 {
+		out = append(out, model.ContextSegment{Key: model.ContextSegMessages, Tokens: msgToks})
+	}
+	if summaryToks > 0 {
+		out = append(out, model.ContextSegment{Key: model.ContextSegSummary, Tokens: summaryToks})
+	}
+	return out
+}
+
+func decodeContextCategory(b []byte, systemToks, toolsToks, toolOutToks, msgToks, summaryToks *int64) {
+	var (
+		catName    string
+		catTokens  int64
+		subToolOut int64
+		subMsgs    int64
+		subSummary int64
+		subTotal   int64
+	)
+
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return
+		}
+		b = b[n:]
+
+		switch {
+		case num == 1 && typ == protowire.BytesType:
+			val, vn := protowire.ConsumeBytes(b)
+			if vn < 0 {
+				return
+			}
+			b = b[vn:]
+			catName = string(val)
+			continue
+		case num == 4 && typ == protowire.VarintType:
+			v, vn := protowire.ConsumeVarint(b)
+			if vn < 0 {
+				return
+			}
+			b = b[vn:]
+			catTokens = int64(v)
+			continue
+		case num == 5 && typ == protowire.BytesType:
+			val, vn := protowire.ConsumeBytes(b)
+			if vn < 0 {
+				return
+			}
+			b = b[vn:]
+			itemName, itemToks := decodeContextSubItem(val)
+			if itemToks > 0 {
+				subTotal += itemToks
+				kind := itemName
+				if idx := strings.Index(kind, ": "); idx >= 0 {
+					kind = kind[idx+2:]
+				}
+				switch strings.ToUpper(strings.TrimSpace(kind)) {
+				case "CHECKPOINT":
+					subSummary += itemToks
+				case "USER_INPUT", "PLANNER_RESPONSE":
+					subMsgs += itemToks
+				default:
+					// GENERIC (tool outputs / file reads), SYSTEM_MESSAGE, etc.
+					subToolOut += itemToks
+				}
+			}
+			continue
+		}
+
+		sn, err := skipField(num, typ, b)
+		if err != nil {
+			return
+		}
+		b = b[sn:]
+	}
+
+	if catTokens <= 0 && subTotal <= 0 {
+		return
+	}
+
+	switch strings.ToLower(strings.TrimSpace(catName)) {
+	case "chat messages":
+		if subTotal > 0 {
+			*toolOutToks += subToolOut
+			*msgToks += subMsgs
+			*summaryToks += subSummary
+			if catTokens > subTotal {
+				*msgToks += catTokens - subTotal
+			}
+		} else {
+			*msgToks += catTokens
+		}
+	case "tools", "mcp tools", "skills":
+		*toolsToks += catTokens
+	default:
+		// "System Prompt", "Rules", "Subagents", "Plugins", etc.
+		*systemToks += catTokens
+	}
+}
+
+func decodeContextSubItem(b []byte) (string, int64) {
+	var name string
+	var toks int64
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return name, toks
+		}
+		b = b[n:]
+		if num == 1 && typ == protowire.BytesType {
+			val, vn := protowire.ConsumeBytes(b)
+			if vn < 0 {
+				return name, toks
+			}
+			b = b[vn:]
+			name = string(val)
+			continue
+		}
+		if num == 3 && typ == protowire.VarintType {
+			v, vn := protowire.ConsumeVarint(b)
+			if vn < 0 {
+				return name, toks
+			}
+			b = b[vn:]
+			toks = int64(v)
+			continue
+		}
+		sn, err := skipField(num, typ, b)
+		if err != nil {
+			return name, toks
+		}
+		b = b[sn:]
+	}
+	return name, toks
 }
 
 func decodeMirrorBlock(b []byte, m *GenMetadata, hasPrimaryUsage bool) error {

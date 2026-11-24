@@ -10,21 +10,22 @@ import (
 )
 
 func (a *App) renderTelemetryCard(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot, vm scopeView) {
+	tr := a.tr()
 	card := theme.GlassCard(c.Key("telemetry-card"), pal, theme.CardOptions{
 		Radius: 20,
-	}).Padding(16).Gap(12).Grow(1).MinHeight(228)
+	}).Padding(12, 16, 12, 16).Gap(8).Grow(1).MinHeight(148)
 
 	card.Children(func() {
-		// Card Header: dynamic metric heading + spring "曲线 | 逐次" segmented pill.
+		// Card Header: dynamic metric heading + spring "Curve | List" segmented pill.
 		ui.Row(c.Key("telemetry-hdr")).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-			ui.Text(c, metricTitle(a.metric)).
+			ui.Text(c, metricTitle(tr, a.metric)).
 				FontSize(12).
 				FontWeight(600).
 				TextColor(pal.Ink1).
 				SingleLine()
 
 			viewIdx := int(a.reqView)
-			if theme.SegmentedPill(c, pal, "req-view-seg", &viewIdx, []string{"曲线", "逐次"}, theme.SegmentedOptions{
+			if theme.SegmentedPill(c, pal, "req-view-seg", &viewIdx, []string{tr.ViewCurve, tr.ViewList}, theme.SegmentedOptions{
 				Width:    112,
 				Height:   28,
 				FontSize: 11,
@@ -81,16 +82,17 @@ func (a *App) stepInspect(reqs []model.RequestRecord, delta int) {
 }
 
 func (a *App) renderCurvePane(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot, reqs []model.RequestRecord) {
+	tr := a.tr()
 	slice := tailRequests(reqs, chartWindowLen)
 
-	ui.Column(c.Key("pane-curve")).Grow(1).Justify(ui.SpaceBetween).Gap(10).Children(func() {
+	ui.Column(c.Key("pane-curve")).Grow(1).MinHeight(0).Justify(ui.SpaceBetween).Gap(6).Children(func() {
 		// 60fps Morphing Curve Canvas built on ui/chart.
 		plotBox := ui.Box(c.Key("morph-chart-box")).
 			FillWidth().
 			Grow(1).
-			MinHeight(112).
+			MinHeight(68).
 			Cursor(ui.CursorCrosshair).
-			Label(metricTitle(a.metric))
+			Label(metricTitle(tr, a.metric))
 
 		// Pointer hover & click pinning over chart points.
 		if len(slice) > 0 {
@@ -213,7 +215,7 @@ func (a *App) renderCurvePane(c *ui.Context, pal theme.Palette, conv model.Conve
 			})
 		} else {
 			plotBox.Center().Children(func() {
-				ui.Text(c, "暂无请求记录").FontSize(12).TextColor(pal.Ink3)
+				ui.Text(c, tr.NoRequests).FontSize(12).TextColor(pal.Ink3)
 			})
 		}
 
@@ -223,6 +225,7 @@ func (a *App) renderCurvePane(c *ui.Context, pal theme.Palette, conv model.Conve
 }
 
 func (a *App) renderInspectorBar(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot, reqs []model.RequestRecord) {
+	tr := a.tr()
 	req, idx, slice := a.inspectedRequest(reqs)
 
 	ui.Row(c.Key("inspector-bar")).
@@ -234,7 +237,7 @@ func (a *App) renderInspectorBar(c *ui.Context, pal theme.Palette, conv model.Co
 		AlignItems(ui.Center).
 		Gap(10).
 		Children(func() {
-			// Left: ‹ › stepper pill + "#id 节点" + token breakdown.
+			// Left: ‹ › stepper pill + "#id node" + token breakdown.
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).MinWidth(0).Children(func() {
 				ui.Row(c.Key("insp-stepper")).
 					Padding(2).
@@ -249,8 +252,8 @@ func (a *App) renderInspectorBar(c *ui.Context, pal theme.Palette, conv model.Co
 							Center().
 							Cursor(ui.CursorPointer).
 							Disabled(idx <= 0).
-							Label("上一次请求").
-							Tooltip("上一次请求 (←)")
+							Label(tr.PrevRequest).
+							Tooltip(tr.PrevReqTip)
 						if prevBtn.Hovered() && idx > 0 {
 							prevBtn.Background(pal.CardHover)
 						}
@@ -267,8 +270,8 @@ func (a *App) renderInspectorBar(c *ui.Context, pal theme.Palette, conv model.Co
 							Center().
 							Cursor(ui.CursorPointer).
 							Disabled(idx < 0 || idx >= len(slice)-1).
-							Label("下一次请求").
-							Tooltip("下一次请求 (→)")
+							Label(tr.NextRequest).
+							Tooltip(tr.NextReqTip)
 						if nextBtn.Hovered() && idx >= 0 && idx < len(slice)-1 {
 							nextBtn.Background(pal.CardHover)
 						}
@@ -287,6 +290,7 @@ func (a *App) renderInspectorBar(c *ui.Context, pal theme.Palette, conv model.Co
 							agName = ag.Name
 						}
 					}
+					agName = tr.AgentName(req.AgentID, agName)
 					ui.Textf(c, "#%d %s", req.Seq, agName).
 						FontSize(12).
 						FontWeight(600).
@@ -294,10 +298,10 @@ func (a *App) renderInspectorBar(c *ui.Context, pal theme.Palette, conv model.Co
 						TextColor(pal.Ink1).
 						NoWrap()
 
-					ui.Textf(c, "输入 %s · 缓存 %s · 输出 %s",
-						fmtTokensK(req.InputTokens),
-						fmtTokensK(req.CacheReadTokens),
-						fmtTokensK(req.OutputTokens),
+					ui.Textf(c, "%s %s · %s %s · %s %s",
+						tr.TokIn, fmtTokensK(req.InputTokens),
+						tr.TokCache, fmtTokensK(req.CacheReadTokens),
+						tr.TokOut, fmtTokensK(req.OutputTokens),
 					).
 						FontSize(11).
 						FontFeatures("tnum").
@@ -306,10 +310,10 @@ func (a *App) renderInspectorBar(c *ui.Context, pal theme.Palette, conv model.Co
 				}
 			})
 
-			// Right: 命中 · TTFT · TPS · 费用.
+			// Right: Hit · TTFT · TPS · Cost.
 			if idx >= 0 {
 				ui.Row(c).Gap(12).AlignItems(ui.Baseline).Shrink(0).Children(func() {
-					inspMetricPair(c, pal, "命中", fmtPct(req.CacheHitRate*100))
+					inspMetricPair(c, pal, tr.InspHit, fmtPct(req.CacheHitRate*100))
 					inspMetricPair(c, pal, "TTFT", fmtSec(req.TTFT.Seconds()))
 					inspMetricPair(c, pal, "TPS", fmtTPS(req.DecodeTPS))
 					ui.Text(c, fmtUSD(req.CostUSD)).
@@ -331,6 +335,7 @@ func inspMetricPair(c *ui.Context, pal theme.Palette, label, val string) {
 }
 
 func (a *App) renderRequestListPane(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot, reqs []model.RequestRecord) {
+	tr := a.tr()
 	ui.Column(c.Key("pane-list")).Grow(1).MinHeight(0).Gap(4).Children(func() {
 		// Table header.
 		ui.Grid(c.Key("req-list-hdr")).
@@ -339,11 +344,11 @@ func (a *App) renderRequestListPane(c *ui.Context, pal theme.Palette, conv model
 			BorderWidth(0, 0, 1, 0).
 			BorderColor(pal.Divider).
 			Children(func() {
-				ui.Text(c, "请求 / 节点").FontSize(11).TextColor(pal.Ink3)
-				ui.Text(c, "缓存命中").FontSize(11).TextColor(pal.Ink3).TextAlign(ui.End)
+				ui.Text(c, tr.ColReqNode).FontSize(11).TextColor(pal.Ink3)
+				ui.Text(c, tr.ColCacheHit).FontSize(11).TextColor(pal.Ink3).TextAlign(ui.End)
 				ui.Text(c, "TTFT").FontSize(11).TextColor(pal.Ink3).TextAlign(ui.End)
-				ui.Text(c, "吐字 TPS").FontSize(11).TextColor(pal.Ink3).TextAlign(ui.End)
-				ui.Text(c, "费用").FontSize(11).TextColor(pal.Ink3).TextAlign(ui.End)
+				ui.Text(c, tr.ColDecodeTPS).FontSize(11).TextColor(pal.Ink3).TextAlign(ui.End)
+				ui.Text(c, tr.ColCost).FontSize(11).TextColor(pal.Ink3).TextAlign(ui.End)
 			})
 
 		// Scrollable per-request rows (newest first, up to 24).
@@ -351,7 +356,7 @@ func (a *App) renderRequestListPane(c *ui.Context, pal theme.Palette, conv model
 			items := tailRequests(reqs, 24)
 			if len(items) == 0 {
 				ui.Box(c).Padding(24).Center().Children(func() {
-					ui.Text(c, "暂无请求记录").FontSize(12).TextColor(pal.Ink3)
+					ui.Text(c, tr.NoRequests).FontSize(12).TextColor(pal.Ink3)
 				})
 				return
 			}
@@ -367,6 +372,7 @@ func (a *App) renderRequestListPane(c *ui.Context, pal theme.Palette, conv model
 }
 
 func (a *App) renderRequestListRow(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot, r model.RequestRecord, withTopDivider bool) {
+	tr := a.tr()
 	isOpen := a.expandedReqSeq == r.Seq
 
 	agName := r.AgentName
@@ -379,6 +385,7 @@ func (a *App) renderRequestListRow(c *ui.Context, pal theme.Palette, conv model.
 			modelDisplay = ag.ModelDisplay
 		}
 	}
+	agName = tr.AgentName(r.AgentID, agName)
 
 	wrapper := ui.Column(c.Key(fmt.Sprintf("req-item-%d", r.Seq))).FillWidth()
 	if withTopDivider {
@@ -468,10 +475,10 @@ func (a *App) renderRequestListRow(c *ui.Context, pal theme.Palette, conv model.
 				})
 
 				ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-					ui.Textf(c, "缓存 %s · 新增输入 %s · 输出 %s",
-						fmtTokensK(r.CacheReadTokens),
-						fmtTokensK(r.InputTokens),
-						fmtTokensK(r.OutputTokens),
+					ui.Textf(c, "%s %s · %s %s · %s %s",
+						tr.TokCache, fmtTokensK(r.CacheReadTokens),
+						tr.TokNewInput, fmtTokensK(r.InputTokens),
+						tr.TokOut, fmtTokensK(r.OutputTokens),
 					).FontSize(11).FontFeatures("tnum").TextColor(pal.Ink2).SingleLine()
 
 					ui.Text(c, modelDisplay).FontSize(11).TextColor(pal.Ink3).NoWrap()

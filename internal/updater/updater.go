@@ -12,12 +12,15 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/plugins/updater"
 	updaternative "github.com/egoist/mygo/plugins/updater/native"
 )
+
+var registered atomic.Bool
 
 // Register installs mygo's native GPU-rendered Sparkle-style auto-updater plugin
 // (zero WebView) and automatically configures an authenticated GitHub Releases
@@ -31,21 +34,31 @@ func Register(githubRepo string) {
 	mygo.Use(updaternative.New(updater.Options{
 		Interval: 24 * time.Hour,
 	}))
+	registered.Store(true)
 }
 
 // MenuItem returns the native "Check for Updates..." / "检查更新…" menu item.
 func MenuItem() *mygo.MenuItem {
+	if !registered.Load() {
+		return &mygo.MenuItem{ID: "check-updates", Label: "Check for Updates…", Disabled: true}
+	}
 	return updater.MenuItem()
 }
 
 // CheckNow opens the native update window and checks for a newer release immediately.
 func CheckNow() {
+	if !registered.Load() {
+		return
+	}
 	updater.CheckForUpdates()
 }
 
 // AvailableVersion returns the newly discovered version string if one is pending,
 // or "" when up to date or not yet checked.
 func AvailableVersion() string {
+	if !registered.Load() {
+		return ""
+	}
 	return updater.AvailableVersion()
 }
 

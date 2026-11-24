@@ -6,6 +6,7 @@ import (
 
 	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
+	"github.com/oysterhyd/antigravity-monitor/internal/model"
 )
 
 // CardOptions configures a reusable Apple Liquid Glass card.
@@ -333,6 +334,211 @@ func LiquidProgressBar(c *ui.Context, pal Palette, key string, ratio float32, fi
 		}
 	})
 	return bar
+}
+
+// SegmentColor returns the restrained Apple system color for a context breakdown bucket.
+func SegmentColor(pal Palette, key model.ContextSegmentKey) ui.Color {
+	if pal.Dark {
+		switch key {
+		case model.ContextSegSystem, model.ContextSegInput:
+			return ui.Hex("#5E5CE6") // Apple Indigo Dark
+		case model.ContextSegTools:
+			return ui.Hex("#40C8E0") // Apple Teal Dark
+		case model.ContextSegToolOutput, model.ContextSegCache:
+			return ui.Hex("#0A84FF") // Apple Blue Dark
+		case model.ContextSegMessages, model.ContextSegOutput:
+			return ui.Hex("#30D158") // Apple Green Dark
+		case model.ContextSegSummary:
+			return ui.Hex("#FF9F0A") // Apple Amber Dark
+		default:
+			return pal.Ink2
+		}
+	}
+	switch key {
+	case model.ContextSegSystem, model.ContextSegInput:
+		return ui.Hex("#5856D6") // Apple Indigo
+	case model.ContextSegTools:
+		return ui.Hex("#32ADE6") // Apple Teal
+	case model.ContextSegToolOutput, model.ContextSegCache:
+		return ui.Hex("#007AFF") // Apple Blue
+	case model.ContextSegMessages, model.ContextSegOutput:
+		return ui.Hex("#34C759") // Apple Green
+	case model.ContextSegSummary:
+		return ui.Hex("#FF9500") // Apple Amber
+	default:
+		return pal.Ink2
+	}
+}
+
+// SegmentedContextBar draws a macOS-Storage-style multi-color stacked context window bar
+// with smooth spring width interpolation, subtle segment dividers, optional danger ring,
+// and pointer hover segment hit-testing (returning the hovered segment index or -1).
+func SegmentedContextBar(
+	c *ui.Context,
+	pal Palette,
+	key string,
+	totalRatio float32,
+	segments []model.ContextSegment,
+	height float32,
+	opacity float32,
+	shimmer bool,
+	warnBorder bool,
+	highlightIdx int,
+) (ui.Element, int) {
+	clamped := clamp01(totalRatio)
+	if height <= 0 {
+		height = 8
+	}
+	if opacity <= 0 {
+		opacity = 1
+	}
+
+	var segSum int64
+	for _, s := range segments {
+		if s.Tokens > 0 {
+			segSum += s.Tokens
+		}
+	}
+	if segSum <= 0 {
+		fill := pal.Accent
+		if warnBorder {
+			fill = pal.Danger
+		}
+		return LiquidProgressBar(c, pal, key, totalRatio, fill, height, opacity, shimmer), -1
+	}
+
+	bar := ui.Box(c.Key(key)).
+		FillWidth().
+		Height(height).
+		Radius(height / 2).
+		Background(pal.Track).
+		Clip()
+	if warnBorder {
+		bar.Border(1.2, pal.Danger.Alpha(0.75))
+	}
+
+	animRatio := bar.AnimateTo("fill", clamped, ui.Animation{
+		Spring: ui.SpringOptions{Stiffness: 140, Damping: 22},
+	})
+
+	// Compute normalized segment fractions once for both hit-testing and drawing.
+	fracs := make([]float32, len(segments))
+	for i, s := range segments {
+		if s.Tokens > 0 {
+			fracs[i] = float32(s.Tokens) / float32(segSum)
+		}
+	}
+
+	hoveredIdx := -1
+	if px, _, over := bar.PointerPosition(); over && bar.Hovered() {
+		b := bar.Bounds()
+		fillW := b.W * clamp01(animRatio)
+		if fillW > 1 && px >= 0 && px <= fillW {
+			cursor := float32(0)
+			for i, fr := range fracs {
+				if fr <= 0 {
+					continue
+				}
+				sw := fillW * fr
+				if px >= cursor && px <= cursor+sw {
+					hoveredIdx = i
+					break
+				}
+				cursor += sw
+			}
+		}
+	}
+
+	activeHighlight := highlightIdx
+	if hoveredIdx >= 0 {
+		activeHighlight = hoveredIdx
+	}
+
+	colors := make([]ui.Color, len(segments))
+	for i, s := range segments {
+		colors[i] = SegmentColor(pal, s.Key)
+	}
+	sepCol := ui.RGBA(255, 255, 255, 0.72)
+	sheenColor := ui.RGBA(255, 255, 255, 0.34)
+	if pal.Dark {
+		sepCol = ui.RGBA(18, 22, 32, 0.75)
+		sheenColor = ui.RGBA(255, 255, 255, 0.22)
+	}
+
+	bar.Draw(func(p *ui.Painter, r ui.Rect) {
+		fillW := r.W * clamp01(animRatio)
+		if fillW < 1 {
+			return
+		}
+		rad := r.H / 2
+		fillRect := ui.Rect{X: r.X, Y: r.Y, W: fillW, H: r.H}
+
+		p.Clip(fillRect, rad, func() {
+			// Ensure very small non-zero segments remain visible (>= 2.5px) while fitting fillW.
+			widths := make([]float32, len(fracs))
+			var sumW float32
+			for i, fr := range fracs {
+				if fr <= 0 {
+					continue
+				}
+				w := fillW * fr
+				if fillW >= 18 && w < 2.5 {
+					w = 2.5
+				}
+				widths[i] = w
+				sumW += w
+			}
+			scale := float32(1)
+			if sumW > 0 {
+				scale = fillW / sumW
+			}
+
+			x := r.X
+			var dividers []float32
+			for i, w := range widths {
+				if w <= 0 {
+					continue
+				}
+				sw := w * scale
+				segAlpha := opacity
+				if activeHighlight >= 0 {
+					if i == activeHighlight {
+						segAlpha = 1.0
+					} else {
+						segAlpha = opacity * 0.38
+					}
+				}
+				if x > r.X+0.5 {
+					dividers = append(dividers, x)
+				}
+				p.Fill(ui.Rect{X: x, Y: r.Y, W: sw + 0.4, H: r.H}, colors[i].Alpha(segAlpha), 0)
+				x += sw
+			}
+			for _, dx := range dividers {
+				p.Fill(ui.Rect{X: dx - 0.6, Y: r.Y, W: 1.2, H: r.H}, sepCol, 0)
+			}
+
+			if shimmer && fillW > 24 && !p.Preferences().ReduceMotion {
+				p.AnimationFrameRate(30)
+				ms := float64(p.Now().UnixMilli()%3200) / 3200.0
+				if ms < 0.58 {
+					t := float32(ms / 0.58)
+					sweepW := max(fillW*0.42, 28)
+					sx := r.X - sweepW + (fillW+sweepW*1.6)*t
+					p.FillGradient(ui.Rect{X: sx, Y: r.Y, W: sweepW, H: r.H}, ui.LinearGradient{
+						Angle: 90,
+						Stops: []ui.GradientStop{
+							{Color: ui.Transparent, At: 0},
+							{Color: sheenColor, At: 0.5},
+							{Color: ui.Transparent, At: 1},
+						},
+					}, 0)
+				}
+			}
+		})
+	})
+
+	return bar, hoveredIdx
 }
 
 // DrawVibrantLiquidWash paints a luminous translucent Apple Liquid Glass wash

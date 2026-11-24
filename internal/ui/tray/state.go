@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/oysterhyd/antigravity-monitor/internal/i18n"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
 )
 
@@ -240,7 +241,8 @@ func (s *State) HoverSummary(col int) (*model.RequestRecord, string) {
 	if hit <= 0 && (req.InputTokens+req.CacheReadTokens+req.CacheWriteTokens) > 0 {
 		hit = model.ComputeCacheHitRate(req.InputTokens, req.CacheReadTokens, req.CacheWriteTokens)
 	}
-	label := fmt.Sprintf("#%d · 命中 %.0f%% · %.2fs · %.0f t/s",
+	tr := i18n.Get(s.Settings.Language)
+	label := fmt.Sprintf(tr.TrayHoverHitFmt,
 		req.Seq, hit*100, req.TTFT.Seconds(), req.DecodeTPS)
 	return req, label
 }
@@ -272,15 +274,21 @@ func TrayTitle(snap model.AppSnapshot, selectedConvID string) string {
 
 // TrayTooltip formats a crisp tooltip for Windows/Linux notification area hover.
 func TrayTooltip(snap model.AppSnapshot, selectedConvID string) string {
+	return TrayTooltipLang(snap, selectedConvID, i18n.LangZH)
+}
+
+// TrayTooltipLang formats a localized tooltip for Windows/Linux notification area hover.
+func TrayTooltipLang(snap model.AppSnapshot, selectedConvID, lang string) string {
+	tr := i18n.Get(lang)
 	conv, ok := snap.FindConversation(selectedConvID)
 	if !ok {
-		return "Antigravity Monitor — 等待活跃会话"
+		return tr.TrayTooltipWaiting
 	}
 	tps := conv.TreeMetrics.WeightedDecodeTPS
 	if conv.TreeMetrics.LatestRequest != nil && conv.TreeMetrics.LatestRequest.DecodeTPS > 0 {
 		tps = conv.TreeMetrics.LatestRequest.DecodeTPS
 	}
-	return fmt.Sprintf("Antigravity Monitor · %s\n上下文 %.1f%% · 本轮 %s · %.0f t/s",
+	return fmt.Sprintf(tr.TrayTooltipFmt,
 		conv.Title,
 		conv.Root.ContextRatio*100,
 		FormatUSD(conv.TreeMetrics.TurnCostUSD),

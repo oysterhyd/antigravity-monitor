@@ -276,19 +276,20 @@ func (p *Provider) buildSnapshotLocked() model.AppSnapshot {
 				ratio = float64(used) / float64(ag.ctxLimit)
 			}
 			node := model.AgentNode{
-				ID:            ag.id,
-				ParentID:      ag.parentID,
-				Name:          ag.name,
-				Role:          ag.role,
-				ModelDisplay:  ag.modelDisplay,
-				Active:        c.running && c.activeAgentID == ag.id,
-				ContextUsed:   used,
-				ContextLimit:  ag.ctxLimit,
-				ContextCache:  ag.ctxCache,
-				ContextInput:  ag.ctxInput,
-				ContextOutput: ag.ctxOutput,
-				ContextRatio:  ratio,
-				Metrics:       model.AggregateScope(byAgent[ag.id]),
+				ID:              ag.id,
+				ParentID:        ag.parentID,
+				Name:            ag.name,
+				Role:            ag.role,
+				ModelDisplay:    ag.modelDisplay,
+				Active:          c.running && c.activeAgentID == ag.id,
+				ContextUsed:     used,
+				ContextLimit:    ag.ctxLimit,
+				ContextCache:    ag.ctxCache,
+				ContextInput:    ag.ctxInput,
+				ContextOutput:   ag.ctxOutput,
+				ContextSegments: mockContextSegments(used, idx == 0),
+				ContextRatio:    ratio,
+				Metrics:         model.AggregateScope(byAgent[ag.id]),
 			}
 			if idx == 0 {
 				rootNode = node
@@ -426,4 +427,31 @@ func (p *Provider) seedOne(conv *simConv, inTurn bool) {
 		CostUSD:         cost,
 		CacheSavedUSD:   saved,
 	})
+}
+
+func mockContextSegments(total int64, isRoot bool) []model.ContextSegment {
+	if total <= 0 {
+		return nil
+	}
+	sys := int64(float64(total) * 0.14)
+	tools := int64(float64(total) * 0.19)
+	toolOut := int64(float64(total) * 0.42)
+	summary := int64(0)
+	if isRoot && total > 35000 {
+		summary = int64(float64(total) * 0.08)
+	}
+	msgs := total - sys - tools - toolOut - summary
+	if msgs < 0 {
+		msgs = 0
+	}
+	segs := []model.ContextSegment{
+		{Key: model.ContextSegSystem, Tokens: sys},
+		{Key: model.ContextSegTools, Tokens: tools},
+		{Key: model.ContextSegToolOutput, Tokens: toolOut},
+		{Key: model.ContextSegMessages, Tokens: msgs},
+	}
+	if summary > 0 {
+		segs = append(segs, model.ContextSegment{Key: model.ContextSegSummary, Tokens: summary})
+	}
+	return segs
 }

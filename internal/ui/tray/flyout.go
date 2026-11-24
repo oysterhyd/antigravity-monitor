@@ -8,7 +8,9 @@ import (
 
 	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
+	"github.com/oysterhyd/antigravity-monitor/internal/i18n"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
+	"github.com/oysterhyd/antigravity-monitor/internal/ui/theme"
 	appupdater "github.com/oysterhyd/antigravity-monitor/internal/updater"
 )
 
@@ -90,6 +92,7 @@ func (ctl *Controller) buildView(c *ui.Context) {
 
 func (ctl *Controller) renderSegmentedTabs(c *ui.Context, pal palette) {
 	st := ctl.state
+	tr := i18n.Get(st.Settings.Language)
 	seg := ui.Box(c.Key("tray-seg")).AlignSelf(ui.Stretch).Height(32).Radius(16).
 		Background(pal.SegBg).Padding(3)
 
@@ -109,7 +112,7 @@ func (ctl *Controller) renderSegmentedTabs(c *ui.Context, pal palette) {
 
 	seg.Children(func() {
 		ui.Row(c).Fill().AlignItems(ui.Center).Children(func() {
-			for i, label := range TabLabels {
+			for i, label := range tr.TrayTabs {
 				tab := Tab(i)
 				active := st.Tab == tab
 				col := pal.Ink2
@@ -135,22 +138,23 @@ func (ctl *Controller) renderSegmentedTabs(c *ui.Context, pal palette) {
 
 func (ctl *Controller) renderHeader(c *ui.Context, pal palette, conv model.ConversationSnapshot, hasConv bool) {
 	st := ctl.state
+	tr := i18n.Get(st.Settings.Language)
 
 	var title string
 	var ic *ui.SVG
 	switch st.Tab {
 	case TabPerf:
-		title = "速率与缓存"
+		title = tr.TrayTitlePerf
 		ic = iconPerf
 	case TabAgents:
-		title = "父子 Agent 树"
+		title = tr.TrayTitleAgents
 		ic = iconTree
 	default:
-		title = "实时概览"
+		title = tr.TrayTitleOverview
 		ic = iconBolt
 	}
 
-	convTitle := "无活跃会话"
+	convTitle := tr.NoActiveSession
 	if hasConv && conv.Title != "" {
 		convTitle = conv.Title
 	}
@@ -169,7 +173,7 @@ func (ctl *Controller) renderHeader(c *ui.Context, pal palette, conv model.Conve
 		btnBg := pal.SegBg
 		convAnchor = ui.ButtonBase(c.Key("conv-switcher")).
 			Padding(4, 9).Radius(12).Background(btnBg).Cursor(ui.CursorPointer).
-			Label("切换会话")
+			Label(tr.SwitchSession)
 		if convAnchor.Hovered() || st.SessionMenuOpen {
 			convAnchor.Background(pal.CardHover)
 		}
@@ -248,8 +252,8 @@ func (ctl *Controller) renderHeader(c *ui.Context, pal palette, conv model.Conve
 						// Auto-follow toggle header
 						autoFollow := st.Settings.AutoFollowActive
 						ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Padding(2, 6, 6, 6).Children(func() {
-							ui.Text(c, "自动跟随活跃").FontSize(11).FontWeight(500).TextColor(pal.Ink2)
-							sw := ui.Switch(c.Key("pop-autofollow"), &autoFollow).Label("自动跟随活跃")
+							ui.Text(c, tr.AutoFollowShort).FontSize(11).FontWeight(500).TextColor(pal.Ink2)
+							sw := ui.Switch(c.Key("pop-autofollow"), &autoFollow).Label(tr.AutoFollowShort)
 							if sw.Changed() {
 								ctl.updateSettings(func(s *model.Settings) {
 									s.AutoFollowActive = autoFollow
@@ -259,7 +263,7 @@ func (ctl *Controller) renderHeader(c *ui.Context, pal palette, conv model.Conve
 						ui.Box(c).AlignSelf(ui.Stretch).Height(1).Background(pal.Divider)
 
 						if len(st.Snapshot.Conversations) == 0 {
-							ui.Text(c, "暂无本地会话记录").FontSize(11).TextColor(pal.Ink3).Padding(8, 6)
+							ui.Text(c, tr.NoLocalSessions).FontSize(11).TextColor(pal.Ink3).Padding(8, 6)
 							return
 						}
 
@@ -276,15 +280,11 @@ func (ctl *Controller) renderHeader(c *ui.Context, pal palette, conv model.Conve
 										row.Background(pal.SegBg)
 									}
 
-									subsN := len(item.Subagents)
 									ctxRatio := item.Root.ContextRatio
 									if item.PeakContext.Ratio > ctxRatio {
 										ctxRatio = item.PeakContext.Ratio
 									}
-									subInfo := fmt.Sprintf("单 Agent · Ctx %.0f%%", ctxRatio*100)
-									if subsN > 0 {
-										subInfo = fmt.Sprintf("1 主 · %d 子 · Ctx %.0f%%", subsN, ctxRatio*100)
-									}
+									subInfo := fmt.Sprintf("%s · Ctx %.0f%%", tr.SubagentSummary(len(item.Subagents)), ctxRatio*100)
 									statusCol := pal.Ink3.Alpha(0.45)
 									if selected || item.Running {
 										statusCol = pal.Accent
@@ -328,6 +328,7 @@ func (ctl *Controller) renderHeader(c *ui.Context, pal palette, conv model.Conve
 
 func (ctl *Controller) renderHeroPair(c *ui.Context, pal palette, conv model.ConversationSnapshot, hasConv bool) {
 	st := ctl.state
+	tr := i18n.Get(st.Settings.Language)
 
 	var (
 		lbl1, sub1 string
@@ -350,15 +351,15 @@ func (ctl *Controller) renderHeroPair(c *ui.Context, pal palette, conv model.Con
 
 	switch st.Tab {
 	case TabPerf:
-		lbl1 = "吐字速度"
+		lbl1 = tr.TrayHeroTPS
 		target1 = lastTPS
 		fmt1 = FormatTPS
-		sub1 = fmt.Sprintf("均 %.0f", conv.TreeMetrics.WeightedDecodeTPS)
+		sub1 = fmt.Sprintf(tr.TrayAvgShort, fmt.Sprintf("%.0f", conv.TreeMetrics.WeightedDecodeTPS))
 
-		lbl2 = "首字 TTFT"
+		lbl2 = tr.TrayHeroTTFT
 		target2 = lastTTFT
 		fmt2 = func(v float64) string { return fmt.Sprintf("%.2fs", max(0, v)) }
-		sub2 = fmt.Sprintf("均 %.2fs", conv.TreeMetrics.AvgTTFT.Seconds())
+		sub2 = fmt.Sprintf(tr.TrayAvgShort, fmt.Sprintf("%.2fs", conv.TreeMetrics.AvgTTFT.Seconds()))
 
 	case TabAgents:
 		rootCost := conv.Root.Metrics.SessionCostUSD
@@ -369,23 +370,23 @@ func (ctl *Controller) renderHeroPair(c *ui.Context, pal palette, conv model.Con
 			rootShare = (rootCost / totalCost) * 100
 		}
 
-		lbl1 = "主 Agent"
+		lbl1 = tr.MainAgent
 		target1 = rootCost
 		fmt1 = FormatUSD
 		sub1 = fmt.Sprintf("%.0f%%", rootShare)
 
-		lbl2 = "子 Agent 合计"
+		lbl2 = tr.TrayHeroSubCost
 		target2 = subCost
 		fmt2 = FormatUSD
-		sub2 = fmt.Sprintf("总 %s", FormatUSD(totalCost))
+		sub2 = fmt.Sprintf(tr.TrayTotalShort, FormatUSD(totalCost))
 
 	default:
-		lbl1 = "本轮费用"
+		lbl1 = tr.TrayHeroTurnCost
 		target1 = conv.TreeMetrics.TurnCostUSD
 		fmt1 = FormatUSD
 		sub1 = fmt.Sprintf("/ %s", FormatUSD(conv.TreeMetrics.SessionCostUSD))
 
-		lbl2 = "吐字速度"
+		lbl2 = tr.TrayHeroTPS
 		target2 = lastTPS
 		fmt2 = FormatTPS
 		sub2 = "t/s"
@@ -452,20 +453,26 @@ func (ctl *Controller) renderDotMatrixBlock(c *ui.Context, pal palette) {
 
 func (ctl *Controller) renderMiddleSection(c *ui.Context, pal palette, conv model.ConversationSnapshot, hasConv bool) {
 	st := ctl.state
+	tr := i18n.Get(st.Settings.Language)
+	themePal := theme.LightPalette()
+	if pal.Dark {
+		themePal = theme.DarkPalette()
+	}
+
 	ui.Column(c.Key("tray-mid")).AlignSelf(ui.Stretch).Gap(8).Children(func() {
 		switch st.Tab {
 		case TabPerf:
-			ui.Text(c, "缓存命中（单次 vs 总计）").FontSize(11).FontWeight(500).TextColor(pal.Ink3)
+			ui.Text(c, tr.TrayCacheSection).FontSize(11).FontWeight(500).TextColor(pal.Ink3)
 			lastHit := 0.0
 			if hasConv && conv.TreeMetrics.LatestRequest != nil {
 				lastHit = conv.TreeMetrics.LatestRequest.CacheHitRate
 			}
 			totalHit := conv.TreeMetrics.WeightedCacheHitRate
-			renderLabeledBar(c, "perf-last-hit", pal, "最新单次", FormatPct(lastHit), lastHit, pal.Accent, pal.Ink1, pal.Ink1, nil)
-			renderLabeledBar(c, "perf-total-hit", pal, "会话总计", FormatPct(totalHit), totalHit, pal.Ink2, pal.Ink2, pal.Ink2, nil)
+			renderLabeledBar(c, "perf-last-hit", pal, tr.TrayLatestSingle, FormatPct(lastHit), lastHit, pal.Accent, pal.Ink1, pal.Ink1, nil)
+			renderLabeledBar(c, "perf-total-hit", pal, tr.TraySessionTotal, FormatPct(totalHit), totalHit, pal.Ink2, pal.Ink2, pal.Ink2, nil)
 
 		case TabAgents:
-			ui.Text(c, "费用结构（主 vs 子）").FontSize(11).FontWeight(500).TextColor(pal.Ink3)
+			ui.Text(c, tr.TrayCostSplit).FontSize(11).FontWeight(500).TextColor(pal.Ink3)
 			rootRatio := 1.0
 			if hasConv && conv.TreeMetrics.SessionCostUSD > 0 {
 				rootRatio = conv.Root.Metrics.SessionCostUSD / conv.TreeMetrics.SessionCostUSD
@@ -494,33 +501,71 @@ func (ctl *Controller) renderMiddleSection(c *ui.Context, pal palette, conv mode
 			})
 
 		default:
-			ui.Text(c, "上下文窗口").FontSize(11).FontWeight(500).TextColor(pal.Ink3)
+			ui.Text(c, tr.ContextWindow).FontSize(11).FontWeight(500).TextColor(pal.Ink3)
 			if !hasConv {
-				ui.Text(c, "等待会话数据…").FontSize(12).TextColor(pal.Ink3)
+				ui.Text(c, tr.WaitingSession).FontSize(12).TextColor(pal.Ink3)
 				return
 			}
 			agents := conv.AllAgents()
 			limit := min(2, len(agents))
 			for i := 0; i < limit; i++ {
 				ag := agents[i]
-				fill := pal.Accent
-				if i > 0 {
-					fill = pal.Amber
-				}
-				switch ContextWarn(ag.ContextRatio, st.Settings.ContextWarnThreshold) {
-				case ContextWarning:
-					fill = pal.Danger
-				case ContextElevated:
-					fill = pal.Amber
+				warnLvl := ContextWarn(ag.ContextRatio, st.Settings.ContextWarnThreshold)
+				rightCol := pal.Ink2
+				if warnLvl == ContextWarning {
+					rightCol = pal.Danger
 				}
 				rightText := fmt.Sprintf("%s / %s", FormatTokensK(ag.ContextUsed), FormatTokensK(ag.ContextLimit))
 				onClick := func() {
 					ctl.focusAgent(conv.ID, ag.ID)
 				}
-				renderLabeledBar(c, "ctx-"+ag.ID, pal, ag.Name, rightText, ag.ContextRatio, fill, pal.Ink1, pal.Ink2, onClick)
+				renderSegmentedTrayBar(
+					c, "ctx-"+ag.ID, pal, themePal,
+					tr.AgentName(ag.ID, ag.Name), rightText,
+					ag.ContextRatio, ag.ContextSegments,
+					warnLvl == ContextWarning,
+					pal.Ink1, rightCol, onClick,
+				)
+			}
+			// Compact color legend for root agent's context composition.
+			if len(conv.Root.ContextSegments) > 0 {
+				segs := conv.Root.ContextSegments
+				if len(segs) > 4 {
+					segs = segs[:4]
+				}
+				ui.Row(c.Key("tray-ctx-legend")).AlignSelf(ui.Stretch).Gap(8).AlignItems(ui.Center).Children(func() {
+					for _, seg := range segs {
+						ui.Row(c).Gap(3).AlignItems(ui.Center).Children(func() {
+							ui.Box(c).Size(5.5, 5.5).Radius(2.75).Background(theme.SegmentColor(themePal, seg.Key)).Shrink(0)
+							ui.Textf(c, "%s %s", tr.SegmentLabel(seg.Key), FormatTokensK(seg.Tokens)).
+								FontSize(9.5).FontFeatures("tnum").TextColor(pal.Ink3).SingleLine()
+						})
+					}
+				})
 			}
 		}
 	})
+}
+
+func renderSegmentedTrayBar(
+	c *ui.Context, key string, pal palette, themePal theme.Palette,
+	left, right string, ratio float64, segs []model.ContextSegment, warn bool,
+	leftCol, rightCol ui.Color, onClick func(),
+) {
+	wrap := ui.Column(c.Key(key)).AlignSelf(ui.Stretch).Gap(5)
+	if onClick != nil {
+		wrap.Cursor(ui.CursorPointer)
+	}
+	wrap.Children(func() {
+		ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
+			ui.Text(c, TruncateRunes(left, 20)).FontSize(12).FontWeight(500).TextColor(leftCol).SingleLine()
+			ui.Text(c, right).FontSize(12).TextColor(rightCol).FontFeatures("tnum").SingleLine()
+		})
+		theme.SegmentedContextBar(c, themePal, key+"-seg", float32(ratio), segs, 6.5, 1.0, false, warn, -1)
+	})
+	if onClick != nil && wrap.Clicked() {
+		onClick()
+	}
 }
 
 func renderLabeledBar(c *ui.Context, key string, pal palette, left, right string, ratio float64, barColor, leftCol, rightCol ui.Color, onClick func()) {
@@ -551,12 +596,13 @@ func renderLabeledBar(c *ui.Context, key string, pal palette, left, right string
 
 func (ctl *Controller) renderBottomSection(c *ui.Context, pal palette, conv model.ConversationSnapshot, hasConv bool) {
 	st := ctl.state
+	tr := i18n.Get(st.Settings.Language)
 	ui.Column(c.Key("tray-bot")).AlignSelf(ui.Stretch).Gap(5).Children(func() {
 		switch st.Tab {
 		case TabPerf:
-			ui.Text(c, "最近请求（命中 · TTFT · TPS）").FontSize(11).FontWeight(500).TextColor(pal.Ink3)
+			ui.Text(c, tr.TrayRecentReqs).FontSize(11).FontWeight(500).TextColor(pal.Ink3)
 			if !hasConv || len(conv.Requests) == 0 {
-				ui.Text(c, "暂无请求记录").FontSize(12).TextColor(pal.Ink3).Padding(4, 2)
+				ui.Text(c, tr.NoRequests).FontSize(12).TextColor(pal.Ink3).Padding(4, 2)
 				return
 			}
 			n := len(conv.Requests)
@@ -569,6 +615,7 @@ func (ctl *Controller) renderBottomSection(c *ui.Context, pal palette, conv mode
 						agName = ag.Name
 					}
 				}
+				agName = tr.AgentName(r.AgentID, agName)
 				hit := r.CacheHitRate
 				if hit <= 0 && (r.InputTokens+r.CacheReadTokens+r.CacheWriteTokens) > 0 {
 					hit = model.ComputeCacheHitRate(r.InputTokens, r.CacheReadTokens, r.CacheWriteTokens)
@@ -587,9 +634,9 @@ func (ctl *Controller) renderBottomSection(c *ui.Context, pal palette, conv mode
 			}
 
 		case TabAgents:
-			ui.Text(c, "节点明细（点击联动主窗）").FontSize(11).FontWeight(500).TextColor(pal.Ink3)
+			ui.Text(c, tr.TrayAgentDetails).FontSize(11).FontWeight(500).TextColor(pal.Ink3)
 			if !hasConv {
-				ui.Text(c, "暂无节点").FontSize(12).TextColor(pal.Ink3).Padding(4, 2)
+				ui.Text(c, tr.TrayNoNodes).FontSize(12).TextColor(pal.Ink3).Padding(4, 2)
 				return
 			}
 			agents := conv.AllAgents()
@@ -610,9 +657,10 @@ func (ctl *Controller) renderBottomSection(c *ui.Context, pal palette, conv mode
 					prefix = "└ "
 					leftPad = 10
 				}
+				dispName := tr.AgentName(ag.ID, ag.Name)
 				row.Children(func() {
 					ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
-						ui.Text(c, prefix+TruncateRunes(ag.Name, 18)).
+						ui.Text(c, prefix+TruncateRunes(dispName, 18)).
 							Padding(0, 0, 0, leftPad).
 							FontSize(12).FontWeight(weight).TextColor(nameCol).SingleLine()
 						ui.Row(c).AlignItems(ui.Center).Gap(4).Children(func() {
@@ -629,7 +677,7 @@ func (ctl *Controller) renderBottomSection(c *ui.Context, pal palette, conv mode
 			}
 
 		default:
-			ui.Text(c, "实时指标（单次 / 总计）").FontSize(11).FontWeight(500).TextColor(pal.Ink3)
+			ui.Text(c, tr.TrayLiveMetrics).FontSize(11).FontWeight(500).TextColor(pal.Ink3)
 			lastHit := 0.0
 			var lastTTFT string
 			if hasConv && conv.TreeMetrics.LatestRequest != nil {
@@ -638,8 +686,8 @@ func (ctl *Controller) renderBottomSection(c *ui.Context, pal palette, conv mode
 			} else {
 				lastTTFT = "0.00s"
 			}
-			renderMetricPairRow(c, "ov-cache", pal, "缓存命中率", FormatPct(lastHit), "/ "+FormatPct(conv.TreeMetrics.WeightedCacheHitRate))
-			renderMetricPairRow(c, "ov-ttft", pal, "首字时长 TTFT", lastTTFT, "/ "+FormatSec(conv.TreeMetrics.AvgTTFT))
+			renderMetricPairRow(c, "ov-cache", pal, tr.TrayCacheHitRate, FormatPct(lastHit), "/ "+FormatPct(conv.TreeMetrics.WeightedCacheHitRate))
+			renderMetricPairRow(c, "ov-ttft", pal, tr.TrayTTFTLabel, lastTTFT, "/ "+FormatSec(conv.TreeMetrics.AvgTTFT))
 		}
 	})
 }
@@ -656,6 +704,7 @@ func renderMetricPairRow(c *ui.Context, key string, pal palette, label, primary,
 
 func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 	st := ctl.state
+	tr := i18n.Get(st.Settings.Language)
 
 	ui.Box(c).AlignSelf(ui.Stretch).Height(1).Background(pal.Divider)
 
@@ -663,12 +712,12 @@ func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 	ui.Row(c.Key("tray-footer")).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
 		openBtn := ui.ButtonBase(c.Key("open-desktop-btn")).
 			Padding(6, 14).Radius(14).Background(pal.SegBg).Cursor(ui.CursorPointer).
-			Label("打开主面板")
+			Label(tr.TrayOpenDesktop)
 		if openBtn.Hovered() {
 			openBtn.Background(pal.CardHover)
 		}
 		openBtn.Children(func() {
-			ui.Text(c, "打开主面板").FontSize(12).FontWeight(500).TextColor(pal.Ink1).SingleLine()
+			ui.Text(c, tr.TrayOpenDesktop).FontSize(12).FontWeight(500).TextColor(pal.Ink1).SingleLine()
 		})
 		if openBtn.Clicked() {
 			ctl.openDesktop()
@@ -676,7 +725,7 @@ func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 
 		gearAnchor = ui.ButtonBase(c.Key("settings-gear-btn")).
 			Size(28, 28).Radius(14).Center().Cursor(ui.CursorPointer).
-			Label("设置").Tooltip("设置")
+			Label(tr.Settings).Tooltip(tr.Settings)
 		if gearAnchor.Hovered() || st.SettingsOpen {
 			gearAnchor.Background(pal.SegBg)
 		}
@@ -699,34 +748,34 @@ func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 				edge = ui.RGBA(255, 255, 255, 0.14)
 			}
 			panel.AttachTo(gearAnchor, ui.AnchorTopEnd, ui.AnchorBottomEnd).
-				Margin(0, 0, 8, 0).Width(246).Radius(18).Padding(14).
+				Margin(0, 0, 8, 0).Width(252).Radius(18).Padding(14).
 				Background(pal.PopoverBg).
 				Border(1, edge).
 				InsetShadow(0, 1, 0, 0, pal.RimTop).
 				Shadow(0, 14, 34, 0, pal.Shadow).
 				Children(func() {
-					ui.Column(c).Gap(10).Children(func() {
+					ui.Column(c).Gap(9).Children(func() {
 						ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
-							ui.Text(c, "设置").FontSize(12).FontWeight(600).TextColor(pal.Ink1)
+							ui.Text(c, tr.Settings).FontSize(12).FontWeight(600).TextColor(pal.Ink1)
 							done := ui.ButtonBase(c.Key("settings-done")).Padding(2, 4).Radius(6).Cursor(ui.CursorPointer).
 								Children(func() {
-									ui.Text(c, "完成").FontSize(12).FontWeight(500).TextColor(pal.Accent)
+									ui.Text(c, tr.Done).FontSize(12).FontWeight(500).TextColor(pal.Accent)
 								})
 							if done.Clicked() {
 								st.SettingsOpen = false
 							}
 						})
 
-						ctl.renderSettingSwitch(c, pal, "set-launch", "开机驻留托盘", st.Settings.LaunchAtLogin, func(v bool) {
+						ctl.renderSettingSwitch(c, pal, "set-launch", tr.LaunchAtLogin, st.Settings.LaunchAtLogin, func(v bool) {
 							ctl.updateSettings(func(s *model.Settings) { s.LaunchAtLogin = v })
 						})
-						ctl.renderSettingSwitch(c, pal, "set-keep-tray", "关闭退守托盘", st.Settings.KeepInTrayOnClose, func(v bool) {
+						ctl.renderSettingSwitch(c, pal, "set-keep-tray", tr.KeepInTrayShort, st.Settings.KeepInTrayOnClose, func(v bool) {
 							ctl.updateSettings(func(s *model.Settings) { s.KeepInTrayOnClose = v })
 						})
-						ctl.renderSettingSwitch(c, pal, "set-top", "主窗始终置顶", st.Settings.AlwaysOnTop, func(v bool) {
+						ctl.renderSettingSwitch(c, pal, "set-top", tr.AlwaysOnTop, st.Settings.AlwaysOnTop, func(v bool) {
 							ctl.updateSettings(func(s *model.Settings) { s.AlwaysOnTop = v })
 						})
-						ctl.renderSettingSwitch(c, pal, "set-warn", "上下文 80% 预警", st.Settings.ContextWarnThreshold > 0, func(v bool) {
+						ctl.renderSettingSwitch(c, pal, "set-warn", tr.ContextWarn80, st.Settings.ContextWarnThreshold > 0, func(v bool) {
 							ctl.updateSettings(func(s *model.Settings) {
 								if v {
 									s.ContextWarnThreshold = 0.80
@@ -735,7 +784,7 @@ func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 								}
 							})
 						})
-						ctl.renderSettingSwitch(c, pal, "set-follow", "自动跟随活跃", st.Settings.AutoFollowActive, func(v bool) {
+						ctl.renderSettingSwitch(c, pal, "set-follow", tr.AutoFollowShort, st.Settings.AutoFollowActive, func(v bool) {
 							ctl.updateSettings(func(s *model.Settings) { s.AutoFollowActive = v })
 						})
 
@@ -743,15 +792,15 @@ func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 
 						// Compact Theme Mode selector (System / Light / Dark)
 						ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
-							ui.Text(c, "外观").FontSize(12).TextColor(pal.Ink2)
+							ui.Text(c, tr.Appearance).FontSize(12).TextColor(pal.Ink2)
 							ui.Row(c).Background(pal.SegBg).Radius(10).Padding(2).Gap(2).Children(func() {
 								for _, opt := range []struct {
 									mode  string
 									label string
 								}{
-									{"system", "跟随"},
-									{"light", "浅色"},
-									{"dark", "深色"},
+									{"system", tr.ThemeFollow},
+									{"light", tr.ThemeLight},
+									{"dark", tr.ThemeDark},
 								} {
 									opt := opt
 									active := st.Settings.ThemeMode == opt.mode
@@ -772,6 +821,37 @@ func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 							})
 						})
 
+						// Compact Language selector (中文 / EN)
+						ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
+							ui.Text(c, tr.LanguageLabel).FontSize(12).TextColor(pal.Ink2)
+							curLang := i18n.Normalize(st.Settings.Language)
+							ui.Row(c).Background(pal.SegBg).Radius(10).Padding(2).Gap(2).Children(func() {
+								for _, opt := range []struct {
+									lang  string
+									label string
+								}{
+									{i18n.LangZH, "中文"},
+									{i18n.LangEN, "EN"},
+								} {
+									opt := opt
+									active := curLang == opt.lang
+									b := ui.ButtonBase(c.Key("lang-" + opt.lang)).
+										Padding(3, 10).Radius(8).Cursor(ui.CursorPointer)
+									col := pal.Ink2
+									if active {
+										b.Background(pal.SegPill)
+										col = pal.Ink1
+									}
+									b.Children(func() {
+										ui.Text(c, opt.label).FontSize(11).FontWeight(500).TextColor(col).SingleLine()
+									})
+									if b.Clicked() && !active {
+										ctl.updateSettings(func(s *model.Settings) { s.Language = opt.lang })
+									}
+								}
+							})
+						})
+
 						ui.Box(c).AlignSelf(ui.Stretch).Height(1).Background(pal.Divider)
 
 						// Version & Check for Updates row
@@ -784,12 +864,12 @@ func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 
 							checkBtn := ui.ButtonBase(c.Key("tray-check-updates")).
 								Padding(3, 9).Radius(8).Background(pal.SegBg).Cursor(ui.CursorPointer).
-								Label("检查更新")
+								Label(tr.CheckUpdates)
 							if checkBtn.Hovered() {
 								checkBtn.Background(pal.CardHover)
 							}
 							checkBtn.Children(func() {
-								ui.Text(c, "检查更新").FontSize(11).FontWeight(500).TextColor(pal.Accent).SingleLine()
+								ui.Text(c, tr.CheckUpdates).FontSize(11).FontWeight(500).TextColor(pal.Accent).SingleLine()
 							})
 							if checkBtn.Clicked() {
 								st.SettingsOpen = false
