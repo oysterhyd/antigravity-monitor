@@ -1,0 +1,1973 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Antigravity Monitor — Apple Liquid Glass v2</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      min-height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI Variable", "PingFang SC", "Helvetica Neue", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* =====================================================================
+       Apple Liquid Glass Material Tokens (Scoped to stage, never :root)
+       ===================================================================== */
+    .mode-light {
+      --ink-1: rgba(17, 17, 19, 0.90);
+      --ink-2: rgba(17, 17, 19, 0.56);
+      --ink-3: rgba(17, 17, 19, 0.34);
+      --accent: #007AFF;
+      --accent-soft: rgba(0, 122, 255, 0.11);
+      --amber: #E58500;
+
+      /* True translucent glass letting dynamic wallpaper bleed through */
+      --shell-bg: rgba(255, 255, 255, 0.44);
+      --sidebar-bg: rgba(255, 255, 255, 0.46);
+      --flyout-bg: rgba(255, 255, 255, 0.56);
+      --card-bg: rgba(255, 255, 255, 0.42);
+      --card-hover: rgba(255, 255, 255, 0.62);
+      --card-active: rgba(255, 255, 255, 0.72);
+      --rim-top: rgba(255, 255, 255, 0.88);
+      --rim-edge: rgba(255, 255, 255, 0.52);
+      --rim-bottom: rgba(15, 23, 42, 0.08);
+      --divider: rgba(17, 17, 19, 0.075);
+      --track: rgba(17, 17, 19, 0.085);
+      --seg-bg: rgba(17, 17, 19, 0.065);
+      --seg-pill: rgba(255, 255, 255, 0.86);
+      --seg-pill-shadow: 0 2px 10px rgba(0, 0, 0, 0.09), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+      --shadow-shell: 0 32px 80px rgba(15, 23, 42, 0.22), 0 4px 16px rgba(15, 23, 42, 0.08);
+      --shadow-flyout: 0 28px 72px rgba(15, 23, 42, 0.24), 0 4px 14px rgba(15, 23, 42, 0.09);
+      --taskbar-bg: rgba(255, 255, 255, 0.46);
+      --sheen: rgba(255, 255, 255, 0.52);
+      --dot-idle: rgba(17, 17, 19, 0.09);
+      --tree-stroke: rgba(17, 17, 19, 0.16);
+      --popover-bg: rgba(255, 255, 255, 0.76);
+    }
+
+    .mode-dark {
+      --ink-1: rgba(255, 255, 255, 0.93);
+      --ink-2: rgba(255, 255, 255, 0.56);
+      --ink-3: rgba(255, 255, 255, 0.34);
+      --accent: #0A84FF;
+      --accent-soft: rgba(10, 132, 255, 0.20);
+      --amber: #FF9F0A;
+
+      --shell-bg: rgba(24, 27, 36, 0.48);
+      --sidebar-bg: rgba(255, 255, 255, 0.06);
+      --flyout-bg: rgba(26, 29, 38, 0.58);
+      --card-bg: rgba(255, 255, 255, 0.065);
+      --card-hover: rgba(255, 255, 255, 0.11);
+      --card-active: rgba(255, 255, 255, 0.14);
+      --rim-top: rgba(255, 255, 255, 0.26);
+      --rim-edge: rgba(255, 255, 255, 0.12);
+      --rim-bottom: rgba(0, 0, 0, 0.35);
+      --divider: rgba(255, 255, 255, 0.09);
+      --track: rgba(255, 255, 255, 0.11);
+      --seg-bg: rgba(255, 255, 255, 0.08);
+      --seg-pill: rgba(255, 255, 255, 0.18);
+      --seg-pill-shadow: 0 2px 10px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+      --shadow-shell: 0 38px 96px rgba(0, 0, 0, 0.58), 0 6px 20px rgba(0, 0, 0, 0.32);
+      --shadow-flyout: 0 32px 84px rgba(0, 0, 0, 0.62), 0 6px 18px rgba(0, 0, 0, 0.36);
+      --taskbar-bg: rgba(20, 23, 31, 0.52);
+      --sheen: rgba(255, 255, 255, 0.14);
+      --dot-idle: rgba(255, 255, 255, 0.10);
+      --tree-stroke: rgba(255, 255, 255, 0.18);
+      --popover-bg: rgba(30, 34, 46, 0.78);
+    }
+
+    .stage {
+      position: relative;
+      min-height: 100vh;
+      color: var(--ink-1);
+      overflow-x: hidden;
+    }
+
+    /* Full-bleed live animated Apple wallpaper canvas behind glass */
+    #wallpaper {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 0;
+      pointer-events: none;
+    }
+
+    .tabular { font-variant-numeric: tabular-nums; }
+
+    /* True Liquid Glass Surface: deep backdrop blur + chromatic saturation + specular bevel */
+    .glass-shell {
+      background: var(--shell-bg);
+      backdrop-filter: blur(44px) saturate(210%);
+      -webkit-backdrop-filter: blur(44px) saturate(210%);
+      border: 1px solid var(--rim-edge);
+      box-shadow: var(--shadow-shell), inset 0 1px 0.5px var(--rim-top), inset 0 -1px 0 var(--rim-bottom);
+    }
+
+    .glass-flyout {
+      background: var(--flyout-bg);
+      backdrop-filter: blur(48px) saturate(220%);
+      -webkit-backdrop-filter: blur(48px) saturate(220%);
+      border: 1px solid var(--rim-edge);
+      box-shadow: var(--shadow-flyout), inset 0 1px 0.5px var(--rim-top), inset 0 -1px 0 var(--rim-bottom);
+    }
+
+    .glass-sidebar {
+      background: var(--sidebar-bg);
+      backdrop-filter: blur(24px) saturate(160%);
+      -webkit-backdrop-filter: blur(24px) saturate(160%);
+      border: 1px solid var(--rim-edge);
+      box-shadow: inset 0 1px 0 var(--rim-top);
+    }
+
+    /* Specular Cursor-Tracking Glass Card */
+    .glass-tile {
+      position: relative;
+      overflow: hidden;
+      background: var(--card-bg);
+      border: 1px solid var(--rim-edge);
+      box-shadow: inset 0 1px 0 var(--rim-top), 0 4px 18px rgba(0, 0, 0, 0.04);
+      transition: transform 0.38s cubic-bezier(0.22, 1.18, 0.36, 1),
+                  background 0.25s ease,
+                  border-color 0.25s ease,
+                  box-shadow 0.3s ease;
+      --mx: 50%;
+      --my: 50%;
+      --sheen-o: 0;
+    }
+    .glass-tile::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(240px circle at var(--mx) var(--my), var(--sheen), transparent 72%);
+      opacity: var(--sheen-o);
+      transition: opacity 0.32s ease;
+      pointer-events: none;
+    }
+    .glass-tile:hover {
+      background: var(--card-hover);
+      transform: translateY(-2px);
+      --sheen-o: 1;
+    }
+    .glass-tile.selected {
+      background: var(--card-active);
+      border-color: var(--accent);
+      box-shadow: inset 0 1px 0 var(--rim-top), 0 0 0 1px var(--accent-soft), 0 10px 26px rgba(0, 122, 255, 0.12);
+    }
+    .glass-tile:active {
+      transform: scale(0.985);
+    }
+
+    /* Floating Glass Pill Control */
+    .glass-pill {
+      background: var(--flyout-bg);
+      backdrop-filter: blur(32px) saturate(190%);
+      -webkit-backdrop-filter: blur(32px) saturate(190%);
+      border: 1px solid var(--rim-edge);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.10), inset 0 1px 0 var(--rim-top);
+    }
+
+    /* Apple Spring Segmented Control */
+    .seg {
+      position: relative;
+      display: grid;
+      background: var(--seg-bg);
+      border-radius: 999px;
+      padding: 3px;
+      box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.06);
+    }
+    .seg-thumb {
+      position: absolute;
+      top: 3px;
+      bottom: 3px;
+      left: 3px;
+      border-radius: 999px;
+      background: var(--seg-pill);
+      box-shadow: var(--seg-pill-shadow);
+      transition: transform 0.42s cubic-bezier(0.28, 1.24, 0.34, 1), width 0.42s cubic-bezier(0.28, 1.24, 0.34, 1);
+      pointer-events: none;
+    }
+    .seg-item {
+      position: relative;
+      z-index: 1;
+      font-size: 12px;
+      font-weight: 500;
+      padding: 6px 12px;
+      color: var(--ink-2);
+      cursor: pointer;
+      user-select: none;
+      text-align: center;
+      transition: color 0.22s ease;
+      white-space: nowrap;
+    }
+    .seg-item.active {
+      color: var(--ink-1);
+      font-weight: 600;
+    }
+
+    /* Liquid Progress Tube with living shimmer */
+    .liquid-track {
+      position: relative;
+      overflow: hidden;
+      background: var(--track);
+      border-radius: 999px;
+      box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.08);
+    }
+    .liquid-bar {
+      position: relative;
+      height: 100%;
+      border-radius: 999px;
+      transition: width 0.72s cubic-bezier(0.22, 1.08, 0.36, 1);
+      overflow: hidden;
+    }
+    .liquid-bar::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.42) 50%, transparent 100%);
+      transform: translateX(-120%);
+      animation: liquidSweep 3.2s ease-in-out infinite;
+    }
+    @keyframes liquidSweep {
+      0% { transform: translateX(-120%); }
+      55%, 100% { transform: translateX(160%); }
+    }
+
+    /* Flyout spring pop */
+    .flyout-shell {
+      transform-origin: bottom right;
+      transition: transform 0.46s cubic-bezier(0.22, 1.22, 0.32, 1), opacity 0.26s ease, filter 0.3s ease;
+    }
+    .flyout-shell.hidden-pop {
+      transform: translateY(20px) scale(0.92);
+      opacity: 0;
+      filter: blur(6px);
+      pointer-events: none;
+    }
+
+    /* Subtle breathing status indicator */
+    @keyframes breathe {
+      0%, 100% { opacity: 0.45; transform: scale(0.92); }
+      50% { opacity: 1; transform: scale(1.15); }
+    }
+    .breathe {
+      animation: breathe 2.2s ease-in-out infinite;
+    }
+    .breathe.paused {
+      animation: none;
+      opacity: 0.35;
+    }
+
+    /* Interactive Tree Node Row */
+    .agent-row {
+      position: relative;
+      border-radius: 14px;
+      transition: background 0.22s ease, transform 0.3s cubic-bezier(0.22, 1.18, 0.36, 1), box-shadow 0.25s ease;
+      cursor: pointer;
+    }
+    .agent-row:hover {
+      background: var(--card-hover);
+      transform: translateX(2px);
+    }
+    .agent-row.active {
+      background: var(--seg-pill);
+      box-shadow: var(--seg-pill-shadow);
+    }
+
+    /* Animated flow pulse along SVG tree connector */
+    @keyframes flowDash {
+      to { stroke-dashoffset: -24; }
+    }
+    .tree-flow {
+      stroke-dasharray: 4 20;
+      animation: flowDash 1.4s linear infinite;
+    }
+
+    /* Smooth entry pulse when new request arrives */
+    @keyframes rippleHighlight {
+      0% { box-shadow: 0 0 0 0 rgba(0, 122, 255, 0.35), inset 0 1px 0 var(--rim-top); }
+      100% { box-shadow: 0 0 0 14px rgba(0, 122, 255, 0), inset 0 1px 0 var(--rim-top); }
+    }
+    .req-ping {
+      animation: rippleHighlight 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    /* Smooth inline accordion for clicked request row */
+    .req-detail {
+      display: grid;
+      grid-template-rows: 0fr;
+      transition: grid-template-rows 0.34s cubic-bezier(0.22, 1.12, 0.36, 1), opacity 0.24s ease;
+      opacity: 0;
+    }
+    .req-detail.open {
+      grid-template-rows: 1fr;
+      opacity: 1;
+    }
+    .req-detail > div {
+      overflow: hidden;
+    }
+
+    /* Smooth cross-fade between curve and list inside the same glass card */
+    .panel-pane {
+      transition: opacity 0.24s ease, transform 0.32s cubic-bezier(0.22, 1.12, 0.36, 1);
+    }
+    .panel-pane.pane-hidden {
+      display: none;
+    }
+
+    /* Minimal scrollbars */
+    .clean-scroll::-webkit-scrollbar { width: 4px; height: 4px; }
+    .clean-scroll::-webkit-scrollbar-thumb { background: var(--track); border-radius: 999px; }
+    .clean-scroll::-webkit-scrollbar-track { background: transparent; }
+  </style>
+</head>
+<body>
+  <!-- Dynamic Apple-style Organic Fluid Wallpaper (proves real Liquid Glass translucency!) -->
+  <canvas id="wallpaper"></canvas>
+
+  <div id="stage" class="stage mode-light flex flex-col justify-between relative z-10">
+
+    <!-- Minimal Floating Top Prototype Controls -->
+    <header class="w-full px-6 pt-4 pb-2 flex flex-wrap items-center justify-between gap-3">
+      <div class="glass-pill rounded-full px-3.5 py-1.5 flex items-center gap-2.5 text-xs">
+        <span id="topPulse" class="w-2 h-2 rounded-full breathe" style="background: var(--accent);"></span>
+        <span class="font-semibold tracking-tight">Antigravity Monitor</span>
+        <span style="color: var(--ink-3);">·</span>
+        <span style="color: var(--ink-2);">Liquid Glass v2</span>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2">
+        <!-- View Switch -->
+        <div class="glass-pill rounded-full p-1">
+          <div class="seg grid-cols-3" id="layoutSeg">
+            <div class="seg-thumb" id="layoutThumb"></div>
+            <button data-layout="both" class="seg-item active">双端</button>
+            <button data-layout="tray" class="seg-item">托盘</button>
+            <button data-layout="app" class="seg-item">桌面端</button>
+          </div>
+        </div>
+
+        <!-- Light / Dark Glass Toggle -->
+        <button id="themeBtn" class="glass-pill rounded-full px-3.5 py-2 text-xs font-medium flex items-center gap-1.5 cursor-pointer active:scale-95 transition">
+          <svg id="themeSvg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+          </svg>
+          <span id="themeTxt">浅色玻璃</span>
+        </button>
+
+        <!-- Live Stream Toggle & Trigger -->
+        <button id="liveBtn" class="glass-pill rounded-full px-3.5 py-2 text-xs font-medium flex items-center gap-1.5 cursor-pointer active:scale-95 transition">
+          <span id="liveDot" class="w-1.5 h-1.5 rounded-full breathe" style="background: var(--accent);"></span>
+          <span id="liveTxt">实时流</span>
+        </button>
+
+        <button id="burstBtn" class="rounded-full px-3.5 py-2 text-xs font-medium text-white cursor-pointer active:scale-95 transition shadow-md" style="background: var(--accent);">
+          模拟请求
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Stage: Desktop App + Tray Flyout -->
+    <main class="flex-1 w-full max-w-[1340px] mx-auto px-6 py-4 flex flex-col xl:flex-row items-center xl:items-end justify-center gap-7">
+
+      <!-- =================================================================== -->
+      <!-- 1. FULL DESKTOP APP (Apple macOS Liquid Glass Minimalism)           -->
+      <!-- =================================================================== -->
+      <section id="appWindow" class="glass-shell rounded-[28px] w-full xl:flex-1 max-w-[880px] p-3 flex flex-col md:flex-row gap-3 transition-all duration-500">
+
+        <!-- Inset Floating Liquid Glass Sidebar (macOS 26 signature!) -->
+        <aside class="glass-sidebar rounded-[22px] w-full md:w-[238px] shrink-0 p-3.5 flex flex-col justify-between gap-4 relative">
+          <div class="space-y-3.5">
+            <!-- macOS Traffic Lights & Quiet Concurrency Status -->
+            <div class="flex items-center justify-between px-1 pt-0.5">
+              <div class="flex items-center gap-2">
+                <span class="w-3 h-3 rounded-full" style="background: rgba(255,95,87,0.92);"></span>
+                <span class="w-3 h-3 rounded-full" style="background: rgba(254,188,46,0.92);"></span>
+                <span class="w-3 h-3 rounded-full" style="background: rgba(40,200,64,0.92);"></span>
+              </div>
+              <button id="concurrentBadgeBtn" class="flex items-center gap-1.5 text-[11px] font-medium cursor-pointer transition hover:opacity-100 opacity-80" style="color: var(--ink-2);" title="切换并行对话">
+                <span class="w-1.5 h-1.5 rounded-full breathe" style="background: var(--accent);"></span>
+                <span id="concurrentCountTxt" class="tabular">2 进行中</span>
+              </button>
+            </div>
+
+            <!-- Minimal Liquid Glass Session Switcher -->
+            <div class="relative">
+              <button id="sessionPickerBtn" class="w-full px-3 py-2 rounded-2xl flex items-center justify-between gap-2 cursor-pointer transition text-left" style="background: var(--card-bg); border: 1px solid var(--rim-edge); box-shadow: inset 0 1px 0 var(--rim-top);">
+                <div class="min-w-0">
+                  <div class="flex items-center gap-1.5">
+                    <span id="pickerActiveTitle" class="text-xs font-semibold truncate">antigravity_monitor</span>
+                  </div>
+                  <div id="pickerFollowState" class="text-[10px] mt-0.5" style="color: var(--ink-3);">自动跟随活跃对话</div>
+                </div>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color: var(--ink-3); shrink:0;"><path d="M6 9l6 6 6-6"/></svg>
+              </button>
+
+              <!-- Floating Glass Session Popover -->
+              <div id="sessionPopover" class="hidden absolute left-0 right-0 top-[54px] rounded-2xl p-2 space-y-1.5 z-40 shadow-2xl" style="background: var(--popover-bg); backdrop-filter: blur(36px) saturate(200%); border: 1px solid var(--rim-edge); box-shadow: 0 20px 50px rgba(0,0,0,0.22), inset 0 1px 0 var(--rim-top);">
+                <div class="px-2 py-1 flex items-center justify-between text-[11px]" style="border-bottom: 1px solid var(--divider);">
+                  <span style="color: var(--ink-2);">自动跟随活跃</span>
+                  <input id="autoFollowToggle" type="checkbox" checked class="accent-[#007AFF] cursor-pointer" />
+                </div>
+                <div id="sessionPopoverList" class="space-y-0.5"></div>
+              </div>
+            </div>
+
+            <!-- Combined Tree Root Toggle -->
+            <div id="sidebarCombined"></div>
+
+            <!-- Parent-Child Visual Topology Tree with Animated SVG Connectors -->
+            <div class="relative">
+              <div class="px-1.5 pb-1.5 flex items-center justify-between text-[11px]" style="color: var(--ink-3);">
+                <span>父子 Agent 结构</span>
+                <span class="tabular" id="treeCountLabel">1 主 · 3 子</span>
+              </div>
+              <div class="relative" id="sidebarTreeWrap">
+                <svg id="treeLinesSvg" class="absolute inset-0 w-full h-full pointer-events-none" style="z-index:0;"></svg>
+                <div id="sidebarTreeNodes" class="relative space-y-1" style="z-index:1;"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Quiet Minimal Footer inside Sidebar -->
+          <div class="px-2 pt-3 flex items-center justify-between text-[11px]" style="border-top: 1px solid var(--divider); color: var(--ink-3);">
+            <span id="sidebarWorkspace" class="truncate">d:/antigravity_monitor</span>
+            <button id="appGearBtn" class="p-1 rounded-lg cursor-pointer transition hover:opacity-100 opacity-70" title="设置">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
+          </div>
+        </aside>
+
+        <!-- Clean Spacious Main Canvas -->
+        <div class="flex-1 px-3 py-2 flex flex-col gap-4 min-w-0">
+
+          <!-- Airy Header: Current Scope + Quiet 3-Way Ratio -->
+          <div class="flex flex-wrap items-end justify-between gap-3 px-1 pt-1">
+            <div>
+              <div class="flex items-center gap-2">
+                <h1 id="mainTitle" class="text-[20px] font-semibold tracking-tight leading-none">整棵会话树</h1>
+                <span id="mainModel" class="text-xs" style="color: var(--ink-2);">主 + 3 子节点</span>
+              </div>
+              <!-- Quiet monochrome 3-way split (Combined / Root / Subagents) -->
+              <div class="mt-1.5 flex items-center gap-3 text-xs tabular" style="color: var(--ink-2);">
+                <span>合计 <b id="hdrAll" style="color: var(--ink-1);">$0.312</b></span>
+                <span style="color: var(--ink-3);">/</span>
+                <span>主 <b id="hdrRoot" style="color: var(--ink-1);">$0.184</b></span>
+                <span style="color: var(--ink-3);">/</span>
+                <span>子 <b id="hdrSub" style="color: var(--ink-1);">$0.128</b></span>
+              </div>
+            </div>
+
+            <!-- Quiet Monochrome Activity Indicator -->
+            <div class="flex items-center gap-2 text-xs tabular" style="color: var(--ink-2);">
+              <span id="activeReqHint">最近 #24 · 刚刚</span>
+              <span class="w-1.5 h-1.5 rounded-full breathe" style="background: var(--accent);"></span>
+            </div>
+          </div>
+
+          <!-- HERO: Context Window (Airy, Uncluttered, Pure Glass) -->
+          <div id="heroContextCard" class="glass-tile rounded-[20px] p-4 space-y-3">
+            <div class="flex items-baseline justify-between gap-2">
+              <div class="flex items-center gap-2">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" style="color: var(--ink-2);"><rect x="3" y="4" width="18" height="16" rx="4"/><path d="M9 4v16"/></svg>
+                <span class="text-xs font-medium" style="color: var(--ink-2);">上下文窗口</span>
+              </div>
+              <div class="flex items-baseline gap-2 tabular">
+                <span id="heroCtxPrefix" class="text-[11px]" style="color: var(--ink-3);">最高</span>
+                <span id="heroCtxPct" class="text-xl font-semibold tracking-tight">11.8%</span>
+                <span id="heroCtxAbs" class="text-xs" style="color: var(--ink-2);">browser</span>
+              </div>
+            </div>
+
+            <!-- Single or Parallel Context Tubes depending on Scope -->
+            <div id="heroCtxBars" class="space-y-2.5"></div>
+          </div>
+
+          <!-- 4 Clean Minimal KPI Tiles (Click any tile to morph the live chart below!) -->
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <!-- Tile 1: Cost -->
+            <button data-metric="cost" class="metric-tile glass-tile rounded-[20px] p-4 text-left cursor-pointer space-y-2.5">
+              <div class="flex items-center justify-between" style="color: var(--ink-2);">
+                <span id="lblCost" class="text-xs font-medium">全树本轮</span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+              </div>
+              <div class="tabular">
+                <div class="text-[24px] font-semibold tracking-tight leading-tight" id="valTurnCost">$0.048</div>
+                <div class="mt-1 text-xs truncate" style="color: var(--ink-2);">
+                  <span id="subLblCost">会话</span> <span id="valSessionCost" style="color: var(--ink-1);">$0.312</span>
+                </div>
+              </div>
+            </button>
+
+            <!-- Tile 2: Cache Hit -->
+            <button data-metric="cache" class="metric-tile glass-tile rounded-[20px] p-4 text-left cursor-pointer space-y-2.5">
+              <div class="flex items-center justify-between" style="color: var(--ink-2);">
+                <span id="lblCache" class="text-xs font-medium">全树命中</span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+              </div>
+              <div class="tabular">
+                <div class="text-[24px] font-semibold tracking-tight leading-tight" id="valCacheMain">88.6%</div>
+                <div class="mt-1 text-xs truncate" style="color: var(--ink-2);">
+                  <span id="subLblCache">最新</span> <span id="valCacheSub" style="color: var(--ink-1);">94.2%</span><span id="srcCache" class="text-[11px]" style="color: var(--ink-3);"></span>
+                </div>
+              </div>
+            </button>
+
+            <!-- Tile 3: TTFT -->
+            <button data-metric="ttft" class="metric-tile glass-tile rounded-[20px] p-4 text-left cursor-pointer space-y-2.5">
+              <div class="flex items-center justify-between" style="color: var(--ink-2);">
+                <span id="lblTtft" class="text-xs font-medium">全树均 TTFT</span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+              </div>
+              <div class="tabular">
+                <div class="text-[24px] font-semibold tracking-tight leading-tight" id="valTtftMain">1.94s</div>
+                <div class="mt-1 text-xs truncate" style="color: var(--ink-2);">
+                  <span id="subLblTtft">最新</span> <span id="valTtftSub" style="color: var(--ink-1);">1.62s</span><span id="srcTtft" class="text-[11px]" style="color: var(--ink-3);"></span>
+                </div>
+              </div>
+            </button>
+
+            <!-- Tile 4: Pure Decode TPS -->
+            <button data-metric="tps" class="metric-tile glass-tile selected rounded-[20px] p-4 text-left cursor-pointer space-y-2.5">
+              <div class="flex items-center justify-between" style="color: var(--ink-2);">
+                <span id="lblTps" class="text-xs font-medium">全树均速</span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg>
+              </div>
+              <div class="tabular">
+                <div class="text-[24px] font-semibold tracking-tight leading-tight" id="valTpsMain">114.2</div>
+                <div class="mt-1 text-xs truncate" style="color: var(--ink-2);">
+                  <span id="subLblTps">最新</span> <span id="valTpsSub" style="color: var(--ink-1);">126.4</span><span id="srcTps" class="text-[11px]" style="color: var(--ink-3);"></span>
+                </div>
+              </div>
+            </button>
+          </div>
+
+          <!-- Morphing Live Telemetry + Clean Per-Request Inspector -->
+          <div class="glass-tile rounded-[20px] p-4 space-y-3 flex-1 flex flex-col justify-between min-h-[228px]">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2 min-w-0">
+                <span id="chartHeading" class="text-xs font-semibold truncate">纯吐字速度 · 逐次请求</span>
+              </div>
+              <div class="seg grid-cols-2 shrink-0" id="reqViewSeg" style="width: 112px;">
+                <div class="seg-thumb" id="reqViewThumb"></div>
+                <button data-reqview="curve" class="seg-item active" style="padding: 4px 8px; font-size: 11px;">曲线</button>
+                <button data-reqview="list" class="seg-item" style="padding: 4px 8px; font-size: 11px;">逐次</button>
+              </div>
+            </div>
+
+            <!-- Pane A: Morphing Curve + Always-Visible Focused Request Strip -->
+            <div id="paneCurve" class="panel-pane space-y-2.5 flex-1 flex flex-col justify-between">
+              <div class="relative w-full h-[116px]">
+                <canvas id="morphChart" class="w-full h-full block cursor-crosshair"></canvas>
+              </div>
+
+              <!-- Serene Apple-Style Focused Request Scrubber Bar -->
+              <div class="pt-2.5 flex flex-wrap items-center justify-between gap-2 text-xs tabular" style="border-top: 1px solid var(--divider);">
+                <div class="flex items-center gap-2 min-w-0">
+                  <div class="flex items-center gap-0.5 rounded-full p-0.5" style="background: var(--seg-bg);">
+                    <button id="prevReqBtn" class="w-5 h-5 rounded-full flex items-center justify-center cursor-pointer transition hover:opacity-100 opacity-70" title="上一次请求">
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg>
+                    </button>
+                    <button id="nextReqBtn" class="w-5 h-5 rounded-full flex items-center justify-center cursor-pointer transition hover:opacity-100 opacity-70" title="下一次请求">
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg>
+                    </button>
+                  </div>
+                  <span id="inspTitle" class="font-semibold truncate">#24 主 Agent</span>
+                  <span id="inspTokens" class="text-[11px] hidden sm:inline" style="color: var(--ink-3);">输入 2.0K · 缓存 47.2K · 输出 1.3K</span>
+                </div>
+
+                <div class="flex items-center gap-3 text-xs">
+                  <span><span style="color: var(--ink-3);">命中</span> <b id="inspHit">95.9%</b></span>
+                  <span><span style="color: var(--ink-3);">TTFT</span> <b id="inspTtft">1.62s</b></span>
+                  <span><span style="color: var(--ink-3);">TPS</span> <b id="inspTps">126.4</b></span>
+                  <span><b id="inspCost">$0.014</b></span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Pane B: Breathable Minimal Per-Request List (Click row to expand tokens) -->
+            <div id="paneList" class="panel-pane pane-hidden flex-1 flex flex-col">
+              <div class="grid grid-cols-12 px-2 pb-1.5 text-[11px]" style="color: var(--ink-3); border-bottom: 1px solid var(--divider);">
+                <div class="col-span-4">请求 / 节点</div>
+                <div class="col-span-2 text-right">缓存命中</div>
+                <div class="col-span-2 text-right">TTFT</div>
+                <div class="col-span-2 text-right">吐字 TPS</div>
+                <div class="col-span-2 text-right">费用</div>
+              </div>
+              <div id="cleanReqList" class="overflow-y-auto clean-scroll max-h-[156px] divide-y" style="border-color: var(--divider);"></div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- =================================================================== -->
+      <!-- 2. PULSE-STYLE MINIMAL LIQUID GLASS TRAY FLYOUT                     -->
+      <!-- =================================================================== -->
+      <section id="traySection" class="w-full xl:w-[336px] shrink-0 flex flex-col items-center xl:items-end justify-end">
+        <div id="trayFlyout" class="flyout-shell glass-flyout rounded-[24px] w-full max-w-[332px] p-4 flex flex-col gap-4 relative">
+
+          <!-- Clean 3-Tab Segmented Pill (Exact Pulse calmness, zero clutter) -->
+          <div class="seg grid-cols-3" id="traySeg">
+            <div class="seg-thumb" id="trayThumb"></div>
+            <button data-tab="overview" class="seg-item active">总览</button>
+            <button data-tab="perf" class="seg-item">性能</button>
+            <button data-tab="agents" class="seg-item">Agent 树</button>
+          </div>
+
+          <!-- Tray Content -->
+          <div class="space-y-4">
+            <!-- Quiet Monochrome Section Header + Inline Multi-Session Switcher -->
+            <div class="flex items-center justify-between px-0.5 relative">
+              <div class="flex items-center gap-2">
+                <span id="trayIconWrap" class="w-6 h-6 rounded-lg flex items-center justify-center" style="background: var(--accent-soft); color: var(--accent);">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg>
+                </span>
+                <span id="trayTitle" class="text-[13px] font-semibold tracking-tight">实时概览</span>
+              </div>
+              <button id="trayConvBtn" class="flex items-center gap-1.5 px-2 py-1 rounded-full text-[11px] cursor-pointer transition hover:opacity-100" style="background: var(--seg-bg); color: var(--ink-2);">
+                <span class="w-1.5 h-1.5 rounded-full breathe" style="background: var(--accent);"></span>
+                <span id="trayConvLabel" class="max-w-[110px] truncate">antigravity_monitor</span>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+              </button>
+
+              <!-- Tray Inline Session Dropdown -->
+              <div id="traySessionMenu" class="hidden absolute right-0 top-8 w-56 rounded-2xl p-1.5 space-y-0.5 z-40 shadow-2xl" style="background: var(--popover-bg); backdrop-filter: blur(36px) saturate(200%); border: 1px solid var(--rim-edge);"></div>
+            </div>
+
+            <!-- Dual Hero Numbers (Pulse DNA, ultra-clean) -->
+            <div class="grid grid-cols-2 gap-4 px-0.5">
+              <div>
+                <div class="flex items-center gap-1.5 text-xs" style="color: var(--ink-2);">
+                  <span class="w-1.5 h-1.5 rounded-full" style="background: var(--accent);"></span>
+                  <span id="tHero1Label">本轮费用</span>
+                </div>
+                <div class="mt-1 flex items-baseline gap-1 tabular">
+                  <span id="tHero1Val" class="text-[22px] font-semibold tracking-tight leading-none">$0.048</span>
+                  <span id="tHero1Sub" class="text-[11px]" style="color: var(--ink-3);">/ $0.31</span>
+                </div>
+              </div>
+              <div>
+                <div class="flex items-center gap-1.5 text-xs" style="color: var(--ink-2);">
+                  <span class="w-1.5 h-1.5 rounded-full" style="background: var(--amber);"></span>
+                  <span id="tHero2Label">吐字速度</span>
+                </div>
+                <div class="mt-1 flex items-baseline gap-1 tabular">
+                  <span id="tHero2Val" class="text-[22px] font-semibold tracking-tight leading-none">126.4</span>
+                  <span id="tHero2Sub" class="text-[11px]" style="color: var(--ink-3);">t/s</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Animated Dot-Matrix Live Chart (Pulse signature, smooth 60fps spring bars + hover inspect!) -->
+            <div class="py-0.5 relative">
+              <div id="dotHoverPill" class="hidden pointer-events-none absolute -top-6 right-0 px-2 py-0.5 rounded-full text-[10px] font-medium tabular shadow-sm" style="background: var(--seg-pill); color: var(--ink-1); box-shadow: var(--seg-pill-shadow);"></div>
+              <canvas id="dotMatrix" class="w-full h-[58px] block cursor-crosshair"></canvas>
+            </div>
+
+            <!-- Clean Context / Breakdown Bars -->
+            <div class="space-y-2.5">
+              <div id="tMidTitle" class="text-[11px] font-medium px-0.5" style="color: var(--ink-3);">上下文窗口</div>
+              <div id="tMidRows" class="space-y-2.5"></div>
+            </div>
+
+            <!-- Clean Minimal List -->
+            <div class="space-y-1.5">
+              <div id="tBotTitle" class="text-[11px] font-medium px-0.5" style="color: var(--ink-3);">父子 Agent</div>
+              <div id="tBotRows" class="space-y-0.5"></div>
+            </div>
+          </div>
+
+          <!-- Clean Pulse Footer -->
+          <div class="pt-3 flex items-center justify-between" style="border-top: 1px solid var(--divider);">
+            <button id="openMainBtn" class="px-3.5 py-1.5 rounded-full text-xs font-medium cursor-pointer active:scale-95 transition" style="background: var(--seg-bg); color: var(--ink-1);">
+              打开主面板
+            </button>
+            <button id="trayGearBtn" class="w-7 h-7 rounded-full flex items-center justify-center cursor-pointer transition hover:opacity-100 opacity-65" title="设置">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
+          </div>
+
+          <!-- Ultra-Minimal Settings Popover -->
+          <div id="settingsSheet" class="hidden absolute bottom-14 right-3 w-60 rounded-2xl p-4 space-y-3 z-30 shadow-2xl" style="background: var(--popover-bg); backdrop-filter: blur(36px) saturate(190%); border: 1px solid var(--rim-edge);">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-semibold">设置</span>
+              <button id="closeSettingsBtn" class="text-xs cursor-pointer" style="color: var(--accent);">完成</button>
+            </div>
+            <label class="flex items-center justify-between text-xs cursor-pointer">
+              <span style="color: var(--ink-2);">开机驻留托盘</span>
+              <input type="checkbox" checked class="accent-[#007AFF] cursor-pointer" />
+            </label>
+            <label class="flex items-center justify-between text-xs cursor-pointer">
+              <span style="color: var(--ink-2);">主窗始终置顶</span>
+              <input type="checkbox" class="accent-[#007AFF] cursor-pointer" />
+            </label>
+            <label class="flex items-center justify-between text-xs cursor-pointer">
+              <span style="color: var(--ink-2);">上下文 80% 预警</span>
+              <input type="checkbox" checked class="accent-[#007AFF] cursor-pointer" />
+            </label>
+          </div>
+
+        </div>
+      </section>
+    </main>
+
+    <!-- Translucent Glass Taskbar -->
+    <footer class="w-full h-12 px-6 flex items-center justify-between" style="background: var(--taskbar-bg); backdrop-filter: blur(34px) saturate(190%); border-top: 1px solid var(--rim-edge);">
+      <div class="text-xs" style="color: var(--ink-2);">
+        点击右下角托盘图标可弹簧呼出 / 收起弹层 · 鼠标划过卡片感受 Liquid Glass 镜面反光
+      </div>
+
+      <div class="flex items-center gap-3">
+        <button id="trayToggleBtn" class="flex items-center gap-2 px-3 py-1.5 rounded-full cursor-pointer active:scale-95 transition" style="background: var(--seg-pill); box-shadow: var(--seg-pill-shadow);">
+          <svg width="14" height="14" viewBox="0 0 18 18" fill="none">
+            <rect x="2" y="10" width="2.8" height="6" rx="1.4" fill="currentColor" opacity="0.45"/>
+            <rect x="7.4" y="6" width="2.8" height="10" rx="1.4" fill="#007AFF"/>
+            <rect x="12.8" y="3" width="2.8" height="13" rx="1.4" fill="currentColor" opacity="0.85"/>
+          </svg>
+          <span id="trayDockStat" class="text-xs font-medium tabular">9.4% · 126 t/s</span>
+        </button>
+        <span id="dockClock" class="text-xs tabular" style="color: var(--ink-2);">08:56</span>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    // =========================================================================
+    // 1. Living Apple Dynamic Wallpaper (Organic drifting luminous mesh)
+    // =========================================================================
+    const wpCanvas = document.getElementById('wallpaper');
+    const wpCtx = wpCanvas.getContext('2d');
+    let wpTime = 0;
+
+    function resizeWallpaper() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+      wpCanvas.width = Math.round(window.innerWidth * dpr);
+      wpCanvas.height = Math.round(window.innerHeight * dpr);
+      wpCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    resizeWallpaper();
+
+    function drawWallpaper(dt) {
+      wpTime += dt * 0.00028;
+      const w = window.innerWidth, h = window.innerHeight;
+      const isDark = state.theme === 'dark';
+
+      // Rich base gradient so translucent glass has real depth & contrast!
+      const bg = wpCtx.createLinearGradient(0, 0, w, h);
+      if (isDark) {
+        bg.addColorStop(0, '#091124');
+        bg.addColorStop(0.5, '#131832');
+        bg.addColorStop(1, '#0b1628');
+      } else {
+        bg.addColorStop(0, '#6ba4e8');
+        bg.addColorStop(0.45, '#9ab7ea');
+        bg.addColorStop(1, '#c8b2df');
+      }
+      wpCtx.fillStyle = bg;
+      wpCtx.fillRect(0, 0, w, h);
+
+      const blobs = isDark
+        ? [
+            { x: 0.22 + Math.sin(wpTime * 1.1) * 0.10, y: 0.25 + Math.cos(wpTime * 0.9) * 0.08, r: 0.52, c: 'rgba(14, 165, 233, 0.34)' },
+            { x: 0.78 + Math.cos(wpTime * 0.8) * 0.10, y: 0.30 + Math.sin(wpTime * 1.2) * 0.09, r: 0.48, c: 'rgba(99, 102, 241, 0.34)' },
+            { x: 0.55 + Math.sin(wpTime * 0.7) * 0.12, y: 0.82 + Math.cos(wpTime * 1.0) * 0.08, r: 0.50, c: 'rgba(249, 115, 22, 0.22)' },
+            { x: 0.18 + Math.cos(wpTime * 0.9) * 0.09, y: 0.78 + Math.sin(wpTime * 0.8) * 0.09, r: 0.44, c: 'rgba(168, 85, 247, 0.26)' }
+          ]
+        : [
+            { x: 0.20 + Math.sin(wpTime * 1.1) * 0.11, y: 0.24 + Math.cos(wpTime * 0.9) * 0.09, r: 0.52, c: 'rgba(37, 99, 235, 0.42)' },
+            { x: 0.80 + Math.cos(wpTime * 0.8) * 0.10, y: 0.28 + Math.sin(wpTime * 1.1) * 0.09, r: 0.48, c: 'rgba(244, 114, 182, 0.36)' },
+            { x: 0.62 + Math.sin(wpTime * 0.7) * 0.12, y: 0.80 + Math.cos(wpTime * 1.0) * 0.08, r: 0.50, c: 'rgba(251, 146, 60, 0.36)' },
+            { x: 0.22 + Math.cos(wpTime * 0.9) * 0.09, y: 0.82 + Math.sin(wpTime * 0.8) * 0.08, r: 0.45, c: 'rgba(56, 189, 248, 0.38)' }
+          ];
+
+      const maxDim = Math.max(w, h);
+      blobs.forEach(b => {
+        const g = wpCtx.createRadialGradient(b.x * w, b.y * h, 0, b.x * w, b.y * h, b.r * maxDim);
+        g.addColorStop(0, b.c);
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        wpCtx.fillStyle = g;
+        wpCtx.fillRect(0, 0, w, h);
+      });
+    }
+
+    // =========================================================================
+    // 2. Multi-Conversation Data Model (2 Concurrent Active + 1 Idle Single-Agent)
+    // =========================================================================
+    function makeRequests(rows) {
+      let seq = 1;
+      return rows.map(([agentId, input, cacheRead, output, ttft, tps, cost, inTurn]) => ({
+        id: seq++, agentId, input, cacheRead, output, ttft, tps, cost, inTurn
+      }));
+    }
+
+    const conversations = [
+      {
+        id: 'conv-monitor',
+        title: 'antigravity_monitor',
+        workspace: 'd:/antigravity_monitor',
+        running: true,
+        activeAgentPing: 'root',
+        agents: [
+          { id: 'root', parentId: null, name: '主 Agent', model: 'Gemini 4 Neon', ctxLimit: 512000, ctxCache: 41200, ctxInput: 4850, ctxOutput: 2150 },
+          { id: 'sub-research', parentId: 'root', name: 'Codebase Researcher', model: 'Gemini 4 Flash', ctxLimit: 512000, ctxCache: 27400, ctxInput: 3100, ctxOutput: 1100 },
+          { id: 'sub-schema', parentId: 'root', name: 'Schema Reader', model: 'Gemini 4 Neon', ctxLimit: 512000, ctxCache: 15800, ctxInput: 2400, ctxOutput: 1200 },
+          { id: 'sub-ui', parentId: 'root', name: 'browser', model: 'Claude 4.5', ctxLimit: 200000, ctxCache: 16200, ctxInput: 2200, ctxOutput: 1000 }
+        ],
+        requests: makeRequests([
+          ['root', 16863, 0, 1364, 2.38, 108.4, 0.024, false],
+          ['root', 6024, 16864, 1291, 1.92, 118.2, 0.017, false],
+          ['sub-research', 9420, 0, 840, 1.15, 148.6, 0.011, false],
+          ['sub-research', 3180, 9420, 720, 0.94, 154.0, 0.008, false],
+          ['root', 8249, 22889, 1048, 2.14, 112.5, 0.018, false],
+          ['sub-schema', 8910, 0, 920, 1.88, 116.8, 0.013, false],
+          ['sub-schema', 2410, 8910, 790, 1.54, 124.2, 0.009, false],
+          ['root', 3458, 31139, 1000, 1.76, 121.4, 0.015, false],
+          ['sub-research', 2910, 14500, 960, 0.89, 162.3, 0.009, false],
+          ['root', 6541, 34598, 535, 2.45, 104.2, 0.014, false],
+          ['sub-ui', 10200, 0, 680, 2.86, 86.5, 0.012, false],
+          ['sub-ui', 2200, 10200, 620, 2.12, 92.4, 0.007, false],
+          ['root', 2377, 41140, 1135, 1.81, 119.8, 0.016, false],
+          ['sub-schema', 1940, 12900, 640, 1.49, 127.6, 0.008, false],
+          ['sub-research', 1850, 22400, 740, 0.84, 158.0, 0.007, false],
+          ['root', 2110, 43518, 1630, 1.98, 123.5, 0.020, false],
+          ['sub-ui', 1680, 13400, 590, 1.95, 95.1, 0.006, true],
+          ['root', 2753, 44811, 1428, 1.74, 128.9, 0.018, true],
+          ['sub-research', 1520, 25800, 690, 0.88, 156.4, 0.006, true],
+          ['root', 1980, 47240, 1310, 1.62, 126.4, 0.014, true]
+        ])
+      },
+      {
+        id: 'conv-payments',
+        title: 'payments-api 重构',
+        workspace: 'd:/work/payments-api',
+        running: true,
+        activeAgentPing: 'sub-browser',
+        agents: [
+          { id: 'root', parentId: null, name: '主 Agent', model: 'Claude 4.5 Sonnet', ctxLimit: 200000, ctxCache: 84200, ctxInput: 5600, ctxOutput: 2400 },
+          { id: 'sub-browser', parentId: 'root', name: 'browser', model: 'Gemini 4 Flash', ctxLimit: 512000, ctxCache: 19400, ctxInput: 2100, ctxOutput: 860 }
+        ],
+        requests: makeRequests([
+          ['root', 22400, 0, 1840, 2.65, 88.2, 0.084, false],
+          ['root', 7200, 22400, 1520, 2.24, 92.6, 0.052, false],
+          ['sub-browser', 8400, 0, 640, 0.98, 148.0, 0.009, false],
+          ['root', 9100, 31200, 1680, 2.41, 90.4, 0.061, false],
+          ['root', 6400, 48200, 1910, 2.18, 94.1, 0.056, false],
+          ['sub-browser', 3100, 11400, 710, 0.89, 155.2, 0.006, true],
+          ['root', 5800, 69400, 1740, 2.09, 95.8, 0.051, true],
+          ['root', 5600, 84200, 1890, 2.14, 93.2, 0.054, true]
+        ])
+      },
+      {
+        id: 'conv-sql',
+        title: 'SQL 慢查询排查',
+        workspace: 'd:/work/analytics-db',
+        running: false,
+        activeAgentPing: 'root',
+        agents: [
+          { id: 'root', parentId: null, name: '主 Agent', model: 'Gemini 4 Neon', ctxLimit: 512000, ctxCache: 21800, ctxInput: 1900, ctxOutput: 940 }
+        ],
+        requests: makeRequests([
+          ['root', 11200, 0, 980, 1.82, 121.0, 0.019, false],
+          ['root', 4100, 11200, 1120, 1.56, 129.4, 0.012, false],
+          ['root', 2600, 16400, 890, 1.48, 134.2, 0.009, true],
+          ['root', 1900, 21800, 940, 1.39, 136.8, 0.008, true]
+        ])
+      }
+    ];
+
+    const state = {
+      theme: 'light',
+      layout: 'both',
+      convId: 'conv-monitor',
+      autoFollow: true,
+      scope: 'all',
+      metric: 'tps',
+      reqView: 'curve',     // 'curve' | 'list'
+      pinnedReqId: null,    // null = auto-follow latest
+      expandedReqId: null,  // expanded row inside 'list' view
+      trayTab: 'overview',
+      trayOpen: true,
+      live: true,
+      activeAgentPing: 'root',
+      hoverChartIdx: -1,
+      hoverDotCol: -1
+    };
+
+    let agents = conversations[0].agents;
+    let requests = conversations[0].requests;
+    function getConv(id = state.convId) { return conversations.find(c => c.id === id) || conversations[0]; }
+    function syncActiveConv() {
+      const c = getConv();
+      agents = c.agents;
+      requests = c.requests;
+      state.activeAgentPing = c.activeAgentPing;
+      if (state.scope !== 'all' && !agents.some(a => a.id === state.scope)) {
+        state.scope = 'all';
+      }
+    }
+
+    const $ = s => document.querySelector(s);
+    const $$ = s => Array.from(document.querySelectorAll(s));
+    const fmtK = n => n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(Math.round(n));
+    const fmtUSD = v => '$' + v.toFixed(3);
+    const getAgent = id => agents.find(a => a.id === id);
+
+    // =========================================================================
+    // 3. Smooth Damped Spring Value Animator (No abrupt text snaps!)
+    // =========================================================================
+    const springs = {};
+    function springSet(key, target, formatter, el) {
+      if (!springs[key]) {
+        springs[key] = { val: target, target, vel: 0, formatter, el };
+        if (el) el.textContent = formatter(target);
+      } else {
+        springs[key].target = target;
+        springs[key].formatter = formatter;
+        springs[key].el = el;
+      }
+    }
+
+    function stepSprings(dtSec) {
+      const stiffness = 170, damping = 22;
+      const step = Math.min(dtSec, 0.033);
+      for (const k in springs) {
+        const s = springs[k];
+        const diff = s.target - s.val;
+        if (Math.abs(diff) < 1e-4 && Math.abs(s.vel) < 1e-4) {
+          s.val = s.target;
+          s.vel = 0;
+        } else {
+          const acc = stiffness * diff - damping * s.vel;
+          s.vel += acc * step;
+          s.val += s.vel * step;
+          if (s.el) s.el.textContent = s.formatter(s.val);
+        }
+      }
+    }
+
+    // =========================================================================
+    // 4. Compute Metrics
+    // =========================================================================
+    function compute(scopeId) {
+      const list = scopeId === 'all' ? requests : requests.filter(r => r.agentId === scopeId);
+      const last = list[list.length - 1] || { id: 0, input: 0, cacheRead: 0, output: 0, ttft: 0, tps: 0, cost: 0 };
+      let sumIn = 0, sumCR = 0, sumOut = 0, sumCost = 0, turnCost = 0, sumDec = 0, sumTtft = 0;
+      list.forEach(r => {
+        sumIn += r.input; sumCR += r.cacheRead; sumOut += r.output;
+        sumCost += r.cost; if (r.inTurn) turnCost += r.cost;
+        sumDec += r.output / Math.max(r.tps, 1);
+        sumTtft += r.ttft;
+      });
+      const lastHit = (last.input + last.cacheRead) ? (last.cacheRead / (last.input + last.cacheRead)) * 100 : 0;
+      const totalHit = (sumIn + sumCR) ? (sumCR / (sumIn + sumCR)) * 100 : 0;
+      const avgTtft = list.length ? sumTtft / list.length : 0;
+      const avgTps = sumDec > 0 ? sumOut / sumDec : 0;
+      return { list, last, turnCost, sessionCost: sumCost, lastHit, totalHit, avgTtft, avgTps, turnReqs: list.filter(r => r.inTurn).length };
+    }
+
+    // =========================================================================
+    // 5. Render Multi-Conversation Pickers & Parent-Child Agent Tree
+    // =========================================================================
+    function convSummaryCost(conv) {
+      return conv.requests.reduce((acc, r) => acc + r.cost, 0);
+    }
+
+    function renderSessionPickers() {
+      const activeConv = getConv();
+      const runningCount = conversations.filter(c => c.running).length;
+
+      $('#concurrentCountTxt').textContent = `${runningCount} 进行中`;
+      $('#concurrentBadgeBtn').style.display = runningCount > 1 ? 'flex' : 'none';
+      $('#pickerActiveTitle').textContent = activeConv.title;
+      $('#pickerFollowState').textContent = state.autoFollow ? '自动跟随活跃对话' : '已锁定当前对话';
+      $('#autoFollowToggle').checked = state.autoFollow;
+      $('#sidebarWorkspace').textContent = activeConv.workspace;
+      $('#trayConvLabel').textContent = activeConv.title;
+
+      const listHtml = conversations.map(c => {
+        const isSel = c.id === state.convId;
+        const root = c.agents[0];
+        const ctxPct = (((root.ctxCache + root.ctxInput + root.ctxOutput) / root.ctxLimit) * 100).toFixed(0);
+        const subsN = c.agents.length - 1;
+        return `
+          <div onclick="switchConversation('${c.id}', true)" class="px-2.5 py-2 rounded-xl cursor-pointer transition flex items-center justify-between gap-2 text-xs tabular" style="background:${isSel ? 'var(--seg-pill)' : 'transparent'}; box-shadow:${isSel ? 'var(--seg-pill-shadow)' : 'none'};" onmouseover="if(!${isSel})this.style.background='var(--card-hover)'" onmouseout="if(!${isSel})this.style.background='transparent'">
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="w-1.5 h-1.5 rounded-full shrink-0 ${c.running ? 'breathe' : ''}" style="background:${c.running ? 'var(--accent)' : 'var(--ink-3)'};"></span>
+              <div class="min-w-0">
+                <div class="font-medium truncate">${c.title}</div>
+                <div class="text-[10px]" style="color: var(--ink-3);">${subsN > 0 ? `1 主 · ${subsN} 子` : '单 Agent'} · Ctx ${ctxPct}%</div>
+              </div>
+            </div>
+            <span class="font-medium shrink-0" style="color: var(--ink-2);">${fmtUSD(convSummaryCost(c))}</span>
+          </div>
+        `;
+      }).join('');
+
+      $('#sessionPopoverList').innerHTML = listHtml;
+      $('#traySessionMenu').innerHTML = listHtml;
+    }
+
+    window.switchConversation = (convId, manual = false) => {
+      state.convId = convId;
+      if (manual) state.autoFollow = false;
+      state.scope = 'all';
+      state.pinnedReqId = null;
+      state.expandedReqId = null;
+      chartAnim.crossX = null;
+      $('#sessionPopover').classList.add('hidden');
+      $('#traySessionMenu').classList.add('hidden');
+      renderAll();
+    };
+
+    function renderSidebarTree() {
+      syncActiveConv();
+      renderSessionPickers();
+
+      const allM = compute('all');
+      const rootM = compute('root');
+      const subCost = Math.max(0, allM.sessionCost - rootM.sessionCost);
+      const subs = agents.slice(1);
+
+      $('#treeCountLabel').textContent = subs.length > 0 ? `1 主 · ${subs.length} 子` : '仅主 Agent';
+
+      springSet('hdrAll', allM.sessionCost, fmtUSD, $('#hdrAll'));
+      springSet('hdrRoot', rootM.sessionCost, fmtUSD, $('#hdrRoot'));
+      springSet('hdrSub', subCost, fmtUSD, $('#hdrSub'));
+
+      // Combined Node (only needed when there are subagents; hide cleanly for single-agent conv!)
+      if (subs.length > 0) {
+        $('#sidebarCombined').innerHTML = `
+          <div data-scope="all" class="agent-row ${state.scope === 'all' ? 'active' : ''} px-3 py-2.5 flex items-center justify-between">
+            <div class="flex items-center gap-2.5 min-w-0">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="color:${state.scope === 'all' ? 'var(--accent)' : 'var(--ink-2)'};">
+                <circle cx="12" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="19" r="2.5"/>
+                <path d="M12 7.5V13M12 13L6 16.5M12 13L18 16.5"/>
+              </svg>
+              <div class="min-w-0">
+                <div class="text-xs font-semibold truncate">整棵会话树</div>
+                <div class="text-[11px]" style="color: var(--ink-3);">合并统计</div>
+              </div>
+            </div>
+            <span class="text-xs font-semibold tabular">${fmtUSD(allM.sessionCost)}</span>
+          </div>
+        `;
+      } else {
+        $('#sidebarCombined').innerHTML = '';
+      }
+
+      const nodesEl = $('#sidebarTreeNodes');
+      const root = agents[0];
+      const rootUsed = root.ctxCache + root.ctxInput + root.ctxOutput;
+      const rootPct = ((rootUsed / root.ctxLimit) * 100).toFixed(1);
+      const isRootSelected = state.scope === 'root' || (subs.length === 0 && state.scope === 'all');
+
+      let html = `
+        <div data-scope="root" id="node-root" class="agent-row ${isRootSelected ? 'active' : ''} px-3 py-2 flex items-center justify-between">
+          <div class="flex items-center gap-2.5 min-w-0">
+            <span class="w-2 h-2 rounded-full shrink-0 ${getConv().running && state.activeAgentPing === 'root' ? 'breathe' : ''}" style="background: ${isRootSelected || (getConv().running && state.activeAgentPing === 'root') ? 'var(--accent)' : 'var(--ink-3)'};"></span>
+            <div class="min-w-0">
+              <div class="text-xs font-semibold truncate">${root.name}</div>
+              <div class="text-[11px] truncate" style="color: var(--ink-3);">${root.model} · ${rootPct}%</div>
+            </div>
+          </div>
+          <span class="text-xs font-medium tabular" style="color: var(--ink-2);">${fmtUSD(rootM.sessionCost)}</span>
+        </div>
+      `;
+
+      subs.forEach(s => {
+        const sm = compute(s.id);
+        const sUsed = s.ctxCache + s.ctxInput + s.ctxOutput;
+        const sPct = ((sUsed / s.ctxLimit) * 100).toFixed(1);
+        const isHot = state.activeAgentPing === s.id;
+        html += `
+          <div data-scope="${s.id}" id="node-${s.id}" class="agent-row ${state.scope === s.id ? 'active' : ''} ml-5 px-3 py-2 flex items-center justify-between">
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="w-1.5 h-1.5 rounded-full shrink-0 ${isHot ? 'breathe' : ''}" style="background: ${isHot || state.scope === s.id ? 'var(--accent)' : 'var(--ink-3)'};"></span>
+              <div class="min-w-0">
+                <div class="text-xs font-medium truncate">${s.name}</div>
+                <div class="text-[11px] truncate" style="color: var(--ink-3);">${sPct}% · ${sm.avgTps.toFixed(0)} t/s</div>
+              </div>
+            </div>
+            <span class="text-xs tabular" style="color: var(--ink-2);">${fmtUSD(sm.sessionCost)}</span>
+          </div>
+        `;
+      });
+
+      nodesEl.innerHTML = html;
+
+      // Bind clicks
+      $$('[data-scope]').forEach(el => {
+        el.onclick = () => {
+          state.scope = el.dataset.scope;
+          renderAll();
+        };
+      });
+
+      // Draw crisp curved SVG tree connectors with live pulse on active branch
+      requestAnimationFrame(drawTreeConnectors);
+    }
+
+    function drawTreeConnectors() {
+      const wrap = $('#sidebarTreeWrap');
+      const svg = $('#treeLinesSvg');
+      const rootEl = $('#node-root');
+      if (!wrap || !rootEl) return;
+      const wRect = wrap.getBoundingClientRect();
+      const rRect = rootEl.getBoundingClientRect();
+      const startX = 15;
+      const startY = (rRect.top - wRect.top) + rRect.height - 4;
+
+      let paths = '';
+      agents.slice(1).forEach(s => {
+        const el = document.getElementById('node-' + s.id);
+        if (!el) return;
+        const eRect = el.getBoundingClientRect();
+        const endX = (eRect.left - wRect.left) + 2;
+        const endY = (eRect.top - wRect.top) + eRect.height / 2;
+        const d = `M ${startX} ${startY} L ${startX} ${endY - 8} Q ${startX} ${endY} ${startX + 8} ${endY} L ${endX} ${endY}`;
+        const active = state.activeAgentPing === s.id || state.scope === s.id;
+        paths += `<path d="${d}" fill="none" stroke="var(--tree-stroke)" stroke-width="1.35" stroke-linecap="round"/>`;
+        if (active) {
+          paths += `<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.75" stroke-linecap="round" class="tree-flow"/>`;
+        }
+      });
+      svg.innerHTML = paths;
+    }
+
+    // =========================================================================
+    // 6. Render Main Desktop View
+    // =========================================================================
+    const metricMeta = {
+      tps:   { title: '纯吐字速度 · 逐次请求', unit: 't/s', get: r => r.tps, fmt: v => v.toFixed(1) + ' t/s' },
+      ttft:  { title: '首字时长 TTFT · 逐次请求', unit: 's', get: r => r.ttft, fmt: v => v.toFixed(2) + 's' },
+      cache: { title: '缓存命中率 · 逐次请求', unit: '%', get: r => (r.input + r.cacheRead) ? (r.cacheRead / (r.input + r.cacheRead)) * 100 : 0, fmt: v => v.toFixed(1) + '%' },
+      cost:  { title: '单次费用 · 逐次请求', unit: '$', get: r => r.cost, fmt: v => '$' + v.toFixed(3) }
+    };
+
+    function renderDesktop() {
+      const m = compute(state.scope);
+
+      const subsN = agents.length - 1;
+      if (state.scope === 'all' && subsN > 0) {
+        $('#mainTitle').textContent = '整棵会话树';
+        $('#mainModel').textContent = `主 + ${subsN} 子节点`;
+      } else {
+        const ag = state.scope === 'all' ? agents[0] : getAgent(state.scope);
+        $('#mainTitle').textContent = ag.name;
+        $('#mainModel').textContent = ag.model;
+      }
+
+      $('#activeReqHint').textContent = `最近 #${m.last.id} · ${getAgent(m.last.agentId)?.name || ''}`;
+
+      // Hero Context: Tree view shows highest watermark + agent name; single node shows its own exact numbers
+      const isTreeView = state.scope === 'all' && subsN > 0;
+      const targetAgents = isTreeView ? agents : [state.scope === 'all' ? agents[0] : getAgent(state.scope)];
+
+      if (isTreeView) {
+        let peakAg = targetAgents[0], peakPct = -1;
+        targetAgents.forEach(ag => {
+          const p = ((ag.ctxCache + ag.ctxInput + ag.ctxOutput) / ag.ctxLimit) * 100;
+          if (p > peakPct) { peakPct = p; peakAg = ag; }
+        });
+        $('#heroCtxPrefix').textContent = '最高水位';
+        springSet('heroCtxPct', peakPct, v => v.toFixed(1) + '%', $('#heroCtxPct'));
+        $('#heroCtxAbs').textContent = peakAg.name;
+      } else {
+        const ag = targetAgents[0];
+        const used = ag.ctxCache + ag.ctxInput + ag.ctxOutput;
+        const pct = (used / ag.ctxLimit) * 100;
+        $('#heroCtxPrefix').textContent = '';
+        springSet('heroCtxPct', pct, v => v.toFixed(1) + '%', $('#heroCtxPct'));
+        $('#heroCtxAbs').textContent = `${fmtK(used)} / ${fmtK(ag.ctxLimit)}`;
+      }
+
+      $('#heroCtxBars').innerHTML = targetAgents.map((ag, idx) => {
+        const used = ag.ctxCache + ag.ctxInput + ag.ctxOutput;
+        const pct = Math.min(100, (used / ag.ctxLimit) * 100);
+        const fill = pct > 80 ? '#FF3B30' : pct > 60 ? 'var(--amber)' : idx === 0 ? 'var(--accent)' : 'var(--ink-2)';
+        return `
+          <div class="${isTreeView ? 'space-y-1 cursor-pointer group' : ''}" ${isTreeView ? `onclick="focusAgent('${ag.id}')"` : ''}>
+            ${isTreeView ? `
+              <div class="flex items-center justify-between text-[11px] tabular" style="color: var(--ink-2);">
+                <span class="group-hover:text-[#007AFF] transition">${ag.name}</span>
+                <span>${fmtK(used)} / ${fmtK(ag.ctxLimit)} · ${pct.toFixed(1)}%</span>
+              </div>
+            ` : ''}
+            <div class="liquid-track ${isTreeView ? 'h-1.5' : 'h-2.5'}">
+              <div class="liquid-bar" style="width:${pct.toFixed(2)}%; background:${fill}; opacity:${idx === 0 ? 1 : 0.72};"></div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      // Spring-animated KPI values (Zero ambiguity between Tree Aggregate vs Single-Node view!)
+      const lastAgName = getAgent(m.last.agentId)?.name || '';
+      const shortSrc = lastAgName.length > 10 ? lastAgName.slice(0, 10) + '…' : lastAgName;
+
+      $('#lblCost').textContent = isTreeView ? '全树本轮' : '本轮费用';
+      $('#subLblCost').textContent = isTreeView ? '全树会话' : '会话';
+      springSet('valTurnCost', m.turnCost, fmtUSD, $('#valTurnCost'));
+      springSet('valSessionCost', m.sessionCost, fmtUSD, $('#valSessionCost'));
+
+      if (isTreeView) {
+        // Tree view: big number = Tree weighted total/avg; subline = latest single request + its agent source
+        $('#lblCache').textContent = '全树命中';
+        $('#subLblCache').textContent = '最新';
+        springSet('valCacheMain', m.totalHit, v => v.toFixed(1) + '%', $('#valCacheMain'));
+        springSet('valCacheSub', m.lastHit, v => v.toFixed(1) + '%', $('#valCacheSub'));
+        $('#srcCache').textContent = shortSrc ? ` · ${shortSrc}` : '';
+
+        $('#lblTtft').textContent = '全树均 TTFT';
+        $('#subLblTtft').textContent = '最新';
+        springSet('valTtftMain', m.avgTtft, v => v.toFixed(2) + 's', $('#valTtftMain'));
+        springSet('valTtftSub', m.last.ttft, v => v.toFixed(2) + 's', $('#valTtftSub'));
+        $('#srcTtft').textContent = shortSrc ? ` · ${shortSrc}` : '';
+
+        $('#lblTps').textContent = '全树均速';
+        $('#subLblTps').textContent = '最新';
+        springSet('valTpsMain', m.avgTps, v => v.toFixed(1), $('#valTpsMain'));
+        springSet('valTpsSub', m.last.tps, v => v.toFixed(1), $('#valTpsSub'));
+        $('#srcTps').textContent = shortSrc ? ` · ${shortSrc}` : '';
+      } else {
+        // Single node view: big number = this node's latest request; subline = this node's total/avg
+        $('#lblCache').textContent = '缓存命中';
+        $('#subLblCache').textContent = '总计';
+        springSet('valCacheMain', m.lastHit, v => v.toFixed(1) + '%', $('#valCacheMain'));
+        springSet('valCacheSub', m.totalHit, v => v.toFixed(1) + '%', $('#valCacheSub'));
+        $('#srcCache').textContent = '';
+
+        $('#lblTtft').textContent = '首字时长';
+        $('#subLblTtft').textContent = '均值';
+        springSet('valTtftMain', m.last.ttft, v => v.toFixed(2) + 's', $('#valTtftMain'));
+        springSet('valTtftSub', m.avgTtft, v => v.toFixed(2) + 's', $('#valTtftSub'));
+        $('#srcTtft').textContent = '';
+
+        $('#lblTps').textContent = '吐字速度';
+        $('#subLblTps').textContent = '均速';
+        springSet('valTpsMain', m.last.tps, v => v.toFixed(1), $('#valTpsMain'));
+        springSet('valTpsSub', m.avgTps, v => v.toFixed(1) + ' t/s', $('#valTpsSub'));
+        $('#srcTps').textContent = '';
+      }
+
+      // Highlight active metric tile
+      $$('.metric-tile').forEach(t => t.classList.toggle('selected', t.dataset.metric === state.metric));
+      $('#chartHeading').textContent = metricMeta[state.metric].title;
+
+      // Update morph chart target points, scrubber bar, and clean per-request list
+      syncChartTargets(m.list);
+      renderFocusedInspector(m.list);
+      renderCleanReqList(m.list);
+      updateSeg('#reqViewSeg', '#reqViewThumb', state.reqView, 'reqview');
+    }
+
+    function getInspectedReq(list) {
+      const slice = list.slice(-CHART_N);
+      if (!slice.length) return { req: null, idx: -1, slice };
+      if (state.hoverChartIdx >= 0 && state.hoverChartIdx < slice.length) {
+        return { req: slice[state.hoverChartIdx], idx: state.hoverChartIdx, slice };
+      }
+      if (state.pinnedReqId !== null) {
+        const pi = slice.findIndex(r => r.id === state.pinnedReqId);
+        if (pi >= 0) return { req: slice[pi], idx: pi, slice };
+      }
+      return { req: slice[slice.length - 1], idx: slice.length - 1, slice };
+    }
+
+    function renderFocusedInspector(list) {
+      const { req } = getInspectedReq(list);
+      if (!req) return;
+      const ag = getAgent(req.agentId);
+      const hit = (req.input + req.cacheRead) ? (req.cacheRead / (req.input + req.cacheRead)) * 100 : 0;
+      $('#inspTitle').textContent = `#${req.id} ${ag ? ag.name : ''}`;
+      $('#inspTokens').textContent = `输入 ${fmtK(req.input)} · 缓存 ${fmtK(req.cacheRead)} · 输出 ${fmtK(req.output)}`;
+      $('#inspHit').textContent = `${hit.toFixed(1)}%`;
+      $('#inspTtft').textContent = `${req.ttft.toFixed(2)}s`;
+      $('#inspTps').textContent = `${req.tps.toFixed(1)}`;
+      $('#inspCost').textContent = fmtUSD(req.cost);
+    }
+
+    function renderCleanReqList(list) {
+      const box = $('#cleanReqList');
+      if (!box) return;
+      const items = list.slice(-16).reverse();
+      box.innerHTML = items.map(r => {
+        const ag = getAgent(r.agentId);
+        const hit = (r.input + r.cacheRead) ? (r.cacheRead / (r.input + r.cacheRead)) * 100 : 0;
+        const totTok = Math.max(1, r.input + r.cacheRead + r.output);
+        const pCR = (r.cacheRead / totTok) * 100;
+        const pIn = (r.input / totTok) * 100;
+        const pOut = (r.output / totTok) * 100;
+        const isOpen = state.expandedReqId === r.id;
+        return `
+          <div class="cursor-pointer transition" onclick="toggleReqDetail(${r.id})" style="border-color: var(--divider);">
+            <div class="grid grid-cols-12 items-center px-2 py-2 text-xs tabular rounded-lg transition" style="background: ${isOpen ? 'var(--card-hover)' : 'transparent'};" onmouseover="if(!${isOpen})this.style.background='var(--seg-bg)'" onmouseout="if(!${isOpen})this.style.background='transparent'">
+              <div class="col-span-4 flex items-center gap-1.5 min-w-0">
+                <span style="color: var(--ink-3);">#${r.id}</span>
+                <span class="font-medium truncate">${ag ? ag.name : ''}</span>
+              </div>
+              <div class="col-span-2 text-right font-medium">${hit.toFixed(1)}%</div>
+              <div class="col-span-2 text-right" style="color: var(--ink-2);">${r.ttft.toFixed(2)}s</div>
+              <div class="col-span-2 text-right font-semibold">${r.tps.toFixed(1)}</div>
+              <div class="col-span-2 text-right" style="color: var(--ink-2);">${fmtUSD(r.cost)}</div>
+            </div>
+            <div class="req-detail ${isOpen ? 'open' : ''}">
+              <div class="px-2 pb-2.5 pt-1 space-y-1.5">
+                <div class="liquid-track h-1.5 flex">
+                  <div style="width:${pCR.toFixed(1)}%; background: var(--accent);"></div>
+                  <div style="width:${pIn.toFixed(1)}%; background: var(--ink-2); opacity: 0.55;"></div>
+                  <div style="width:${pOut.toFixed(1)}%; background: var(--amber);"></div>
+                </div>
+                <div class="flex items-center justify-between text-[11px] tabular" style="color: var(--ink-2);">
+                  <span>缓存 ${fmtK(r.cacheRead)} · 新增输入 ${fmtK(r.input)} · 输出 ${fmtK(r.output)}</span>
+                  <span>${ag ? ag.model : ''}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    window.toggleReqDetail = (id) => {
+      state.expandedReqId = state.expandedReqId === id ? null : id;
+      renderCleanReqList(compute(state.scope).list);
+    };
+
+    // =========================================================================
+    // 7. Smooth 60fps Morphing Curve Chart (Interpolates points & crosshair!)
+    // =========================================================================
+    const chartCanvas = $('#morphChart');
+    const chartCtx = chartCanvas.getContext('2d');
+    const CHART_N = 18;
+    const chartAnim = {
+      curr: new Array(CHART_N).fill(0.5),
+      target: new Array(CHART_N).fill(0.5),
+      raw: [],
+      maxV: 1,
+      crossX: null
+    };
+
+    function syncChartTargets(list) {
+      const slice = list.slice(-CHART_N);
+      const cfg = metricMeta[state.metric];
+      const vals = slice.map(cfg.get);
+      const maxV = state.metric === 'cache' ? 100 : Math.max(...vals, 0.001) * 1.18;
+      chartAnim.raw = slice;
+      chartAnim.maxV = maxV;
+      for (let i = 0; i < CHART_N; i++) {
+        const idx = i - (CHART_N - slice.length);
+        chartAnim.target[i] = idx >= 0 ? vals[idx] / maxV : 0;
+      }
+    }
+
+    function renderMorphChart() {
+      const rect = chartCanvas.getBoundingClientRect();
+      if (!rect.width) return;
+      const dpr = window.devicePixelRatio || 1;
+      if (chartCanvas.width !== Math.round(rect.width * dpr) || chartCanvas.height !== Math.round(rect.height * dpr)) {
+        chartCanvas.width = Math.round(rect.width * dpr);
+        chartCanvas.height = Math.round(rect.height * dpr);
+      }
+      chartCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const W = rect.width, H = rect.height;
+      chartCtx.clearRect(0, 0, W, H);
+
+      // Smoothly interpolate toward target every frame
+      for (let i = 0; i < CHART_N; i++) {
+        chartAnim.curr[i] += (chartAnim.target[i] - chartAnim.curr[i]) * 0.16;
+      }
+
+      const slice = chartAnim.raw;
+      const offset = CHART_N - slice.length;
+      if (!slice.length) return;
+
+      const padX = 10, padT = 14, padB = 14;
+      const plotW = W - padX * 2, plotH = H - padT - padB;
+      const pts = [];
+      for (let i = offset; i < CHART_N; i++) {
+        const t = slice.length === 1 ? 0.5 : (i - offset) / (slice.length - 1);
+        pts.push({
+          x: padX + t * plotW,
+          y: padT + plotH - chartAnim.curr[i] * plotH,
+          r: slice[i - offset]
+        });
+      }
+
+      const isDark = state.theme === 'dark';
+      const strokeCol = state.metric === 'ttft' ? (isDark ? '#FF9F0A' : '#E58500') : (isDark ? '#0A84FF' : '#007AFF');
+      const fillTop = state.metric === 'ttft' ? 'rgba(245, 158, 11, 0.22)' : 'rgba(0, 122, 255, 0.22)';
+
+      // Soft area wash
+      const grad = chartCtx.createLinearGradient(0, padT, 0, H - padB);
+      grad.addColorStop(0, fillTop);
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      chartCtx.beginPath();
+      chartCtx.moveTo(pts[0].x, H - padB);
+      pts.forEach((p, idx) => {
+        if (idx === 0) chartCtx.lineTo(p.x, p.y);
+        else {
+          const prev = pts[idx - 1];
+          const cx = (prev.x + p.x) / 2;
+          chartCtx.bezierCurveTo(cx, prev.y, cx, p.y, p.x, p.y);
+        }
+      });
+      chartCtx.lineTo(pts[pts.length - 1].x, H - padB);
+      chartCtx.closePath();
+      chartCtx.fillStyle = grad;
+      chartCtx.fill();
+
+      // Clean luminous curve
+      chartCtx.beginPath();
+      pts.forEach((p, idx) => {
+        if (idx === 0) chartCtx.moveTo(p.x, p.y);
+        else {
+          const prev = pts[idx - 1];
+          const cx = (prev.x + p.x) / 2;
+          chartCtx.bezierCurveTo(cx, prev.y, cx, p.y, p.x, p.y);
+        }
+      });
+      chartCtx.strokeStyle = strokeCol;
+      chartCtx.lineWidth = 2.2;
+      chartCtx.lineCap = 'round';
+      chartCtx.stroke();
+
+      // Subtle discrete dots for every request + spring-gliding active crosshair
+      const { idx: activeIdx } = getInspectedReq(slice);
+      pts.forEach((p, i) => {
+        if (i === activeIdx) return;
+        chartCtx.beginPath();
+        chartCtx.arc(p.x, p.y, 2.2, 0, Math.PI * 2);
+        chartCtx.fillStyle = isDark ? 'rgba(255,255,255,0.28)' : 'rgba(17,17,19,0.20)';
+        chartCtx.fill();
+      });
+
+      if (activeIdx >= 0 && activeIdx < pts.length) {
+        const hp = pts[activeIdx];
+        if (chartAnim.crossX === null) chartAnim.crossX = hp.x;
+        chartAnim.crossX += (hp.x - chartAnim.crossX) * 0.24;
+
+        chartCtx.beginPath();
+        chartCtx.moveTo(chartAnim.crossX, padT - 4);
+        chartCtx.lineTo(chartAnim.crossX, H - padB + 4);
+        chartCtx.strokeStyle = isDark ? 'rgba(255,255,255,0.22)' : 'rgba(17,17,19,0.16)';
+        chartCtx.lineWidth = 1;
+        chartCtx.stroke();
+
+        // Outer soft halo
+        chartCtx.beginPath();
+        chartCtx.arc(hp.x, hp.y, 9, 0, Math.PI * 2);
+        chartCtx.fillStyle = state.metric === 'ttft' ? 'rgba(245,158,11,0.18)' : 'rgba(0,122,255,0.18)';
+        chartCtx.fill();
+
+        chartCtx.beginPath();
+        chartCtx.arc(hp.x, hp.y, 4.8, 0, Math.PI * 2);
+        chartCtx.fillStyle = strokeCol;
+        chartCtx.fill();
+        chartCtx.lineWidth = 2;
+        chartCtx.strokeStyle = isDark ? '#181b24' : '#ffffff';
+        chartCtx.stroke();
+      }
+      chartAnim._pts = pts;
+    }
+
+    chartCanvas.addEventListener('mousemove', e => {
+      const pts = chartAnim._pts || [];
+      const rect = chartCanvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      let best = -1, bestD = 32;
+      pts.forEach((p, i) => {
+        const d = Math.abs(p.x - mx);
+        if (d < bestD) { bestD = d; best = i; }
+      });
+      if (best !== state.hoverChartIdx) {
+        state.hoverChartIdx = best;
+        renderFocusedInspector(compute(state.scope).list);
+      }
+    });
+    chartCanvas.addEventListener('click', () => {
+      const pts = chartAnim._pts || [];
+      if (state.hoverChartIdx >= 0 && state.hoverChartIdx < pts.length) {
+        state.pinnedReqId = pts[state.hoverChartIdx].r.id;
+        renderFocusedInspector(compute(state.scope).list);
+      }
+    });
+    chartCanvas.addEventListener('mouseleave', () => {
+      state.hoverChartIdx = -1;
+      renderFocusedInspector(compute(state.scope).list);
+    });
+
+    // =========================================================================
+    // 8. Pulse-Style Minimal Tray Flyout + 60fps Animated Dot-Matrix
+    // =========================================================================
+    const DOT_COLS = 34, DOT_ROWS = 8;
+    const dotLevelsA = new Array(DOT_COLS).fill(0);
+    const dotTargetsA = new Array(DOT_COLS).fill(0);
+    const dotLevelsB = new Array(DOT_COLS).fill(0);
+    const dotTargetsB = new Array(DOT_COLS).fill(0);
+
+    function syncDotTargets() {
+      const recent = requests.slice(-DOT_COLS);
+      const off = DOT_COLS - recent.length;
+      for (let c = 0; c < DOT_COLS; c++) {
+        const r = c >= off ? recent[c - off] : null;
+        if (!r) { dotTargetsA[c] = 0; dotTargetsB[c] = 0; continue; }
+        if (state.trayTab === 'overview') {
+          dotTargetsA[c] = Math.min(DOT_ROWS, (r.tps / 170) * DOT_ROWS);
+          dotTargetsB[c] = Math.min(DOT_ROWS - 2, (r.cost / 0.024) * 5);
+        } else if (state.trayTab === 'perf') {
+          dotTargetsA[c] = Math.min(DOT_ROWS, (r.tps / 170) * DOT_ROWS);
+          dotTargetsB[c] = Math.min(DOT_ROWS - 1, (r.ttft / 3.2) * 6);
+        } else {
+          const hit = (r.input + r.cacheRead) ? (r.cacheRead / (r.input + r.cacheRead)) : 0;
+          dotTargetsA[c] = r.agentId === 'root' ? Math.max(2, hit * DOT_ROWS) : 0;
+          dotTargetsB[c] = r.agentId !== 'root' ? Math.max(2, hit * DOT_ROWS) : 0;
+        }
+      }
+    }
+
+    const dotCanvas = $('#dotMatrix');
+    const dotCtx = dotCanvas.getContext('2d');
+    function renderDotMatrix() {
+      const rect = dotCanvas.getBoundingClientRect();
+      if (!rect.width) return;
+      const dpr = window.devicePixelRatio || 1;
+      if (dotCanvas.width !== Math.round(rect.width * dpr) || dotCanvas.height !== Math.round(rect.height * dpr)) {
+        dotCanvas.width = Math.round(rect.width * dpr);
+        dotCanvas.height = Math.round(rect.height * dpr);
+      }
+      dotCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const W = rect.width, H = rect.height;
+      dotCtx.clearRect(0, 0, W, H);
+
+      const gapX = W / DOT_COLS, gapY = H / DOT_ROWS;
+      const rad = Math.min(gapX, gapY) * 0.28;
+      const isDark = state.theme === 'dark';
+      const idleCol = isDark ? 'rgba(255,255,255,0.10)' : 'rgba(17,17,19,0.08)';
+      const colA = isDark ? '#0A84FF' : '#007AFF';
+      const colB = isDark ? '#FF9F0A' : '#E58500';
+
+      for (let c = 0; c < DOT_COLS; c++) {
+        dotLevelsA[c] += (dotTargetsA[c] - dotLevelsA[c]) * 0.16;
+        dotLevelsB[c] += (dotTargetsB[c] - dotLevelsB[c]) * 0.16;
+        const aH = Math.round(dotLevelsA[c]);
+        const bH = Math.round(dotLevelsB[c]);
+        const isHoverCol = c === state.hoverDotCol;
+
+        if (isHoverCol) {
+          dotCtx.fillStyle = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(17,17,19,0.05)';
+          dotCtx.beginPath();
+          dotCtx.roundRect(c * gapX + 1, 0, gapX - 2, H, 4);
+          dotCtx.fill();
+        }
+
+        for (let r = 0; r < DOT_ROWS; r++) {
+          const fromBot = DOT_ROWS - 1 - r;
+          let fill = idleCol;
+          if (state.trayTab === 'agents') {
+            if (fromBot < aH) fill = colA;
+            else if (fromBot < bH) fill = colB;
+          } else {
+            if (fromBot < bH && c % 2 === 1) fill = colB;
+            else if (fromBot < aH) fill = colA;
+          }
+          dotCtx.beginPath();
+          dotCtx.arc(c * gapX + gapX / 2, r * gapY + gapY / 2, isHoverCol ? rad * 1.18 : rad, 0, Math.PI * 2);
+          dotCtx.fillStyle = fill;
+          dotCtx.fill();
+        }
+      }
+    }
+
+    dotCanvas.addEventListener('mousemove', e => {
+      const rect = dotCanvas.getBoundingClientRect();
+      const col = Math.floor(((e.clientX - rect.left) / rect.width) * DOT_COLS);
+      const recent = requests.slice(-DOT_COLS);
+      const off = DOT_COLS - recent.length;
+      const req = col >= off && col < DOT_COLS ? recent[col - off] : null;
+      const pill = $('#dotHoverPill');
+      if (req) {
+        state.hoverDotCol = col;
+        const hit = (req.input + req.cacheRead) ? ((req.cacheRead / (req.input + req.cacheRead)) * 100).toFixed(0) : '0';
+        pill.textContent = `#${req.id} · 命中 ${hit}% · ${req.ttft.toFixed(2)}s · ${req.tps.toFixed(0)} t/s`;
+        pill.classList.remove('hidden');
+      } else {
+        state.hoverDotCol = -1;
+        pill.classList.add('hidden');
+      }
+    });
+    dotCanvas.addEventListener('mouseleave', () => {
+      state.hoverDotCol = -1;
+      $('#dotHoverPill').classList.add('hidden');
+    });
+
+    function updateSeg(segId, thumbId, activeVal, attr) {
+      const seg = $(segId);
+      const thumb = $(thumbId);
+      const items = $$(`${segId} .seg-item`);
+      const idx = items.findIndex(el => el.dataset[attr] === activeVal);
+      items.forEach((el, i) => el.classList.toggle('active', i === idx));
+      const w = (seg.clientWidth - 6) / items.length;
+      thumb.style.width = w + 'px';
+      thumb.style.transform = `translateX(${idx * w}px)`;
+    }
+
+    function renderTray() {
+      const allM = compute('all');
+      const rootM = compute('root');
+      const root = agents[0];
+      const rootUsed = root.ctxCache + root.ctxInput + root.ctxOutput;
+      const rootPct = (rootUsed / root.ctxLimit) * 100;
+
+      $('#trayDockStat').textContent = `${rootPct.toFixed(1)}% · ${allM.last.tps.toFixed(0)} t/s`;
+
+      const mid = $('#tMidRows');
+      const bot = $('#tBotRows');
+
+      if (state.trayTab === 'overview') {
+        $('#trayTitle').textContent = '实时概览';
+        $('#tHero1Label').textContent = '本轮费用';
+        springSet('tH1', allM.turnCost, fmtUSD, $('#tHero1Val'));
+        $('#tHero1Sub').textContent = `/ ${fmtUSD(allM.sessionCost)}`;
+        $('#tHero2Label').textContent = '吐字速度';
+        springSet('tH2', allM.last.tps, v => v.toFixed(1), $('#tHero2Val'));
+        $('#tHero2Sub').textContent = 't/s';
+
+        $('#tMidTitle').textContent = '上下文窗口';
+        mid.innerHTML = agents.slice(0, 2).map((ag, i) => {
+          const u = ag.ctxCache + ag.ctxInput + ag.ctxOutput;
+          const p = (u / ag.ctxLimit) * 100;
+          return `
+            <div class="space-y-1 cursor-pointer" onclick="focusAgent('${ag.id}')">
+              <div class="flex justify-between text-xs tabular">
+                <span class="font-medium">${ag.name}</span>
+                <span style="color: var(--ink-2);">${fmtK(u)} / ${fmtK(ag.ctxLimit)}</span>
+              </div>
+              <div class="liquid-track h-1.5">
+                <div class="liquid-bar" style="width:${p.toFixed(1)}%; background:${i === 0 ? 'var(--accent)' : 'var(--amber)'};"></div>
+              </div>
+            </div>
+          `;
+        }).join('');
+
+        $('#tBotTitle').textContent = '实时指标（单次 / 总计）';
+        bot.innerHTML = `
+          <div class="flex items-center justify-between py-1 px-1 text-xs tabular">
+            <span style="color: var(--ink-2);">缓存命中率</span>
+            <span><b>${allM.lastHit.toFixed(1)}%</b> <span style="color: var(--ink-3);">/ ${allM.totalHit.toFixed(1)}%</span></span>
+          </div>
+          <div class="flex items-center justify-between py-1 px-1 text-xs tabular">
+            <span style="color: var(--ink-2);">首字时长 TTFT</span>
+            <span><b>${allM.last.ttft.toFixed(2)}s</b> <span style="color: var(--ink-3);">/ ${allM.avgTtft.toFixed(2)}s</span></span>
+          </div>
+        `;
+      } else if (state.trayTab === 'perf') {
+        $('#trayTitle').textContent = '速率与缓存';
+        $('#tHero1Label').textContent = '吐字速度';
+        springSet('tH1', allM.last.tps, v => v.toFixed(1), $('#tHero1Val'));
+        $('#tHero1Sub').textContent = `均 ${allM.avgTps.toFixed(0)}`;
+        $('#tHero2Label').textContent = '首字 TTFT';
+        springSet('tH2', allM.last.ttft, v => v.toFixed(2) + 's', $('#tHero2Val'));
+        $('#tHero2Sub').textContent = `均 ${allM.avgTtft.toFixed(2)}s`;
+
+        $('#tMidTitle').textContent = '缓存命中（单次 vs 总计）';
+        mid.innerHTML = `
+          <div class="space-y-1">
+            <div class="flex justify-between text-xs tabular">
+              <span>最新单次</span>
+              <span class="font-medium">${allM.lastHit.toFixed(1)}%</span>
+            </div>
+            <div class="liquid-track h-1.5"><div class="liquid-bar" style="width:${allM.lastHit.toFixed(1)}%; background: var(--accent);"></div></div>
+          </div>
+          <div class="space-y-1">
+            <div class="flex justify-between text-xs tabular">
+              <span style="color: var(--ink-2);">会话总计</span>
+              <span style="color: var(--ink-2);">${allM.totalHit.toFixed(1)}%</span>
+            </div>
+            <div class="liquid-track h-1.5"><div class="liquid-bar" style="width:${allM.totalHit.toFixed(1)}%; background: var(--ink-2); opacity:0.6;"></div></div>
+          </div>
+        `;
+
+        $('#tBotTitle').textContent = '最近请求（命中 · TTFT · TPS）';
+        bot.innerHTML = requests.slice(-3).reverse().map(r => {
+          const hit = (r.input + r.cacheRead) ? ((r.cacheRead / (r.input + r.cacheRead)) * 100).toFixed(0) : '0';
+          return `
+            <div class="flex items-center justify-between py-1 px-1 text-xs tabular">
+              <span style="color: var(--ink-2);">#${r.id} ${getAgent(r.agentId).name}</span>
+              <span>${hit}% · ${r.ttft.toFixed(2)}s · <b>${r.tps.toFixed(0)}</b></span>
+            </div>
+          `;
+        }).join('');
+      } else {
+        const subCost = Math.max(0, allM.sessionCost - rootM.sessionCost);
+        $('#trayTitle').textContent = '父子 Agent 树';
+        $('#tHero1Label').textContent = '主 Agent';
+        springSet('tH1', rootM.sessionCost, fmtUSD, $('#tHero1Val'));
+        $('#tHero1Sub').textContent = `${Math.round((rootM.sessionCost / allM.sessionCost) * 100)}%`;
+        $('#tHero2Label').textContent = '子 Agent 合计';
+        springSet('tH2', subCost, fmtUSD, $('#tHero2Val'));
+        $('#tHero2Sub').textContent = `总 ${fmtUSD(allM.sessionCost)}`;
+
+        $('#tMidTitle').textContent = '费用结构（主 vs 子）';
+        const rPct = (rootM.sessionCost / allM.sessionCost) * 100;
+        mid.innerHTML = `
+          <div class="liquid-track h-2 flex">
+            <div class="liquid-bar" style="width:${rPct.toFixed(1)}%; background: var(--accent); border-radius: 999px 0 0 999px;"></div>
+            <div class="liquid-bar" style="width:${(100 - rPct).toFixed(1)}%; background: var(--amber); border-radius: 0 999px 999px 0;"></div>
+          </div>
+        `;
+
+        $('#tBotTitle').textContent = '节点明细（点击联动主窗）';
+        bot.innerHTML = agents.map((ag, idx) => {
+          const am = compute(ag.id);
+          return `
+            <div onclick="focusAgent('${ag.id}')" class="flex items-center justify-between py-1.5 px-2 rounded-xl cursor-pointer transition text-xs tabular" onmouseover="this.style.background='var(--card-hover)'" onmouseout="this.style.background='transparent'">
+              <span class="${idx > 0 ? 'pl-3' : 'font-medium'}" style="color: ${idx > 0 ? 'var(--ink-2)' : 'var(--ink-1)'};">${idx > 0 ? '└ ' : ''}${ag.name}</span>
+              <span>${fmtUSD(am.sessionCost)} <span style="color: var(--ink-3);">· ${am.avgTps.toFixed(0)}</span></span>
+            </div>
+          `;
+        }).join('');
+      }
+
+      syncDotTargets();
+      updateSeg('#traySeg', '#trayThumb', state.trayTab, 'tab');
+    }
+
+    window.focusAgent = id => {
+      state.scope = id;
+      if (state.layout === 'tray') setLayout('both');
+      renderAll();
+      const win = $('#appWindow');
+      win.classList.remove('req-ping');
+      void win.offsetWidth;
+      win.classList.add('req-ping');
+    };
+
+    // =========================================================================
+    // 9. Cursor-Tracking Specular Glass Sheen
+    // =========================================================================
+    document.addEventListener('pointermove', e => {
+      $$('.glass-tile').forEach(tile => {
+        const rect = tile.getBoundingClientRect();
+        if (e.clientX >= rect.left - 40 && e.clientX <= rect.right + 40 && e.clientY >= rect.top - 40 && e.clientY <= rect.bottom + 40) {
+          tile.style.setProperty('--mx', (e.clientX - rect.left) + 'px');
+          tile.style.setProperty('--my', (e.clientY - rect.top) + 'px');
+        }
+      });
+    });
+
+    // =========================================================================
+    // 10. Multi-Conversation Concurrent Request Simulator
+    // =========================================================================
+    function simulateRequest(forceActiveConv = false) {
+      const runningConvs = conversations.filter(c => c.running);
+      const targetConv = forceActiveConv
+        ? getConv()
+        : runningConvs[Math.random() < 0.65 ? 0 : Math.min(1, runningConvs.length - 1)];
+
+      const agList = targetConv.agents;
+      const ag = agList.length === 1 || Math.random() < 0.55
+        ? agList[0]
+        : agList[1 + Math.floor(Math.random() * (agList.length - 1))];
+      targetConv.activeAgentPing = ag.id;
+
+      const prev = ag.ctxCache + ag.ctxInput + ag.ctxOutput;
+      const hitRatio = Math.random() < 0.1 ? 0.45 : 0.86 + Math.random() * 0.11;
+      const newIn = Math.round(1200 + Math.random() * 2600);
+      const cacheR = Math.round(prev * hitRatio);
+      const out = Math.round(500 + Math.random() * 1100);
+      const isFlash = ag.model.includes('Flash');
+      const isClaude = ag.model.includes('Claude');
+      const baseTps = isFlash ? 152 : isClaude ? 94 : 126;
+      const tps = +(baseTps + (Math.random() - 0.5) * 24).toFixed(1);
+      const baseTtft = isFlash ? 0.92 : isClaude ? 2.1 : 1.65;
+      const ttft = +(Math.max(0.55, baseTtft + (Math.random() - 0.5) * 0.65)).toFixed(2);
+      const rateIn = isClaude ? 3.0 : 1.25;
+      const rateOut = isClaude ? 15.0 : 5.0;
+      const cost = +((newIn * rateIn + cacheR * (rateIn * 0.1) + out * rateOut) / 1e6).toFixed(4);
+
+      if (prev + newIn + out < ag.ctxLimit * 0.85) {
+        ag.ctxCache = cacheR; ag.ctxInput = newIn; ag.ctxOutput = out;
+      } else {
+        ag.ctxCache = Math.round(ag.ctxLimit * 0.24); ag.ctxInput = newIn; ag.ctxOutput = out;
+      }
+
+      const nextId = targetConv.requests.length ? targetConv.requests[targetConv.requests.length - 1].id + 1 : 1;
+      targetConv.requests.push({ id: nextId, agentId: ag.id, input: newIn, cacheRead: cacheR, output: out, ttft, tps, cost, inTurn: true });
+      if (targetConv.requests.length > 60) targetConv.requests.shift();
+
+      // Auto-follow switches focus smoothly to whichever conversation just pulsed
+      if (state.autoFollow && targetConv.id !== state.convId) {
+        state.convId = targetConv.id;
+        state.scope = 'all';
+        state.pinnedReqId = null;
+        chartAnim.crossX = null;
+      }
+
+      renderAll();
+
+      if (targetConv.id === state.convId) {
+        const hero = $('#heroContextCard');
+        hero.classList.remove('req-ping');
+        void hero.offsetWidth;
+        hero.classList.add('req-ping');
+      } else {
+        // Quiet pulse on the concurrency pill when background conversation updates
+        const badge = $('#concurrentBadgeBtn');
+        badge.classList.remove('req-ping');
+        void badge.offsetWidth;
+        badge.classList.add('req-ping');
+      }
+    }
+
+    // =========================================================================
+    // 11. Layout, Theme & Master 60fps Loop
+    // =========================================================================
+    function setLayout(mode) {
+      state.layout = mode;
+      $('#appWindow').classList.toggle('hidden', mode === 'tray');
+      $('#traySection').classList.toggle('hidden', mode === 'app');
+      if (mode !== 'app') {
+        state.trayOpen = true;
+        $('#trayFlyout').classList.remove('hidden-pop');
+      }
+      updateSeg('#layoutSeg', '#layoutThumb', mode, 'layout');
+      requestAnimationFrame(renderAll);
+    }
+
+    function setTheme(theme) {
+      state.theme = theme;
+      const s = $('#stage');
+      s.classList.toggle('mode-light', theme === 'light');
+      s.classList.toggle('mode-dark', theme === 'dark');
+      $('#themeTxt').textContent = theme === 'light' ? '浅色玻璃' : '深色玻璃';
+      renderAll();
+    }
+
+    function renderAll() {
+      renderSidebarTree();
+      renderDesktop();
+      renderTray();
+    }
+
+    // Bind controls
+    $$('#layoutSeg .seg-item').forEach(b => b.addEventListener('click', () => setLayout(b.dataset.layout)));
+    $$('#traySeg .seg-item').forEach(b => b.addEventListener('click', () => { state.trayTab = b.dataset.tab; renderTray(); }));
+    $$('.metric-tile').forEach(t => t.addEventListener('click', () => { state.metric = t.dataset.metric; renderDesktop(); }));
+
+    function setReqView(view) {
+      state.reqView = view;
+      $('#paneCurve').classList.toggle('pane-hidden', view !== 'curve');
+      $('#paneList').classList.toggle('pane-hidden', view !== 'list');
+      updateSeg('#reqViewSeg', '#reqViewThumb', view, 'reqview');
+    }
+    $$('#reqViewSeg .seg-item').forEach(b => b.addEventListener('click', () => setReqView(b.dataset.reqview)));
+
+    function stepInspect(delta) {
+      const m = compute(state.scope);
+      const { idx, slice } = getInspectedReq(m.list);
+      if (!slice.length) return;
+      const next = Math.max(0, Math.min(slice.length - 1, idx + delta));
+      state.pinnedReqId = next === slice.length - 1 ? null : slice[next].id;
+      renderFocusedInspector(m.list);
+    }
+    $('#prevReqBtn').addEventListener('click', () => stepInspect(-1));
+    $('#nextReqBtn').addEventListener('click', () => stepInspect(1));
+
+    $('#themeBtn').addEventListener('click', () => setTheme(state.theme === 'light' ? 'dark' : 'light'));
+    $('#liveBtn').addEventListener('click', () => {
+      state.live = !state.live;
+      $('#liveDot').classList.toggle('paused', !state.live);
+      $('#topPulse').classList.toggle('paused', !state.live);
+      $('#liveTxt').textContent = state.live ? '实时流' : '已暂停';
+    });
+    $('#burstBtn').addEventListener('click', () => simulateRequest(true));
+
+    // Multi-conversation picker popovers
+    const toggleSidebarPopover = (e) => {
+      e.stopPropagation();
+      $('#sessionPopover').classList.toggle('hidden');
+      $('#traySessionMenu').classList.add('hidden');
+    };
+    $('#sessionPickerBtn').addEventListener('click', toggleSidebarPopover);
+    $('#concurrentBadgeBtn').addEventListener('click', toggleSidebarPopover);
+    $('#autoFollowToggle').addEventListener('change', (e) => {
+      state.autoFollow = e.target.checked;
+      renderSessionPickers();
+    });
+    $('#trayConvBtn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      $('#traySessionMenu').classList.toggle('hidden');
+      $('#sessionPopover').classList.add('hidden');
+    });
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('#sessionPopover') && !e.target.closest('#sessionPickerBtn') && !e.target.closest('#concurrentBadgeBtn')) {
+        $('#sessionPopover').classList.add('hidden');
+      }
+      if (!e.target.closest('#traySessionMenu') && !e.target.closest('#trayConvBtn')) {
+        $('#traySessionMenu').classList.add('hidden');
+      }
+    });
+
+    $('#trayToggleBtn').addEventListener('click', () => {
+      if (state.layout === 'app') { setLayout('both'); state.trayOpen = true; }
+      else state.trayOpen = !state.trayOpen;
+      $('#trayFlyout').classList.toggle('hidden-pop', !state.trayOpen);
+    });
+    $('#openMainBtn').addEventListener('click', () => {
+      if (state.layout === 'tray') setLayout('both');
+      const win = $('#appWindow');
+      win.classList.remove('req-ping');
+      void win.offsetWidth;
+      win.classList.add('req-ping');
+    });
+
+    const toggleSheet = () => $('#settingsSheet').classList.toggle('hidden');
+    $('#trayGearBtn').addEventListener('click', toggleSheet);
+    $('#appGearBtn').addEventListener('click', () => {
+      if (state.layout === 'app') setLayout('both');
+      $('#settingsSheet').classList.remove('hidden');
+    });
+    $('#closeSettingsBtn').addEventListener('click', () => $('#settingsSheet').classList.add('hidden'));
+
+    window.addEventListener('resize', () => {
+      resizeWallpaper();
+      updateSeg('#layoutSeg', '#layoutThumb', state.layout, 'layout');
+      updateSeg('#traySeg', '#trayThumb', state.trayTab, 'tab');
+      updateSeg('#reqViewSeg', '#reqViewThumb', state.reqView, 'reqview');
+      drawTreeConnectors();
+    });
+
+    // Master 60fps animation loop (wallpaper + spring counters + morphing chart + dot-matrix)
+    let lastTs = performance.now();
+    function frame(ts) {
+      const dt = Math.min(ts - lastTs, 50);
+      lastTs = ts;
+      drawWallpaper(dt);
+      stepSprings(dt / 1000);
+      renderMorphChart();
+      renderDotMatrix();
+      requestAnimationFrame(frame);
+    }
+
+    setInterval(() => { if (state.live) simulateRequest(); }, 2800);
+    function updateClock() {
+      const d = new Date();
+      $('#dockClock').textContent = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+    }
+    updateClock();
+    setInterval(updateClock, 30000);
+
+    // Boot
+    setLayout('both');
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
