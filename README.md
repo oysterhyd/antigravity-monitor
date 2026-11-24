@@ -11,6 +11,25 @@
 - **全维度实时指标**：上下文窗口水位、本轮/会话费用、缓存命中率、纳秒级首字时长（TTFT）、**纯吐字速度（Pure Decode TPS）**——每项均支持单次请求回看与加权汇总
 - **父子 Agent 可视化拓扑**：同时清晰区分「整棵会话树汇总」「主 Agent 独立」与「各 Subagent 节点」，支持多对话并行自动跟随与手动锁定
 
+## 快速运行与构建
+
+```powershell
+# 直接运行（默认只读监测本机 ~/.gemini/antigravity 实时会话）
+go run ./cmd/monitor
+
+# 离线体验仿真数据（内置 2 个并行对话 + 1 个空闲对话）
+go run ./cmd/monitor -mock
+
+# 仅驻留系统托盘启动
+go run ./cmd/monitor -tray-only
+
+# CLI 快速校验本机真实数据解析
+go run ./cmd/probe
+
+# 编译 Windows 无黑框单文件原生应用
+go build -ldflags="-H=windowsgui" -o antigravity-monitor.exe ./cmd/monitor
+```
+
 ## 文档与视觉定稿
 
 - 终版设计方案：[docs/DESIGN.md](docs/DESIGN.md)

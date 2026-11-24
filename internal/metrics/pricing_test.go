@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oysterhyd/antigravity-monitor/assets"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
 )
 
@@ -20,8 +21,8 @@ func TestEmbeddedPricingMatchesAssets(t *testing.T) {
 	norm := func(b []byte) []byte {
 		return bytes.TrimSpace(bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n")))
 	}
-	if !bytes.Equal(norm(assetBytes), norm(embeddedDefaultPricing)) {
-		t.Fatalf("internal/metrics/pricing.default.json is out of sync with assets/pricing.default.json")
+	if !bytes.Equal(norm(assetBytes), norm(assets.DefaultPricingJSON)) {
+		t.Fatalf("assets.DefaultPricingJSON is out of sync with assets/pricing.default.json")
 	}
 }
 

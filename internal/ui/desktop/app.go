@@ -102,7 +102,7 @@ func New(provider model.SnapshotProvider, opts Options) *App {
 	if opts.ThemeMode != "" {
 		settings.ThemeMode = opts.ThemeMode
 	}
-	if settings.ContextWarnThreshold <= 0 {
+	if settings.ContextWarnThreshold < 0 {
 		settings.ContextWarnThreshold = 0.80
 	}
 
@@ -235,6 +235,51 @@ func (a *App) SelectMetric(m MetricKind) {
 // SetReqView toggles between Curve and Per-Request List view.
 func (a *App) SetReqView(v ReqViewMode) {
 	a.reqView = v
+}
+
+// FocusConversationAgent atomically selects a conversation (pinning it when specified)
+// and focuses a specific agent node ("all", "root", or subagent ID). Intended for external
+// callers such as the Tray Flyout; safe to call from the mygo main UI thread.
+func (a *App) FocusConversationAgent(convID, agentID string) {
+	if convID != "" && convID != a.convID {
+		a.convID = convID
+		a.sessionPopoverOpen = false
+		if a.settings.AutoFollowActive {
+			a.settings.AutoFollowActive = false
+			a.emitSettings()
+		}
+	}
+	if agentID == "" {
+		agentID = scopeAll
+	}
+	a.scope = agentID
+	a.pinnedReqSeq = 0
+	a.expandedReqSeq = 0
+	a.hoverChartIdx = -1
+	a.morpher.ClearCrosshair()
+
+	a.mu.RLock()
+	win := a.win
+	a.mu.RUnlock()
+	if win != nil {
+		win.Invalidate()
+	}
+}
+
+// ApplySettings synchronizes external settings updates (e.g. from the Tray Flyout)
+// into the desktop view without re-emitting OnSettingsChange. Must run on the main thread.
+func (a *App) ApplySettings(s model.Settings) {
+	if s.ContextWarnThreshold < 0 {
+		s.ContextWarnThreshold = 0.80
+	}
+	a.settings = s
+	a.mu.RLock()
+	win := a.win
+	a.mu.RUnlock()
+	if win != nil {
+		win.SetAlwaysOnTop(s.AlwaysOnTop)
+		win.Invalidate()
+	}
 }
 
 // Settings returns a copy of the current desktop settings.

@@ -9,6 +9,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"github.com/oysterhyd/antigravity-monitor/internal/mock"
+	"github.com/oysterhyd/antigravity-monitor/internal/model"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/desktop"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/theme"
 )
@@ -177,6 +178,45 @@ func TestDesktopIdleRender(t *testing.T) {
 	if img == nil || img.Bounds().Empty() {
 		t.Fatal("expected non-empty rendered frame image")
 	}
+}
+
+func TestApplySettingsAndFocusConversationAgent(t *testing.T) {
+	p := mock.New(0)
+	defer p.Close()
+
+	emitted := 0
+	initSettings := model.DefaultSettings()
+	initSettings.ContextWarnThreshold = 0 // intentionally disabled
+	app := desktop.New(p, desktop.Options{
+		Settings: &initSettings,
+		OnSettingsChange: func(model.Settings) {
+			emitted++
+		},
+	})
+	defer app.Close()
+
+	if app.Settings().ContextWarnThreshold != 0 {
+		t.Fatalf("expected disabled warning threshold 0 to be preserved, got %v", app.Settings().ContextWarnThreshold)
+	}
+
+	// External ApplySettings must not re-emit OnSettingsChange (prevents tray<->desktop loop).
+	updated := model.DefaultSettings()
+	updated.ThemeMode = theme.ModeDark
+	updated.AlwaysOnTop = true
+	updated.ContextWarnThreshold = 0
+	app.ApplySettings(updated)
+	if emitted != 0 {
+		t.Fatalf("ApplySettings should not emit OnSettingsChange, got %d", emitted)
+	}
+	if app.Settings().ThemeMode != theme.ModeDark || !app.Settings().AlwaysOnTop || app.Settings().ContextWarnThreshold != 0 {
+		t.Fatalf("unexpected applied settings: %+v", app.Settings())
+	}
+
+	// FocusConversationAgent switches conversation and pins subagent cleanly.
+	app.FocusConversationAgent("conv-payments", "sub-browser-2")
+	tt := ui.NewTester(app.View, 960, 680)
+	tt.Advance(200 * time.Millisecond)
+	mustHaveText(t, tt, "browser")
 }
 
 func savePreview(t *testing.T, tt *ui.Tester, filename string) {

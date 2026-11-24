@@ -789,8 +789,9 @@ func (p *Provider) buildAgentNode(id, parentID, name, role string, active bool, 
 		node.ContextOutput = latest.OutputTokens
 		node.ContextUsed = latest.ContextUsed
 		node.ContextLimit = latest.ContextLimit
-		if node.ContextUsed <= 0 {
-			node.ContextUsed = node.ContextCache + node.ContextInput + node.ContextOutput
+		actualTokens := node.ContextCache + node.ContextInput + node.ContextOutput
+		if actualTokens > node.ContextUsed {
+			node.ContextUsed = actualTokens
 		}
 		if node.ContextLimit > 0 {
 			r := float64(node.ContextUsed) / float64(node.ContextLimit)

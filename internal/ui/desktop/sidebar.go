@@ -493,6 +493,9 @@ func (a *App) renderSidebarFooter(c *ui.Context, pal theme.Palette, conv model.C
 					a.SetThemeMode(modes[modeIdx])
 				}
 
+				a.renderSettingSwitchRow(c, pal, "set-launch", "开机驻留托盘", &a.settings.LaunchAtLogin, func() {
+					a.emitSettings()
+				})
 				a.renderSettingSwitchRow(c, pal, "set-tray", "关闭主窗驻留托盘", &a.settings.KeepInTrayOnClose, func() {
 					a.emitSettings()
 				})
@@ -500,12 +503,12 @@ func (a *App) renderSidebarFooter(c *ui.Context, pal theme.Palette, conv model.C
 					a.toggleAlwaysOnTop()
 				})
 
-				warnEnabled := a.settings.ContextWarnThreshold <= 0.85
+				warnEnabled := a.settings.ContextWarnThreshold > 0
 				a.renderSettingSwitchRow(c, pal, "set-warn", "上下文 80% 预警", &warnEnabled, func() {
 					if warnEnabled {
 						a.settings.ContextWarnThreshold = 0.80
 					} else {
-						a.settings.ContextWarnThreshold = 0.95
+						a.settings.ContextWarnThreshold = 0
 					}
 					a.emitSettings()
 				})

@@ -226,10 +226,8 @@ func (a *App) renderHeroContextCard(c *ui.Context, pal theme.Palette, conv model
 		})
 
 		// Progress bars: parallel clickable rows in Tree View, single thicker bar in Single-Node View.
+		// ContextWarnThreshold == 0 intentionally disables threshold warnings.
 		warnThreshold := a.settings.ContextWarnThreshold
-		if warnThreshold <= 0 {
-			warnThreshold = 0.80
-		}
 
 		if vm.isTreeView {
 			agents := conv.AllAgents()
@@ -281,9 +279,9 @@ func (a *App) renderHeroContextCard(c *ui.Context, pal theme.Palette, conv model
 
 func contextBarColor(pal theme.Palette, ratio, warnThreshold float64, isPrimary bool) ui.Color {
 	switch {
-	case ratio >= warnThreshold:
+	case warnThreshold > 0 && ratio >= warnThreshold:
 		return pal.Danger
-	case ratio >= 0.60:
+	case warnThreshold > 0 && ratio >= 0.60:
 		return pal.Amber
 	case isPrimary:
 		return pal.Accent

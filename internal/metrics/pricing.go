@@ -1,18 +1,15 @@
 package metrics
 
 import (
-	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path"
 	"strings"
 
+	"github.com/oysterhyd/antigravity-monitor/assets"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
 )
-
-//go:embed pricing.default.json
-var embeddedDefaultPricing []byte
 
 // Calculator resolves model pricing rules (including long-context tiers) and enriches
 // RequestRecord instances with Pure Decode TPS, cache hit rate, cost, and cache savings.
@@ -24,7 +21,7 @@ type Calculator struct {
 // DefaultPricingConfig parses and returns the embedded default pricing configuration.
 func DefaultPricingConfig() (model.PricingConfig, error) {
 	var cfg model.PricingConfig
-	if err := json.Unmarshal(embeddedDefaultPricing, &cfg); err != nil {
+	if err := json.Unmarshal(assets.DefaultPricingJSON, &cfg); err != nil {
 		return model.PricingConfig{}, fmt.Errorf("parse embedded default pricing: %w", err)
 	}
 	return cfg, nil
