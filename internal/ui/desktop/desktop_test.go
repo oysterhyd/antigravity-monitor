@@ -1,0 +1,224 @@
+package desktop_test
+
+import (
+	"image/png"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/egoist/mygo/ui"
+	"github.com/oysterhyd/antigravity-monitor/internal/mock"
+	"github.com/oysterhyd/antigravity-monitor/internal/ui/desktop"
+	"github.com/oysterhyd/antigravity-monitor/internal/ui/theme"
+)
+
+func TestDesktopTreeAndSingleNodeSemantics(t *testing.T) {
+	p := mock.New(0)
+	defer p.Close()
+
+	app := desktop.New(p, desktop.Options{
+		ThemeMode:      theme.ModeLight,
+		ShowDevToolbar: true,
+		OnTriggerBurst: p.TriggerBurst,
+	})
+	defer app.Close()
+
+	tt := ui.NewTester(app.View, 980, 700)
+	tt.Advance(250 * time.Millisecond)
+
+	// 1. Default view is Tree View on multi-agent conversation.
+	mustHaveText(t, tt, "整棵会话树")
+	mustHaveText(t, tt, "上下文窗口")
+	mustHaveText(t, tt, "最高水位")
+	mustHaveText(t, tt, "全树本轮")
+	mustHaveText(t, tt, "全树命中")
+	mustHaveText(t, tt, "全树均 TTFT")
+	mustHaveText(t, tt, "全树均速")
+	mustHaveText(t, tt, "纯吐字速度 · 逐次请求")
+	mustHaveText(t, tt, "2 进行中")
+	savePreview(t, tt, "01_light_tree_curve.png")
+
+	// 2. Click a KPI tile (TTFT) -> morphs chart heading.
+	if err := tt.Click("全树均 TTFT"); err != nil {
+		t.Fatalf("click TTFT tile: %v", err)
+	}
+	tt.Advance(350 * time.Millisecond)
+	mustHaveText(t, tt, "首字时长 TTFT · 逐次请求")
+
+	// Step scrubber backward via ‹ button.
+	if err := tt.Click("上一次请求"); err != nil {
+		t.Fatalf("click prev req button: %v", err)
+	}
+	tt.Advance(200 * time.Millisecond)
+	savePreview(t, tt, "02_light_ttft_scrub.png")
+
+	// 3. Focus a single subagent -> switches to unambiguous Single-Node semantics.
+	app.FocusAgent("sub-browser")
+	tt.Frame()
+	tt.Advance(300 * time.Millisecond)
+
+	if tt.HasText("最高水位") {
+		t.Fatalf("single-node view should not show 最高水位; texts=%q", tt.Texts())
+	}
+	mustHaveText(t, tt, "本轮费用")
+	mustHaveText(t, tt, "缓存命中")
+	mustHaveText(t, tt, "首字时长")
+	mustHaveText(t, tt, "吐字速度")
+
+	// 4. Switch bottom card to "逐次" list view and expand a row.
+	if err := tt.Click("逐次"); err != nil {
+		t.Fatalf("click 逐次 segment: %v", err)
+	}
+	tt.Advance(300 * time.Millisecond)
+	mustHaveText(t, tt, "请求 / 节点")
+	mustHaveText(t, tt, "吐字 TPS")
+
+	// Switch back to whole tree in list view so there are plenty of rows, then expand latest row.
+	app.FocusAgent("all")
+	tt.Frame()
+	tt.Advance(250 * time.Millisecond)
+
+	// Expand latest request (#16) by clicking its row.
+	snap := p.Snapshot()
+	lastReq := snap.Conversations[0].Requests[len(snap.Conversations[0].Requests)-1]
+	rowLabel := "#" + itoa(lastReq.Seq) + " " + lastReq.AgentName
+	if err := tt.Click(rowLabel); err != nil {
+		t.Fatalf("click request row %q: %v", rowLabel, err)
+	}
+	tt.Advance(350 * time.Millisecond)
+	savePreview(t, tt, "03_light_list_expanded.png")
+
+	// 5. Switch to dark glass mode and inspect tree curve view.
+	if err := tt.Click("曲线"); err != nil {
+		t.Fatalf("click 曲线 segment: %v", err)
+	}
+	if err := tt.Click("浅色玻璃"); err != nil {
+		t.Fatalf("click theme toggle: %v", err)
+	}
+	app.SelectMetric(desktop.MetricTPS)
+	tt.Frame()
+	tt.Advance(350 * time.Millisecond)
+	mustHaveText(t, tt, "深色玻璃")
+	savePreview(t, tt, "04_dark_tree_curve.png")
+
+	// 6. Open session switcher popover and switch to single-agent idle conversation.
+	if err := tt.Click("切换对话"); err != nil {
+		t.Fatalf("click session switcher: %v", err)
+	}
+	tt.Advance(200 * time.Millisecond)
+	mustHaveText(t, tt, "自动跟随活跃")
+	mustHaveText(t, tt, "SQL 慢查询排查")
+	savePreview(t, tt, "05_dark_session_popover.png")
+
+	if err := tt.Click("SQL 慢查询排查"); err != nil {
+		t.Fatalf("click SQL conversation: %v", err)
+	}
+	tt.Advance(300 * time.Millisecond)
+
+	if tt.HasText("整棵会话树") {
+		t.Fatalf("single-agent conversation should hide 整棵会话树; texts=%q", tt.Texts())
+	}
+	mustHaveText(t, tt, "仅主 Agent")
+	mustHaveText(t, tt, "已锁定当前对话")
+}
+
+func TestDesktopBurstAndThemeSwitch(t *testing.T) {
+	p := mock.New(0)
+	defer p.Close()
+
+	app := desktop.New(p, desktop.Options{
+		ThemeMode:      theme.ModeLight,
+		ShowDevToolbar: true,
+		OnTriggerBurst: p.TriggerBurst,
+	})
+	defer app.Close()
+
+	tt := ui.NewTester(app.View, 980, 700)
+	beforeReqs := len(p.Snapshot().Conversations[0].Requests)
+
+	if err := tt.Click("模拟请求"); err != nil {
+		t.Fatalf("click 模拟请求: %v", err)
+	}
+	app.SyncSnapshot()
+	tt.Frame()
+	tt.Advance(900 * time.Millisecond)
+
+	afterSnap := p.Snapshot()
+	totalReqs := 0
+	for _, c := range afterSnap.Conversations {
+		totalReqs += len(c.Requests)
+	}
+	if totalReqs <= beforeReqs {
+		t.Fatalf("expected burst to add a request, totalReqs=%d", totalReqs)
+	}
+
+	if err := tt.Click("浅色玻璃"); err != nil {
+		t.Fatalf("click theme toggle: %v", err)
+	}
+	tt.Advance(200 * time.Millisecond)
+	mustHaveText(t, tt, "深色玻璃")
+}
+
+func TestDesktopIdleRender(t *testing.T) {
+	p := mock.New(0)
+	defer p.Close()
+
+	app := desktop.New(p, desktop.Options{
+		ThemeMode: theme.ModeDark,
+	})
+	defer app.Close()
+
+	app.FocusConversation("conv-sql", true)
+	tt := ui.NewTester(app.View, 960, 680)
+	tt.Advance(1200 * time.Millisecond)
+
+	img := tt.Image()
+	if img == nil || img.Bounds().Empty() {
+		t.Fatal("expected non-empty rendered frame image")
+	}
+}
+
+func savePreview(t *testing.T, tt *ui.Tester, filename string) {
+	t.Helper()
+	dir := os.Getenv("DESKTOP_UI_PREVIEW_DIR")
+	if dir == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir preview dir: %v", err)
+	}
+	img := tt.Image()
+	if img == nil {
+		t.Fatalf("nil image for %s", filename)
+	}
+	f, err := os.Create(filepath.Join(dir, filename))
+	if err != nil {
+		t.Fatalf("create preview %s: %v", filename, err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatalf("encode preview %s: %v", filename, err)
+	}
+}
+
+func mustHaveText(t *testing.T, tt *ui.Tester, want string) {
+	t.Helper()
+	if !tt.HasText(want) {
+		t.Fatalf("expected text %q in view; got texts=%q", want, tt.Texts())
+	}
+}
+
+func itoa(v int) string {
+	if v == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for v > 0 {
+		i--
+		buf[i] = byte('0' + v%10)
+		v /= 10
+	}
+	return string(buf[i:])
+}
