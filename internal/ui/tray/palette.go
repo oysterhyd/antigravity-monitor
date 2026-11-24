@@ -67,9 +67,9 @@ var (
 		HoverColBg:    ui.RGBA(17, 17, 19, 0.055),
 		RimTop:        ui.RGBA(255, 255, 255, 0.86),
 		RimEdge:       ui.RGBA(255, 255, 255, 0.54),
-		PopoverBg:     ui.RGBA(250, 251, 255, 0.94),
-		PopoverGlass:  ui.RGBA(255, 255, 255, 0.72),
-		Shadow:        ui.RGBA(15, 23, 42, 0.16),
+		PopoverBg:     ui.RGBA(252, 253, 255, 1.0),
+		PopoverGlass:  ui.RGBA(252, 253, 255, 1.0),
+		Shadow:        ui.RGBA(15, 23, 42, 0.18),
 	}
 
 	darkPalette = palette{
@@ -94,9 +94,9 @@ var (
 		HoverColBg:    ui.RGBA(255, 255, 255, 0.08),
 		RimTop:        ui.RGBA(255, 255, 255, 0.24),
 		RimEdge:       ui.RGBA(255, 255, 255, 0.13),
-		PopoverBg:     ui.RGBA(28, 32, 44, 0.95),
-		PopoverGlass:  ui.RGBA(30, 34, 46, 0.72),
-		Shadow:        ui.RGBA(0, 0, 0, 0.45),
+		PopoverBg:     ui.RGBA(26, 30, 42, 1.0),
+		PopoverGlass:  ui.RGBA(26, 30, 42, 1.0),
+		Shadow:        ui.RGBA(0, 0, 0, 0.48),
 	}
 )
 

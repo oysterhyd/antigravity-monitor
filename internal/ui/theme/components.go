@@ -153,17 +153,22 @@ func GlassSidebar(c *ui.Context, pal Palette, width float32) ui.Element {
 }
 
 // GlassPopover styles a floating Liquid Glass popover panel (session picker, settings sheet).
+// Uses near-opaque frosted surface + crisp edge stroke so underlying sidebar text never bleeds through.
 func GlassPopover(panel ui.Element, pal Palette, width float32) ui.Element {
 	if width > 0 {
 		panel.Width(width)
+	}
+	edge := ui.RGBA(15, 23, 42, 0.10)
+	if pal.Dark {
+		edge = ui.RGBA(255, 255, 255, 0.14)
 	}
 	return panel.
 		Radius(16).
 		Padding(8).
 		Background(pal.PopoverBg).
-		Border(1, pal.RimEdge).
+		Border(1, edge).
 		InsetShadow(0, 1, 0, 0, pal.RimTop).
-		Shadow(0, 18, 44, 0, pal.ShadowPopover)
+		Shadow(0, 16, 40, 0, pal.ShadowPopover)
 }
 
 // SegmentedOptions configures the Apple spring-animated segmented pill control.

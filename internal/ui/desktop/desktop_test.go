@@ -219,6 +219,49 @@ func TestApplySettingsAndFocusConversationAgent(t *testing.T) {
 	mustHaveText(t, tt, "browser")
 }
 
+type staticProvider struct {
+	snap model.AppSnapshot
+}
+
+func (s *staticProvider) Snapshot() model.AppSnapshot { return s.snap }
+func (s *staticProvider) Subscribe() (<-chan model.AppSnapshot, func()) {
+	ch := make(chan model.AppSnapshot)
+	return ch, func() { close(ch) }
+}
+func (s *staticProvider) Close() error { return nil }
+
+func TestSessionPopoverManyConversations(t *testing.T) {
+	p := mock.New(0)
+	defer p.Close()
+	base := p.Snapshot()
+
+	// Clone conversations up to 12 entries to verify bounded scroll & zero bleed-through at 900x590.
+	convs := make([]model.ConversationSnapshot, 0, 12)
+	for i := 0; i < 12; i++ {
+		c := base.Conversations[i%len(base.Conversations)]
+		c.ID = "conv-" + itoa(i+1)
+		c.Title = "对话 #" + itoa(i+1) + " · " + c.Title
+		convs = append(convs, c)
+	}
+	base.Conversations = convs
+	base.ActiveConversationID = convs[0].ID
+
+	sp := &staticProvider{snap: base}
+	app := desktop.New(sp, desktop.Options{ThemeMode: theme.ModeLight})
+	defer app.Close()
+
+	tt := ui.NewTester(app.View, 900, 590)
+	tt.Advance(200 * time.Millisecond)
+
+	if err := tt.Click("切换对话"); err != nil {
+		t.Fatalf("click session switcher: %v", err)
+	}
+	tt.Advance(200 * time.Millisecond)
+	mustHaveText(t, tt, "自动跟随活跃")
+	mustHaveText(t, tt, "· 12 个对话")
+	savePreview(t, tt, "06_light_many_sessions_popover.png")
+}
+
 func savePreview(t *testing.T, tt *ui.Tester, filename string) {
 	t.Helper()
 	dir := os.Getenv("DESKTOP_UI_PREVIEW_DIR")

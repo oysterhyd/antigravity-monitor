@@ -90,8 +90,8 @@ func LightPalette() Palette {
 		CardBg:      ui.RGBA(255, 255, 255, 0.60),
 		CardHover:   ui.RGBA(255, 255, 255, 0.78),
 		CardActive:  ui.RGBA(255, 255, 255, 0.88),
-		PopoverBg:   ui.RGBA(255, 255, 255, 0.90),
-		PopoverTint: ui.RGBA(255, 255, 255, 0.86),
+		PopoverBg:   ui.RGBA(252, 253, 255, 1.0),
+		PopoverTint: ui.RGBA(252, 253, 255, 1.0),
 
 		RimTop:     ui.RGBA(255, 255, 255, 0.96),
 		RimEdge:    ui.RGBA(255, 255, 255, 0.78),
@@ -140,8 +140,8 @@ func DarkPalette() Palette {
 		CardBg:      ui.RGBA(255, 255, 255, 0.075),
 		CardHover:   ui.RGBA(255, 255, 255, 0.12),
 		CardActive:  ui.RGBA(255, 255, 255, 0.155),
-		PopoverBg:   ui.RGBA(28, 32, 44, 0.88),
-		PopoverTint: ui.RGBA(20, 24, 34, 0.60),
+		PopoverBg:   ui.RGBA(26, 30, 42, 1.0),
+		PopoverTint: ui.RGBA(26, 30, 42, 1.0),
 
 		RimTop:     ui.RGBA(255, 255, 255, 0.24),
 		RimEdge:    ui.RGBA(255, 255, 255, 0.12),

@@ -140,81 +140,116 @@ func (a *App) renderSessionSwitcher(c *ui.Context, pal theme.Palette, snap model
 		a.settingsPopoverOpen = false
 	}
 
-	// Floating Liquid Glass Session Popover.
+	// Floating Liquid Glass Session Popover (wider, crisp opaque surface, bounded scrollable list).
 	ui.PopoverBase(c.Key("session-popover"), picker, &a.sessionPopoverOpen, func(panel ui.Element) {
-		theme.GlassPopover(panel, pal, sidebarWidth-24).Margin(6, 0, 0, 0).Gap(6)
+		theme.GlassPopover(panel, pal, 286).Margin(6, 0, 0, 0).Gap(6)
 
 		// Auto-follow toggle header.
 		ui.Row(c.Key("auto-follow-row")).
-			Padding(4, 6, 8, 6).
+			Padding(4, 8, 8, 8).
 			Justify(ui.SpaceBetween).
 			AlignItems(ui.Center).
 			BorderWidth(0, 0, 1, 0).
 			BorderColor(pal.Divider).
 			Children(func() {
-				ui.Text(c, "自动跟随活跃").FontSize(11).TextColor(pal.Ink2).NoWrap()
+				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, "自动跟随活跃").FontSize(11.5).FontWeight(500).TextColor(pal.Ink2).NoWrap()
+					if len(snap.Conversations) > 0 {
+						ui.Textf(c, "· %d 个对话", len(snap.Conversations)).
+							FontSize(10.5).FontFeatures("tnum").TextColor(pal.Ink3).NoWrap()
+					}
+				})
 				sw := ui.Switch(c.Key("auto-follow-sw"), &a.settings.AutoFollowActive).Label("自动跟随活跃")
 				if sw.Changed() {
 					a.emitSettings()
 				}
 			})
 
-		// Conversation list.
-		ui.Column(c.Key("session-list")).Gap(3).Children(func() {
-			for _, item := range snap.Conversations {
-				isSel := item.ID == conv.ID
-				row := ui.ButtonBase(c.Key("conv-" + item.ID)).
-					FillWidth().
-					Padding(8, 10).
-					Radius(12).
-					Cursor(ui.CursorPointer).
-					Label(item.Title)
+		// Bounded scrollable conversation list so many sessions never clip off the window bottom.
+		listH := float32(len(snap.Conversations))*49 + 6
+		if listH < 56 {
+			listH = 56
+		}
+		if listH > 344 {
+			listH = 344
+		}
 
-				if isSel {
-					row.Background(pal.SegPill).
-						InsetShadow(0, 1, 0, 0, pal.RimTop).
-						Shadow(0, 2, 8, 0, pal.ShadowPill)
-				} else if row.Hovered() {
-					row.Background(pal.CardHover)
-				}
+		ui.Scroll(c.Key("session-scroll")).
+			FillWidth().
+			Height(listH).
+			Children(func() {
+				ui.Column(c.Key("session-list")).FillWidth().Padding(2, 2, 4, 2).Gap(3).Children(func() {
+					if len(snap.Conversations) == 0 {
+						ui.Text(c, "暂无本地会话记录").FontSize(11).TextColor(pal.Ink3).Padding(10, 8)
+						return
+					}
+					for _, item := range snap.Conversations {
+						isSel := item.ID == conv.ID
+						row := ui.ButtonBase(c.Key("conv-" + item.ID)).
+							FillWidth().
+							Padding(8, 10).
+							Radius(11).
+							Cursor(ui.CursorPointer).
+							Label(item.Title)
 
-				subLabel := "单 Agent"
-				if len(item.Subagents) > 0 {
-					subLabel = fmt.Sprintf("1 主 · %d 子", len(item.Subagents))
-				}
-				ctxPct := item.Root.ContextRatio * 100
+						if isSel {
+							row.Background(pal.AccentSoft).
+								Border(1, pal.Accent.Alpha(0.24))
+						} else if row.Hovered() {
+							row.Background(pal.SegBg)
+						}
 
-				row.Children(func() {
-					ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-						ui.Row(c).Grow(1).MinWidth(0).Gap(8).AlignItems(ui.Center).Children(func() {
-							dotCol := pal.Ink3
-							if item.Running {
-								dotCol = pal.Accent
-							}
-							statusDot(c, "cd-"+item.ID, 6, dotCol, item.Running)
-							ui.Column(c).Grow(1).MinWidth(0).Gap(1).Children(func() {
-								ui.Text(c, item.Title).FontSize(12).FontWeight(500).TextColor(pal.Ink1).SingleLine()
-								ui.Textf(c, "%s · Ctx %.0f%%", subLabel, ctxPct).
-									FontSize(10).
+						subLabel := "单 Agent"
+						if len(item.Subagents) > 0 {
+							subLabel = fmt.Sprintf("1 主 · %d 子", len(item.Subagents))
+						}
+						ctxRatio := item.Root.ContextRatio
+						if item.PeakContext.Ratio > ctxRatio {
+							ctxRatio = item.PeakContext.Ratio
+						}
+						ctxPct := ctxRatio * 100
+
+						titleWeight := 500
+						if isSel {
+							titleWeight = 600
+						}
+
+						row.Children(func() {
+							ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
+								ui.Row(c).Grow(1).MinWidth(0).Gap(8).AlignItems(ui.Center).Children(func() {
+									dotCol := pal.Ink3.Alpha(0.45)
+									if isSel || item.Running {
+										dotCol = pal.Accent
+									}
+									statusDot(c, "cd-"+item.ID, 6.5, dotCol, item.Running)
+									ui.Column(c).Grow(1).MinWidth(0).Gap(1).Children(func() {
+										ui.Text(c, item.Title).FontSize(12).FontWeight(titleWeight).TextColor(pal.Ink1).SingleLine()
+										ui.Textf(c, "%s · Ctx %.0f%%", subLabel, ctxPct).
+											FontSize(10).
+											FontFeatures("tnum").
+											TextColor(pal.Ink3).
+											SingleLine()
+									})
+								})
+								costCol := pal.Ink2
+								if isSel {
+									costCol = pal.Ink1
+								}
+								ui.Text(c, fmtUSD(item.TreeMetrics.SessionCostUSD)).
+									FontSize(11.5).
+									FontWeight(titleWeight).
 									FontFeatures("tnum").
-									TextColor(pal.Ink3).
-									SingleLine()
+									TextColor(costCol).
+									NoWrap()
 							})
 						})
-						ui.Text(c, fmtUSD(item.TreeMetrics.SessionCostUSD)).
-							FontSize(11.5).
-							FontWeight(500).
-							FontFeatures("tnum").
-							TextColor(pal.Ink2).
-							NoWrap()
-					})
-				})
 
-				if row.Clicked() {
-					a.FocusConversation(item.ID, true)
-				}
-			}
-		})
+						if row.Clicked() {
+							a.FocusConversation(item.ID, true)
+						}
+					}
+				})
+			})
 	})
 }
 

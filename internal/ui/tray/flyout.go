@@ -222,16 +222,29 @@ func (ctl *Controller) renderHeader(c *ui.Context, pal palette, conv model.Conve
 		}
 	})
 
-	// Floating glass multi-conversation dropdown popover.
+	// Floating crisp near-opaque multi-conversation dropdown popover with bounded scroll list.
 	if st.SessionMenuOpen && convAnchor.Valid() {
 		ui.PopoverBase(c.Key("conv-popover"), convAnchor, &st.SessionMenuOpen, func(panel ui.Element) {
+			edge := ui.RGBA(15, 23, 42, 0.10)
+			if pal.Dark {
+				edge = ui.RGBA(255, 255, 255, 0.14)
+			}
+			listH := float32(len(st.Snapshot.Conversations))*46 + 6
+			if listH < 52 {
+				listH = 52
+			}
+			if listH > 236 {
+				listH = 236
+			}
+
 			panel.AttachTo(convAnchor, ui.AnchorBottomEnd, ui.AnchorTopEnd).
-				Margin(6, 0, 0, 0).Width(236).Radius(16).Padding(8).
-				Material(glass.Glass{Style: glass.Regular, Tint: pal.PopoverGlass, Clarity: 0.2}).
-				Border(1, pal.RimEdge).
-				Shadow(0, 10, 28, 0, pal.Shadow).
+				Margin(6, 0, 0, 0).Width(274).Radius(16).Padding(8).
+				Background(pal.PopoverBg).
+				Border(1, edge).
+				InsetShadow(0, 1, 0, 0, pal.RimTop).
+				Shadow(0, 14, 34, 0, pal.Shadow).
 				Children(func() {
-					ui.Column(c).Gap(6).Children(func() {
+					ui.Column(c).FillWidth().Gap(6).Children(func() {
 						// Auto-follow toggle header
 						autoFollow := st.Settings.AutoFollowActive
 						ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Padding(2, 6, 6, 6).Children(func() {
@@ -250,49 +263,63 @@ func (ctl *Controller) renderHeader(c *ui.Context, pal palette, conv model.Conve
 							return
 						}
 
-						for _, item := range st.Snapshot.Conversations {
-							item := item
-							selected := item.ID == st.SelectedConvID
-							row := ui.ButtonBase(c.Key("conv-item-" + item.ID)).
-								AlignSelf(ui.Stretch).Padding(7, 8).Radius(11).Cursor(ui.CursorPointer)
-							if selected {
-								row.Background(pal.SegPill).Border(0.75, pal.SegPillBorder)
-							} else if row.Hovered() {
-								row.Background(pal.CardHover)
-							}
+						ui.Scroll(c.Key("tray-conv-scroll")).FillWidth().Height(listH).Children(func() {
+							ui.Column(c).FillWidth().Padding(2, 2, 4, 2).Gap(3).Children(func() {
+								for _, item := range st.Snapshot.Conversations {
+									item := item
+									selected := item.ID == st.SelectedConvID
+									row := ui.ButtonBase(c.Key("conv-item-" + item.ID)).
+										AlignSelf(ui.Stretch).Padding(7, 9).Radius(10).Cursor(ui.CursorPointer)
+									if selected {
+										row.Background(pal.AccentSoft).Border(1, pal.Accent.Alpha(0.24))
+									} else if row.Hovered() {
+										row.Background(pal.SegBg)
+									}
 
-							subsN := len(item.Subagents)
-							subInfo := fmt.Sprintf("单 Agent · Ctx %.0f%%", item.Root.ContextRatio*100)
-							if subsN > 0 {
-								subInfo = fmt.Sprintf("1 主 · %d 子 · Ctx %.0f%%", subsN, item.Root.ContextRatio*100)
-							}
-							statusCol := pal.Ink3
-							if item.Running {
-								statusCol = pal.Accent
-							}
+									subsN := len(item.Subagents)
+									ctxRatio := item.Root.ContextRatio
+									if item.PeakContext.Ratio > ctxRatio {
+										ctxRatio = item.PeakContext.Ratio
+									}
+									subInfo := fmt.Sprintf("单 Agent · Ctx %.0f%%", ctxRatio*100)
+									if subsN > 0 {
+										subInfo = fmt.Sprintf("1 主 · %d 子 · Ctx %.0f%%", subsN, ctxRatio*100)
+									}
+									statusCol := pal.Ink3.Alpha(0.45)
+									if selected || item.Running {
+										statusCol = pal.Accent
+									}
+									titleWeight := 500
+									costCol := pal.Ink2
+									if selected {
+										titleWeight = 600
+										costCol = pal.Ink1
+									}
 
-							row.Children(func() {
-								ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
-									ui.Row(c).Grow(1).MinWidth(0).AlignItems(ui.Center).Gap(7).Children(func() {
-										ui.Box(c).Size(6, 6).Radius(3).Shrink(0).Background(statusCol)
-										ui.Column(c).Grow(1).MinWidth(0).Gap(1).Children(func() {
-											ui.Text(c, TruncateRunes(item.Title, 18)).FontSize(12).FontWeight(500).TextColor(pal.Ink1).SingleLine()
-											ui.Text(c, subInfo).FontSize(10).TextColor(pal.Ink3).FontFeatures("tnum").SingleLine()
+									row.Children(func() {
+										ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
+											ui.Row(c).Grow(1).MinWidth(0).AlignItems(ui.Center).Gap(7).Children(func() {
+												ui.Box(c).Size(6, 6).Radius(3).Shrink(0).Background(statusCol)
+												ui.Column(c).Grow(1).MinWidth(0).Gap(1).Children(func() {
+													ui.Text(c, TruncateRunes(item.Title, 22)).FontSize(12).FontWeight(titleWeight).TextColor(pal.Ink1).SingleLine()
+													ui.Text(c, subInfo).FontSize(10).TextColor(pal.Ink3).FontFeatures("tnum").SingleLine()
+												})
+											})
+											ui.Text(c, FormatUSD(item.TreeMetrics.SessionCostUSD)).
+												FontSize(11).FontWeight(titleWeight).TextColor(costCol).FontFeatures("tnum").SingleLine()
 										})
 									})
-									ui.Text(c, FormatUSD(item.TreeMetrics.SessionCostUSD)).
-										FontSize(11).FontWeight(500).TextColor(pal.Ink2).FontFeatures("tnum").SingleLine()
-								})
+									if row.Clicked() {
+										st.SelectConversation(item.ID, true)
+										ctl.updateSettings(func(s *model.Settings) {
+											s.AutoFollowActive = false
+										})
+										ctl.dotMatrix.markDirty()
+										ctl.syncTrayMetadata()
+									}
+								}
 							})
-							if row.Clicked() {
-								st.SelectConversation(item.ID, true)
-								ctl.updateSettings(func(s *model.Settings) {
-									s.AutoFollowActive = false
-								})
-								ctl.dotMatrix.markDirty()
-								ctl.syncTrayMetadata()
-							}
-						}
+						})
 					})
 				})
 		})
@@ -664,14 +691,19 @@ func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 		}
 	})
 
-	// Ultra-minimal frosted glass Settings Popover (no TPS mode toggle!).
+	// Ultra-minimal frosted Settings Popover (crisp opaque surface, no bleed-through).
 	if st.SettingsOpen && gearAnchor.Valid() {
 		ui.PopoverBase(c.Key("settings-popover"), gearAnchor, &st.SettingsOpen, func(panel ui.Element) {
+			edge := ui.RGBA(15, 23, 42, 0.10)
+			if pal.Dark {
+				edge = ui.RGBA(255, 255, 255, 0.14)
+			}
 			panel.AttachTo(gearAnchor, ui.AnchorTopEnd, ui.AnchorBottomEnd).
 				Margin(0, 0, 8, 0).Width(246).Radius(18).Padding(14).
-				Material(glass.Glass{Style: glass.Regular, Tint: pal.PopoverGlass, Clarity: 0.18}).
-				Border(1, pal.RimEdge).
-				Shadow(0, 12, 32, 0, pal.Shadow).
+				Background(pal.PopoverBg).
+				Border(1, edge).
+				InsetShadow(0, 1, 0, 0, pal.RimTop).
+				Shadow(0, 14, 34, 0, pal.Shadow).
 				Children(func() {
 					ui.Column(c).Gap(10).Children(func() {
 						ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
