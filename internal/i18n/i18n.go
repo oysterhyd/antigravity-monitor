@@ -163,6 +163,8 @@ type Strings struct {
 	QuotaTitle             string
 	QuotaFiveHour          string
 	QuotaWeekly            string
+	QuotaTrendFiveHour     string
+	QuotaTrendWeekly       string
 	QuotaRefresh           string
 	QuotaResetInFmt        string // fmt: "3h 42m"
 	QuotaResetSoon         string
@@ -340,6 +342,8 @@ var zhStrings = Strings{
 	QuotaTitle:             "账号实时额度",
 	QuotaFiveHour:          "5 小时额度",
 	QuotaWeekly:            "周额度",
+	QuotaTrendFiveHour:     "5 小时",
+	QuotaTrendWeekly:       "每周",
 	QuotaRefresh:           "↻ 刷新采样",
 	QuotaResetInFmt:        "%s 后重置",
 	QuotaResetSoon:         "即将重置",
@@ -516,6 +520,8 @@ var enStrings = Strings{
 	QuotaTitle:             "Account Quota",
 	QuotaFiveHour:          "5-hour limit",
 	QuotaWeekly:            "Weekly limit",
+	QuotaTrendFiveHour:     "5h",
+	QuotaTrendWeekly:       "Weekly",
 	QuotaRefresh:           "↻ Refresh",
 	QuotaResetInFmt:        "Resets in %s",
 	QuotaResetSoon:         "Resetting soon",

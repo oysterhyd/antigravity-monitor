@@ -180,16 +180,64 @@ func quotaWindowDisplay(tr i18n.Strings, window quota.WindowQuota, available boo
 	return fmtQuotaPct(window.RemainingPct), fmtResetCountdown(tr, window.ResetAt, now), float32(window.RemainingPct / 100)
 }
 
+type quotaTrendSample struct {
+	time     time.Time
+	fiveHour *quota.TrendPoint
+	weekly   *quota.TrendPoint
+}
+
+func mergeQuotaTrends(fiveHour, weekly []quota.TrendPoint) []quotaTrendSample {
+	samples := make([]quotaTrendSample, 0, max(len(fiveHour), len(weekly)))
+	for len(fiveHour) > 0 || len(weekly) > 0 {
+		switch {
+		case len(weekly) == 0 || len(fiveHour) > 0 && fiveHour[0].Timestamp.Before(weekly[0].Timestamp):
+			samples = append(samples, quotaTrendSample{time: fiveHour[0].Timestamp, fiveHour: &fiveHour[0]})
+			fiveHour = fiveHour[1:]
+		case len(fiveHour) == 0 || weekly[0].Timestamp.Before(fiveHour[0].Timestamp):
+			samples = append(samples, quotaTrendSample{time: weekly[0].Timestamp, weekly: &weekly[0]})
+			weekly = weekly[1:]
+		default:
+			samples = append(samples, quotaTrendSample{time: fiveHour[0].Timestamp, fiveHour: &fiveHour[0], weekly: &weekly[0]})
+			fiveHour, weekly = fiveHour[1:], weekly[1:]
+		}
+	}
+	return samples
+}
+
+func (sample quotaTrendSample) hasReset() bool {
+	return sample.fiveHour != nil && sample.fiveHour.ResetEvent || sample.weekly != nil && sample.weekly.ResetEvent
+}
+
+func drawQuotaWeeklyLine(p *ui.Painter, bounds ui.Rect, xs, ys []float32, color ui.Color) {
+	if len(xs) > 1 {
+		p.StrokePath(chart.Line(bounds, xs, ys, chart.CurveMonotone).Dash(0, 6, 4), 2, color)
+	} else if len(xs) == 1 {
+		p.StrokePath((&ui.Path{}).Circle(chart.X(bounds, xs[0]), chart.Y(bounds, ys[0]), 5.8), 1.4, color)
+	}
+}
+
+func quotaTrendValue(point *quota.TrendPoint, claude bool) string {
+	if point == nil {
+		return "--%"
+	}
+	value := point.GeminiPct
+	if claude {
+		value = point.ClaudePct
+	}
+	return fmtQuotaPct(value)
+}
+
 func (a *App) renderQuotaTrendCard(c *ui.Context, pal theme.Palette, q quota.QuotaSnapshot, now time.Time) {
 	tr := a.tr()
 	card := theme.GlassCard(c.Key("quota-trend-card"), pal, theme.CardOptions{
 		Radius: 20,
 	}).Padding(12, 16, 11, 16).Gap(8).Grow(1).MinHeight(162)
 
-	pts := q.FiveHourTrend.Last24h
+	fiveHour, weekly := q.FiveHourTrend.Last24h, q.WeeklyTrend.Last24h
 	if a.quotaRange == "7d" {
-		pts = q.FiveHourTrend.Last7d
+		fiveHour, weekly = q.FiveHourTrend.Last7d, q.WeeklyTrend.Last7d
 	}
+	pts := mergeQuotaTrends(fiveHour, weekly)
 
 	card.Children(func() {
 		// Header: Title + Series filter pill + 24h/7d range pill.
@@ -244,7 +292,7 @@ func (a *App) renderQuotaTrendCard(c *ui.Context, pal theme.Palette, q quota.Quo
 		// Chart Body: Y-axis labels column (100% / 50% / 0%) + plot box.
 		lastResetIdx := -1
 		for i, pt := range pts {
-			if pt.ResetEvent {
+			if pt.hasReset() {
 				lastResetIdx = i
 			}
 		}
@@ -262,16 +310,23 @@ func (a *App) renderQuotaTrendCard(c *ui.Context, pal theme.Palette, q quota.Quo
 
 			if len(pts) > 0 {
 				xs := make([]float32, len(pts))
-				gemYs := make([]float32, len(pts))
-				claYs := make([]float32, len(pts))
+				var fiveHourXs, weeklyXs, gemYs, claYs, gemWeeklyYs, claWeeklyYs []float32
 				for i, pt := range pts {
 					if len(pts) == 1 {
 						xs[i] = 0.5
 					} else {
 						xs[i] = float32(i) / float32(len(pts)-1)
 					}
-					gemYs[i] = float32(pt.GeminiPct / 100.0)
-					claYs[i] = float32(pt.ClaudePct / 100.0)
+					if pt.fiveHour != nil {
+						fiveHourXs = append(fiveHourXs, xs[i])
+						gemYs = append(gemYs, float32(pt.fiveHour.GeminiPct/100))
+						claYs = append(claYs, float32(pt.fiveHour.ClaudePct/100))
+					}
+					if pt.weekly != nil {
+						weeklyXs = append(weeklyXs, xs[i])
+						gemWeeklyYs = append(gemWeeklyYs, float32(pt.weekly.GeminiPct/100))
+						claWeeklyYs = append(claWeeklyYs, float32(pt.weekly.ClaudePct/100))
+					}
 				}
 
 				if px, _, over := plotBox.PointerPosition(); over && plotBox.Hovered() {
@@ -303,7 +358,8 @@ func (a *App) renderQuotaTrendCard(c *ui.Context, pal theme.Palette, q quota.Quo
 				showG := a.quotaSeries == "all" || a.quotaSeries == "gemini"
 				showC := a.quotaSeries == "all" || a.quotaSeries == "claude"
 				seriesMode := a.quotaSeries
-				drawPts := append([]quota.TrendPoint(nil), pts...)
+				gemWeeklyColor := pal.Accent.Mix(pal.Ink1, 0.25)
+				claWeeklyColor := pal.Indigo.Mix(pal.Ink1, 0.25)
 				dotRing := ui.RGB(255, 255, 255)
 				if pal.Dark {
 					dotRing = ui.Hex("#181B24")
@@ -323,8 +379,8 @@ func (a *App) renderQuotaTrendCard(c *ui.Context, pal theme.Palette, q quota.Quo
 					p.Line(inner.X, inner.Y+inner.H, inner.X+inner.W, inner.Y+inner.H, 1, pal.Divider)
 
 					// Dashed vertical green reset markers.
-					for i, pt := range drawPts {
-						if !pt.ResetEvent {
+					for i, pt := range pts {
+						if !pt.hasReset() {
 							continue
 						}
 						rx := chart.X(inner, xs[i])
@@ -332,8 +388,8 @@ func (a *App) renderQuotaTrendCard(c *ui.Context, pal theme.Palette, q quota.Quo
 						p.StrokePath(resetLine, 1.2, pal.Green.Alpha(0.75))
 					}
 
-					if showC && len(xs) >= 2 {
-						cArea := chart.Area(inner, xs, nil, claYs, chart.CurveMonotone)
+					if showC && len(fiveHourXs) >= 2 {
+						cArea := chart.Area(inner, fiveHourXs, nil, claYs, chart.CurveMonotone)
 						cAlpha := float32(0.14)
 						cStroke := float32(1.9)
 						if seriesMode == "claude" {
@@ -341,10 +397,10 @@ func (a *App) renderQuotaTrendCard(c *ui.Context, pal theme.Palette, q quota.Quo
 							cStroke = 2.3
 						}
 						p.FillPathGradient(cArea, ui.LinearGradient{From: pal.Indigo.Alpha(cAlpha), To: ui.Transparent, Angle: 180})
-						p.StrokePath(chart.Line(inner, xs, claYs, chart.CurveMonotone).Cap(ui.RoundCap), cStroke, pal.Indigo)
+						p.StrokePath(chart.Line(inner, fiveHourXs, claYs, chart.CurveMonotone).Cap(ui.RoundCap), cStroke, pal.Indigo)
 					}
-					if showG && len(xs) >= 2 {
-						gArea := chart.Area(inner, xs, nil, gemYs, chart.CurveMonotone)
+					if showG && len(fiveHourXs) >= 2 {
+						gArea := chart.Area(inner, fiveHourXs, nil, gemYs, chart.CurveMonotone)
 						gAlpha := float32(0.18)
 						gStroke := float32(2.1)
 						if seriesMode == "gemini" {
@@ -352,22 +408,37 @@ func (a *App) renderQuotaTrendCard(c *ui.Context, pal theme.Palette, q quota.Quo
 							gStroke = 2.4
 						}
 						p.FillPathGradient(gArea, ui.LinearGradient{From: pal.Accent.Alpha(gAlpha), To: ui.Transparent, Angle: 180})
-						p.StrokePath(chart.Line(inner, xs, gemYs, chart.CurveMonotone).Cap(ui.RoundCap), gStroke, pal.Accent)
+						p.StrokePath(chart.Line(inner, fiveHourXs, gemYs, chart.CurveMonotone).Cap(ui.RoundCap), gStroke, pal.Accent)
 					}
 
-					// Crosshair + active point markers.
-					if activeIdx >= 0 && activeIdx < len(xs) {
-						cx := chart.X(inner, xs[activeIdx])
-						p.Line(cx, inner.Y-3, cx, inner.Y+inner.H+3, 1, pal.Ink3.Alpha(0.45))
+					if showC {
+						drawQuotaWeeklyLine(p, inner, weeklyXs, claWeeklyYs, claWeeklyColor)
+					}
+					if showG {
+						drawQuotaWeeklyLine(p, inner, weeklyXs, gemWeeklyYs, gemWeeklyColor)
+					}
+
+					active := pts[activeIdx]
+					cx := chart.X(inner, xs[activeIdx])
+					p.Line(cx, inner.Y-3, cx, inner.Y+inner.H+3, 1, pal.Ink3.Alpha(0.45))
+					if active.fiveHour != nil {
 						if showC {
-							cy := chart.Y(inner, claYs[activeIdx])
+							cy := chart.Y(inner, float32(active.fiveHour.ClaudePct/100))
 							p.FillPath((&ui.Path{}).Circle(cx, cy, 5.2), dotRing)
 							p.FillPath((&ui.Path{}).Circle(cx, cy, 3.8), pal.Indigo)
 						}
 						if showG {
-							gy := chart.Y(inner, gemYs[activeIdx])
+							gy := chart.Y(inner, float32(active.fiveHour.GeminiPct/100))
 							p.FillPath((&ui.Path{}).Circle(cx, gy, 5.6), dotRing)
 							p.FillPath((&ui.Path{}).Circle(cx, gy, 4.1), pal.Accent)
+						}
+					}
+					if active.weekly != nil {
+						if showC {
+							drawQuotaWeeklyMarker(p, inner, cx, active.weekly.ClaudePct, claWeeklyColor, dotRing)
+						}
+						if showG {
+							drawQuotaWeeklyMarker(p, inner, cx, active.weekly.GeminiPct, gemWeeklyColor, dotRing)
 						}
 					}
 				})
@@ -434,9 +505,9 @@ func (a *App) renderQuotaTrendCard(c *ui.Context, pal theme.Palette, q quota.Quo
 					if len(pts) > 8 && i%step != 0 && i != len(pts)-1 {
 						continue
 					}
-					lbl := pt.Timestamp.In(now.Location()).Format("15:04")
+					lbl := pt.time.In(now.Location()).Format("15:04")
 					if a.quotaRange == "7d" {
-						lbl = pt.Timestamp.In(now.Location()).Format("01/02")
+						lbl = pt.time.In(now.Location()).Format("01/02")
 					}
 					col := pal.Ink3
 					w := 400
@@ -468,39 +539,58 @@ func (a *App) renderQuotaTrendCard(c *ui.Context, pal theme.Palette, q quota.Quo
 					idx = len(pts) - 1
 				}
 				pt := pts[idx]
-				timeLbl := pt.Timestamp.In(now.Location()).Format("15:04")
+				timeLbl := pt.time.In(now.Location()).Format("15:04")
 				if a.quotaRange == "7d" {
-					timeLbl = pt.Timestamp.In(now.Location()).Format("01/02")
+					timeLbl = pt.time.In(now.Location()).Format("01/02")
 				}
 				if idx == len(pts)-1 {
 					timeLbl += tr.QuotaInspNowSuffix
 				}
 
-				note := tr.QuotaInsp7dNote
-				if a.quotaRange == "24h" {
-					dg, dc := 0.0, 0.0
-					if idx > 0 {
-						dg = pt.GeminiPct - pts[idx-1].GeminiPct
-						dc = pt.ClaudePct - pts[idx-1].ClaudePct
-					}
-					note = fmt.Sprintf(tr.QuotaInspDeltaFmt, fmtSignedPctDelta(dg), fmtSignedPctDelta(dc))
-				}
-
 				ui.Row(c).Gap(8).AlignItems(ui.Baseline).MinWidth(0).Children(func() {
 					ui.Text(c, timeLbl).FontSize(11.5).FontWeight(600).FontFeatures("tnum").TextColor(pal.Ink1).NoWrap()
-					ui.Text(c, note).FontSize(11).FontFeatures("tnum").TextColor(pal.Ink3).SingleLine()
+					if a.quotaRange == "7d" {
+						ui.Text(c, tr.QuotaInsp7dNote).FontSize(11).TextColor(pal.Ink3).SingleLine()
+					} else if idx > 0 && pt.fiveHour != nil && pts[idx-1].fiveHour != nil {
+						previous := pts[idx-1].fiveHour
+						delta := fmt.Sprintf(tr.QuotaInspDeltaFmt,
+							fmtSignedPctDelta(pt.fiveHour.GeminiPct-previous.GeminiPct),
+							fmtSignedPctDelta(pt.fiveHour.ClaudePct-previous.ClaudePct))
+						ui.Text(c, tr.QuotaTrendFiveHour+" · "+delta).FontSize(11).TextColor(pal.Ink3).SingleLine()
+					}
 				})
-				ui.Row(c).Gap(12).AlignItems(ui.Baseline).Shrink(0).Children(func() {
-					ui.Row(c).Gap(4).AlignItems(ui.Baseline).Children(func() {
-						ui.Text(c, "Gemini").FontSize(11).TextColor(pal.Ink3).NoWrap()
-						ui.Text(c, fmtQuotaPct(pt.GeminiPct)).FontSize(11.5).FontWeight(600).FontFeatures("tnum").TextColor(pal.Accent).NoWrap()
-					})
-					ui.Row(c).Gap(4).AlignItems(ui.Baseline).Children(func() {
-						ui.Text(c, "Claude & GPT").FontSize(11).TextColor(pal.Ink3).NoWrap()
-						ui.Text(c, fmtQuotaPct(pt.ClaudePct)).FontSize(11.5).FontWeight(600).FontFeatures("tnum").TextColor(pal.Indigo).NoWrap()
-					})
+				ui.Row(c).Gap(12).AlignItems(ui.Center).Shrink(0).Children(func() {
+					renderQuotaTrendReadout(c, pal, tr.QuotaTrendFiveHour, pt.fiveHour, a.quotaSeries, false)
+					renderQuotaTrendReadout(c, pal, tr.QuotaTrendWeekly, pt.weekly, a.quotaSeries, true)
 				})
 			})
+	})
+}
+
+func drawQuotaWeeklyMarker(p *ui.Painter, bounds ui.Rect, x float32, value float64, color, border ui.Color) {
+	y := chart.Y(bounds, float32(value/100))
+	p.StrokePath((&ui.Path{}).Circle(x, y, 5.8), 2.8, border)
+	p.StrokePath((&ui.Path{}).Circle(x, y, 5.8), 1.4, color)
+}
+
+func renderQuotaTrendReadout(c *ui.Context, pal theme.Palette, label string, point *quota.TrendPoint, series string, weekly bool) {
+	ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
+		ui.Box(c).Size(13, 4).Shrink(0).Draw(func(p *ui.Painter, r ui.Rect) {
+			y := r.Y + r.H/2
+			if weekly {
+				p.Line(r.X, y, r.X+5, y, 1.5, pal.Ink2)
+				p.Line(r.X+8, y, r.X+r.W, y, 1.5, pal.Ink2)
+				return
+			}
+			p.Line(r.X, y, r.X+r.W, y, 1.5, pal.Ink2)
+		})
+		ui.Text(c, label).FontSize(10.5).TextColor(pal.Ink2).NoWrap()
+		if series != "claude" {
+			ui.Text(c, quotaTrendValue(point, false)).FontSize(11.5).FontWeight(600).FontFeatures("tnum").TextColor(pal.Accent).NoWrap()
+		}
+		if series != "gemini" {
+			ui.Text(c, quotaTrendValue(point, true)).FontSize(11.5).FontWeight(600).FontFeatures("tnum").TextColor(pal.Indigo).NoWrap()
+		}
 	})
 }
 
@@ -535,10 +625,7 @@ func fmtSignedPctDelta(delta float64) string {
 	if rounded == 0 {
 		return "0%"
 	}
-	if rounded > 0 {
-		return fmt.Sprintf("+%.0f%%", rounded)
-	}
-	return fmt.Sprintf("%.0f%%", rounded)
+	return fmt.Sprintf("%+.0f%%", rounded)
 }
 
 func fmtResetCountdown(tr i18n.Strings, resetAt, now time.Time) string {
