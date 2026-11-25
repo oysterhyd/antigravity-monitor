@@ -11,9 +11,10 @@ import (
 
 func (a *App) renderTelemetryCard(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot, vm scopeView) {
 	tr := a.tr()
+	lm := a.layout
 	card := theme.GlassCard(c.Key("telemetry-card"), pal, theme.CardOptions{
 		Radius: 20,
-	}).Padding(12, 16, 12, 16).Gap(8).Grow(1).MinHeight(148)
+	}).Padding(lm.cardPadY, lm.cardPadX, lm.cardPadY, lm.cardPadX).Gap(8 + 2*lm.scale).Grow(1).MinHeight(148)
 
 	card.Children(func() {
 		// Card Header: dynamic metric heading + spring "Curve | List" segmented pill.
@@ -36,7 +37,7 @@ func (a *App) renderTelemetryCard(c *ui.Context, pal theme.Palette, conv model.C
 		})
 
 		if a.reqView == ReqViewCurve {
-			a.renderCurvePane(c, pal, conv, vm.requests)
+			a.renderCurvePane(c, pal, conv, vm)
 		} else {
 			a.renderRequestListPane(c, pal, conv, vm.requests)
 		}
@@ -81,8 +82,9 @@ func (a *App) stepInspect(reqs []model.RequestRecord, delta int) {
 	}
 }
 
-func (a *App) renderCurvePane(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot, reqs []model.RequestRecord) {
+func (a *App) renderCurvePane(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot, vm scopeView) {
 	tr := a.tr()
+	reqs := vm.requests
 	slice := tailRequests(reqs, chartWindowLen)
 
 	ui.Column(c.Key("pane-curve")).Grow(1).MinHeight(0).Justify(ui.SpaceBetween).Gap(6).Children(func() {
@@ -215,12 +217,13 @@ func (a *App) renderCurvePane(c *ui.Context, pal theme.Palette, conv model.Conve
 		}
 
 		// Serene Apple-Style Focused Request Scrubber Bar (always visible in curve mode).
-		a.renderInspectorBar(c, pal, conv, reqs)
+		a.renderInspectorBar(c, pal, conv, vm)
 	})
 }
 
-func (a *App) renderInspectorBar(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot, reqs []model.RequestRecord) {
+func (a *App) renderInspectorBar(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot, vm scopeView) {
 	tr := a.tr()
+	reqs := vm.requests
 	req, idx, slice := a.inspectedRequest(reqs)
 
 	ui.Row(c.Key("inspector-bar")).
@@ -279,19 +282,28 @@ func (a *App) renderInspectorBar(c *ui.Context, pal theme.Palette, conv model.Co
 					})
 
 				if idx >= 0 {
-					agName := req.AgentName
-					if agName == "" {
-						if ag, ok := conv.FindAgent(req.AgentID); ok {
-							agName = ag.Name
+					if vm.isTreeView {
+						agName := req.AgentName
+						if agName == "" {
+							if ag, ok := conv.FindAgent(req.AgentID); ok {
+								agName = ag.Name
+							}
 						}
+						agName = tr.AgentName(req.AgentID, agName)
+						ui.Textf(c, "#%d %s", req.Seq, agName).
+							FontSize(12).
+							FontWeight(600).
+							FontFeatures("tnum").
+							TextColor(pal.Ink1).
+							NoWrap()
+					} else {
+						ui.Textf(c, "#%d", req.Seq).
+							FontSize(12).
+							FontWeight(600).
+							FontFeatures("tnum").
+							TextColor(pal.Ink1).
+							NoWrap()
 					}
-					agName = tr.AgentName(req.AgentID, agName)
-					ui.Textf(c, "#%d %s", req.Seq, agName).
-						FontSize(12).
-						FontWeight(600).
-						FontFeatures("tnum").
-						TextColor(pal.Ink1).
-						NoWrap()
 
 					ui.Textf(c, "%s %s · %s %s · %s %s",
 						tr.TokIn, fmtTokensK(req.InputTokens),
@@ -307,7 +319,7 @@ func (a *App) renderInspectorBar(c *ui.Context, pal theme.Palette, conv model.Co
 
 			// Right: Hit · TTFT · TPS · Cost.
 			if idx >= 0 {
-				ui.Row(c).Gap(12).AlignItems(ui.Baseline).Shrink(0).Children(func() {
+				ui.Row(c).Gap(10).AlignItems(ui.Baseline).Shrink(0).Children(func() {
 					inspMetricPair(c, pal, tr.InspHit, fmtPct(req.CacheHitRate*100))
 					inspMetricPair(c, pal, "TTFT", fmtSec(req.TTFT.Seconds()))
 					inspMetricPair(c, pal, "TPS", fmtTPS(req.DecodeTPS))

@@ -29,7 +29,6 @@ type Strings struct {
 	// Common & Agent Topology
 	MainAgent      string
 	WholeTree      string
-	CombinedStats  string
 	TreeSubtitle   string // fmt: "%d" subagents
 	AgentStructure string
 	RootOnly       string
@@ -40,19 +39,18 @@ type Strings struct {
 	RunningBadge    string // fmt: "%d"
 	SwitchParallel  string
 	SwitchSession   string
-	AutoFollowFull  string
-	PinnedSession   string
 	AutoFollowShort string
 	ConvCountFmt    string // fmt: "%d"
 	NoLocalSessions string
 	NoActiveSession string
 
 	// Main Header & Cost Split
-	CostTotal  string
-	CostRoot   string
-	CostSub    string
-	NoRequests string
-	RecentFmt  string // fmt: "#%d · %s"
+	CostTotal     string
+	CostRoot      string
+	CostSub       string
+	NoRequests    string
+	RecentFmt     string // fmt: "#%d · %s"
+	RecentNodeFmt string // fmt: "#%d"
 
 	// Context Window & Breakdown
 	ContextWindow  string
@@ -139,7 +137,6 @@ type Strings struct {
 	TrayHeroTTFT       string
 	TrayHeroSubCost    string
 	TrayAvgShort       string // fmt: "%.0f" or "%.2fs"
-	TrayTotalShort     string // fmt: "%s"
 	TrayCacheSection   string
 	TrayLatestSingle   string
 	TraySessionTotal   string
@@ -185,10 +182,6 @@ type Strings struct {
 
 	// R3 Usage History View
 	HistoryTitle           string
-	HistoryScopeToday      string
-	HistoryScope7D         string
-	HistoryScope30D        string
-	HistoryScopeAll        string
 	HistoryRangeToday      string
 	HistoryRange7D         string
 	HistoryRange30D        string
@@ -212,7 +205,6 @@ type Strings struct {
 	HistoryInspTokensFmt   string // fmt: cache, input, output
 	HistoryByModel         string
 	HistoryTopSessions     string
-	HistoryClickToInspect  string
 	HistoryUntitledSession string
 	HistoryOtherModel      string
 	HistoryEmpty           string
@@ -224,7 +216,6 @@ var zhStrings = Strings{
 
 	MainAgent:      "主 Agent",
 	WholeTree:      "整棵会话树",
-	CombinedStats:  "合并统计",
 	TreeSubtitle:   "主 + %d 子节点",
 	AgentStructure: "父子 Agent 结构",
 	RootOnly:       "仅主 Agent",
@@ -234,18 +225,17 @@ var zhStrings = Strings{
 	RunningBadge:    "%d 进行中",
 	SwitchParallel:  "切换并行对话",
 	SwitchSession:   "切换对话",
-	AutoFollowFull:  "自动跟随活跃对话",
-	PinnedSession:   "已锁定当前对话",
 	AutoFollowShort: "自动跟随活跃",
 	ConvCountFmt:    "· %d 个对话",
 	NoLocalSessions: "暂无本地会话记录",
 	NoActiveSession: "无活跃会话",
 
-	CostTotal:  "合计",
-	CostRoot:   "主",
-	CostSub:    "子",
-	NoRequests: "暂无请求",
-	RecentFmt:  "最近 #%d · %s",
+	CostTotal:     "合计",
+	CostRoot:      "主",
+	CostSub:       "子",
+	NoRequests:    "暂无请求",
+	RecentFmt:     "最近 #%d · %s",
+	RecentNodeFmt: "最近 #%d",
 
 	ContextWindow:  "上下文窗口",
 	PeakWatermark:  "最高水位",
@@ -323,20 +313,19 @@ var zhStrings = Strings{
 	TrayTitleAgents:    "父子 Agent 树",
 	TrayHeroTurnCost:   "本轮费用",
 	TrayHeroTPS:        "吐字速度",
-	TrayHeroTTFT:       "首字 TTFT",
-	TrayHeroSubCost:    "子 Agent 合计",
+	TrayHeroTTFT:       "首字时长",
+	TrayHeroSubCost:    "子 Agent",
 	TrayAvgShort:       "均 %s",
-	TrayTotalShort:     "总 %s",
-	TrayCacheSection:   "缓存命中（单次 vs 总计）",
+	TrayCacheSection:   "缓存命中",
 	TrayLatestSingle:   "最新单次",
 	TraySessionTotal:   "会话总计",
-	TrayCostSplit:      "费用结构（主 vs 子）",
-	TrayRecentReqs:     "最近请求（命中 · TTFT · TPS）",
-	TrayAgentDetails:   "节点明细（点击联动主窗）",
+	TrayCostSplit:      "费用结构",
+	TrayRecentReqs:     "最近请求",
+	TrayAgentDetails:   "节点明细",
 	TrayNoNodes:        "暂无节点",
-	TrayLiveMetrics:    "实时指标（单次 / 总计）",
+	TrayLiveMetrics:    "实时指标",
 	TrayCacheHitRate:   "缓存命中率",
-	TrayTTFTLabel:      "首字时长 TTFT",
+	TrayTTFTLabel:      "首字时长",
 	TrayOpenDesktop:    "打开主面板",
 	TrayHoverHitFmt:    "#%d · 命中 %.0f%% · %.2fs · %.0f t/s",
 	TrayTooltipWaiting: "Antigravity Monitor — 等待活跃会话",
@@ -364,15 +353,11 @@ var zhStrings = Strings{
 	QuotaResetMarker:       "↺ 重置",
 	QuotaInspNowSuffix:     " (当前)",
 	QuotaInspDeltaFmt:      "较上采样点: Gemini %s · Claude & GPT %s",
-	QuotaInsp7dNote:        "每日窗口最低剩余水位快照",
+	QuotaInsp7dNote:        "每日最低剩余",
 	QuotaTrendEmpty:        "暂无趋势采样",
 	QuotaTrendSinglePoint:  "已记录首个采样点，继续采样后将绘制平滑趋势曲线",
 
 	HistoryTitle:           "历史消耗统计",
-	HistoryScopeToday:      "本地只读聚合 · 今日分时段",
-	HistoryScope7D:         "本地只读聚合 · 近 7 天",
-	HistoryScope30D:        "本地只读聚合 · 近 30 天",
-	HistoryScopeAll:        "本地只读聚合 · 全部历史",
 	HistoryRangeToday:      "今日",
 	HistoryRange7D:         "7 天",
 	HistoryRange30D:        "30 天",
@@ -390,13 +375,12 @@ var zhStrings = Strings{
 	HistoryMetricCost:      "费用",
 	HistoryMetricCache:     "缓存率",
 	HistoryChartTokens:     "Token 消耗分布",
-	HistoryChartCost:       "费用走势（按模型族）",
-	HistoryChartCache:      "Prompt 缓存命中率趋势",
+	HistoryChartCost:       "费用走势",
+	HistoryChartCache:      "缓存命中率",
 	HistoryLegendHitPct:    "命中率 %",
 	HistoryInspTokensFmt:   "缓存 %s · 输入 %s · 输出 %s",
 	HistoryByModel:         "模型消耗占比",
 	HistoryTopSessions:     "高消耗会话 Top 3",
-	HistoryClickToInspect:  "点击跳转详情",
 	HistoryUntitledSession: "未命名会话",
 	HistoryOtherModel:      "其他模型",
 	HistoryEmpty:           "暂无本地历史消耗记录",
@@ -408,7 +392,6 @@ var enStrings = Strings{
 
 	MainAgent:      "Main Agent",
 	WholeTree:      "Session Tree",
-	CombinedStats:  "Combined",
 	TreeSubtitle:   "Main + %d Sub",
 	AgentStructure: "Agent Topology",
 	RootOnly:       "Main Only",
@@ -418,18 +401,17 @@ var enStrings = Strings{
 	RunningBadge:    "%d Active",
 	SwitchParallel:  "Switch active sessions",
 	SwitchSession:   "Switch Session",
-	AutoFollowFull:  "Auto-follow active",
-	PinnedSession:   "Session pinned",
 	AutoFollowShort: "Auto-follow",
 	ConvCountFmt:    "· %d chats",
 	NoLocalSessions: "No local sessions yet",
 	NoActiveSession: "No active session",
 
-	CostTotal:  "Total",
-	CostRoot:   "Main",
-	CostSub:    "Sub",
-	NoRequests: "No requests",
-	RecentFmt:  "Latest #%d · %s",
+	CostTotal:     "Total",
+	CostRoot:      "Main",
+	CostSub:       "Sub",
+	NoRequests:    "No requests",
+	RecentFmt:     "Latest #%d · %s",
+	RecentNodeFmt: "Latest #%d",
 
 	ContextWindow:  "Context Window",
 	PeakWatermark:  "Peak",
@@ -508,17 +490,16 @@ var enStrings = Strings{
 	TrayHeroTurnCost:   "Turn Cost",
 	TrayHeroTPS:        "Decode TPS",
 	TrayHeroTTFT:       "TTFT",
-	TrayHeroSubCost:    "Subagents",
+	TrayHeroSubCost:    "Sub Agent",
 	TrayAvgShort:       "Avg %s",
-	TrayTotalShort:     "Total %s",
-	TrayCacheSection:   "Cache Hit (Last vs Total)",
+	TrayCacheSection:   "Cache Hit",
 	TrayLatestSingle:   "Latest Call",
 	TraySessionTotal:   "Session Total",
-	TrayCostSplit:      "Cost Split (Main vs Sub)",
-	TrayRecentReqs:     "Recent Calls (Hit · TTFT · TPS)",
-	TrayAgentDetails:   "Agents (Click to Focus)",
+	TrayCostSplit:      "Cost Split",
+	TrayRecentReqs:     "Recent Calls",
+	TrayAgentDetails:   "Agents",
 	TrayNoNodes:        "No agents",
-	TrayLiveMetrics:    "Live Metrics (Last / Total)",
+	TrayLiveMetrics:    "Live Metrics",
 	TrayCacheHitRate:   "Cache Hit Rate",
 	TrayTTFTLabel:      "TTFT",
 	TrayOpenDesktop:    "Open Dashboard",
@@ -548,15 +529,11 @@ var enStrings = Strings{
 	QuotaResetMarker:       "↺ Reset",
 	QuotaInspNowSuffix:     " (Now)",
 	QuotaInspDeltaFmt:      "Delta: Gemini %s · Claude & GPT %s",
-	QuotaInsp7dNote:        "Daily lowest remaining window snapshot",
+	QuotaInsp7dNote:        "Daily lowest remaining",
 	QuotaTrendEmpty:        "No quota samples yet",
 	QuotaTrendSinglePoint:  "First snapshot recorded — trend curve builds as samples accumulate",
 
 	HistoryTitle:           "Usage History",
-	HistoryScopeToday:      "Local Read-Only · Today Hourly",
-	HistoryScope7D:         "Local Read-Only · Last 7 Days",
-	HistoryScope30D:        "Local Read-Only · Last 30 Days",
-	HistoryScopeAll:        "Local Read-Only · All Time",
 	HistoryRangeToday:      "Today",
 	HistoryRange7D:         "7D",
 	HistoryRange30D:        "30D",
@@ -574,13 +551,12 @@ var enStrings = Strings{
 	HistoryMetricCost:      "Cost",
 	HistoryMetricCache:     "Cache %",
 	HistoryChartTokens:     "Token Breakdown",
-	HistoryChartCost:       "Cost by Model Family",
-	HistoryChartCache:      "Prompt Cache Hit Rate",
+	HistoryChartCost:       "Cost Trend",
+	HistoryChartCache:      "Cache Hit Rate",
 	HistoryLegendHitPct:    "Hit Rate %",
 	HistoryInspTokensFmt:   "Cache %s · In %s · Out %s",
 	HistoryByModel:         "Usage by Model",
 	HistoryTopSessions:     "Top 3 Sessions",
-	HistoryClickToInspect:  "Click to inspect",
 	HistoryUntitledSession: "Untitled Session",
 	HistoryOtherModel:      "Other",
 	HistoryEmpty:           "No local usage history yet",

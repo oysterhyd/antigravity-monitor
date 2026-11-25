@@ -26,15 +26,18 @@ func TestR3HistoryHeader(t *testing.T) {
 		clickMust(t, env.Tester, "Usage History")
 		mustHaveText(t, env.Tester, "Usage History")
 		mustHaveText(t, env.Tester, "7D")
-		mustHaveText(t, env.Tester, "Last 7 Days")
+		mustNotHaveText(t, env.Tester, "Local Read-Only")
+		mustNotHaveText(t, env.Tester, "Click to inspect")
 	})
 
 	t.Run("SwitchTodayHourly", func(t *testing.T) {
 		fx := seedRealisticHistoryRoot(t)
 		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", nil)
 		clickMust(t, env.Tester, "历史消耗统计")
+		mustNotHaveText(t, env.Tester, "本地只读聚合")
+		mustNotHaveText(t, env.Tester, "点击跳转详情")
 		clickMust(t, env.Tester, "今日")
-		mustHaveText(t, env.Tester, "今日分时段")
+		mustHaveText(t, env.Tester, "时均")
 	})
 
 	t.Run("Switch30D", func(t *testing.T) {
@@ -42,7 +45,8 @@ func TestR3HistoryHeader(t *testing.T) {
 		env := newE2EDesktopApp(t, fx, theme.ModeLight, "en", nil)
 		clickMust(t, env.Tester, "Usage History")
 		clickMust(t, env.Tester, "30D")
-		mustHaveText(t, env.Tester, "Last 30 Days")
+		mustHaveText(t, env.Tester, "30D")
+		mustHaveText(t, env.Tester, "Avg")
 	})
 
 	t.Run("SwitchAllTime", func(t *testing.T) {
@@ -50,7 +54,8 @@ func TestR3HistoryHeader(t *testing.T) {
 		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", nil)
 		clickMust(t, env.Tester, "历史消耗统计")
 		clickMust(t, env.Tester, "全部")
-		mustHaveText(t, env.Tester, "全部历史")
+		mustHaveText(t, env.Tester, "全部")
+		mustHaveText(t, env.Tester, "日均")
 	})
 
 	t.Run("BackToLiveButton", func(t *testing.T) {
@@ -213,7 +218,7 @@ func TestR3HistoryKPIs(t *testing.T) {
 		env := newE2EDesktopApp(t, fx, theme.ModeLight, "en", nil)
 		clickMust(t, env.Tester, "Usage History")
 		clickMust(t, env.Tester, "Total Cost")
-		mustHaveText(t, env.Tester, "Cost by Model Family")
+		mustHaveText(t, env.Tester, "Cost Trend")
 	})
 
 	t.Run("ClickCacheSavedSelectsMetric", func(t *testing.T) {
@@ -221,7 +226,7 @@ func TestR3HistoryKPIs(t *testing.T) {
 		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", nil)
 		clickMust(t, env.Tester, "历史消耗统计")
 		clickMust(t, env.Tester, "缓存节省")
-		mustHaveText(t, env.Tester, "Prompt 缓存命中率趋势")
+		mustHaveText(t, env.Tester, "缓存命中率")
 	})
 
 	t.Run("FourthTileNonMetricInfoOnly", func(t *testing.T) {
@@ -229,11 +234,11 @@ func TestR3HistoryKPIs(t *testing.T) {
 		env := newE2EDesktopApp(t, fx, theme.ModeLight, "en", nil)
 		clickMust(t, env.Tester, "Usage History")
 		clickMust(t, env.Tester, "Total Cost")
-		mustHaveText(t, env.Tester, "Cost by Model Family")
+		mustHaveText(t, env.Tester, "Cost Trend")
 		// Clicking Sessions info tile should not change active Cost chart title.
 		_ = env.Tester.Click("Sessions")
 		stepUI(env.Tester, 150*time.Millisecond)
-		mustHaveText(t, env.Tester, "Cost by Model Family")
+		mustHaveText(t, env.Tester, "Cost Trend")
 	})
 }
 
@@ -346,7 +351,7 @@ func TestR3HistoryBars(t *testing.T) {
 		env := newE2EDesktopApp(t, fx, theme.ModeLight, "en", nil)
 		clickMust(t, env.Tester, "Usage History")
 		clickMust(t, env.Tester, "Cost")
-		mustHaveText(t, env.Tester, "Cost by Model Family")
+		mustHaveText(t, env.Tester, "Cost Trend")
 		mustHaveText(t, env.Tester, "Gemini")
 		mustHaveText(t, env.Tester, "Claude & GPT")
 	})
@@ -356,7 +361,7 @@ func TestR3HistoryBars(t *testing.T) {
 		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", nil)
 		clickMust(t, env.Tester, "历史消耗统计")
 		clickMust(t, env.Tester, "缓存率")
-		mustHaveText(t, env.Tester, "Prompt 缓存命中率趋势")
+		mustHaveText(t, env.Tester, "缓存命中率")
 		mustHaveText(t, env.Tester, "命中率 %")
 	})
 
@@ -365,9 +370,9 @@ func TestR3HistoryBars(t *testing.T) {
 		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", nil)
 		clickMust(t, env.Tester, "历史消耗统计")
 		clickMust(t, env.Tester, "费用")
-		mustHaveText(t, env.Tester, "费用走势（按模型族）")
+		mustHaveText(t, env.Tester, "费用走势")
 		clickMust(t, env.Tester, "缓存率")
-		mustHaveText(t, env.Tester, "Prompt 缓存命中率趋势")
+		mustHaveText(t, env.Tester, "缓存命中率")
 		clickMust(t, env.Tester, "Token")
 		mustHaveText(t, env.Tester, "Token 消耗分布")
 	})

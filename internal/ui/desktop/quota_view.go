@@ -24,18 +24,14 @@ func (a *App) renderQuotaView(c *ui.Context, pal theme.Palette, now time.Time) {
 	tr := a.tr()
 	q := a.currentQuotaSnapshot(now)
 	available := !q.UpdatedAt.IsZero()
-
-	bar := c.TitleBar()
-	rightTopPad := float32(0)
-	if bar.Right > 0 && bar.Height > 0 {
-		rightTopPad = max(float32(18), bar.Height-10)
-	}
+	lm := a.layout
+	rightTopPad := lm.headerRightPadT
 
 	ui.Column(c.Key("quota-canvas")).
 		Grow(1).
 		MinWidth(0).
 		Padding(4, 6, 2, 6).
-		Gap(11).
+		Gap(lm.histSectionGap).
 		Children(func() {
 			// 1. Header
 			ui.Row(c.Key("quota-header")).
@@ -45,7 +41,7 @@ func (a *App) renderQuotaView(c *ui.Context, pal theme.Palette, now time.Time) {
 				Gap(10).
 				DragWindow().
 				Children(func() {
-					ui.Text(c, tr.QuotaTitle).FontSize(20).FontWeight(600).LetterSpacing(-0.3).TextColor(pal.Ink1).NoWrap()
+					ui.Text(c, tr.QuotaTitle).FontSize(lm.headerTitleSize).FontWeight(600).LetterSpacing(-0.3).TextColor(pal.Ink1).NoWrap()
 
 					ui.Row(c).Padding(rightTopPad, 0, 0, 0).Gap(6).AlignItems(ui.Center).Shrink(0).Children(func() {
 						refreshBtn := ui.ButtonBase(c.Key("quota-refresh-btn")).

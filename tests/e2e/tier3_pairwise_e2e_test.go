@@ -122,16 +122,16 @@ func TestTier3_HistoryRangeKPIAndMetricBidirectionalSync(t *testing.T) {
 
 	// Select Cost via KPI tile, switch ranges, verify Cost chart title remains active.
 	clickMust(t, env.Tester, "Total Cost")
-	mustHaveText(t, env.Tester, "Cost by Model Family")
+	mustHaveText(t, env.Tester, "Cost Trend")
 
 	for _, r := range []string{"Today", "30D", "All", "7D"} {
 		clickMust(t, env.Tester, r)
-		mustHaveText(t, env.Tester, "Cost by Model Family")
+		mustHaveText(t, env.Tester, "Cost Trend")
 	}
 
 	// Switch metric via chart pill -> Cache % -> Token.
 	clickMust(t, env.Tester, "Cache %")
-	mustHaveText(t, env.Tester, "Prompt Cache Hit Rate")
+	mustHaveText(t, env.Tester, "Cache Hit Rate")
 	clickMust(t, env.Tester, "Token")
 	mustHaveText(t, env.Tester, "Token Breakdown")
 }

@@ -20,11 +20,15 @@ const (
 )
 
 func (a *App) renderSidebar(c *ui.Context, pal theme.Palette, snap model.AppSnapshot, conv model.ConversationSnapshot, hasConv bool, now time.Time) {
-	side := theme.GlassSidebar(c.Key("sidebar"), pal, sidebarWidth)
+	sideW := a.layout.sidebarW
+	if sideW <= 0 {
+		sideW = sidebarWidth
+	}
+	side := theme.GlassSidebar(c.Key("sidebar"), pal, sideW)
 
 	side.Children(func() {
 		// Top section: status bar, session picker, combined toggle, parent-child topology tree.
-		ui.Column(c.Key("sidebar-top")).Gap(14).Grow(1).MinHeight(0).Children(func() {
+		ui.Column(c.Key("sidebar-top")).Gap(11).Grow(1).MinHeight(0).Children(func() {
 			a.renderSidebarHeader(c, pal, snap, now)
 			if hasConv {
 				a.renderSessionSwitcher(c, pal, snap, conv)
@@ -111,8 +115,8 @@ func (a *App) renderSessionSwitcher(c *ui.Context, pal theme.Palette, snap model
 	tr := a.tr()
 	picker := ui.ButtonBase(c.Key("session-picker")).
 		FillWidth().
-		Padding(8, 12).
-		Radius(16).
+		Padding(10, 12).
+		Radius(14).
 		Cursor(ui.CursorPointer).
 		Border(1, pal.RimEdge).
 		InsetShadow(0, 1, 0, 0, pal.RimTop).
@@ -124,25 +128,16 @@ func (a *App) renderSessionSwitcher(c *ui.Context, pal theme.Palette, snap model
 	}
 	picker.Background(bg)
 
-	followText := tr.AutoFollowFull
-	if !a.settings.AutoFollowActive {
-		followText = tr.PinnedSession
-	}
-
 	picker.Children(func() {
 		ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-			ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
-				ui.Text(c, conv.Title).
-					FontSize(12).
-					FontWeight(600).
-					TextColor(pal.Ink1).
-					SingleLine()
-				ui.Text(c, followText).
-					FontSize(10).
-					TextColor(pal.Ink3).
-					SingleLine()
-			})
-			ui.Icon(c, theme.IconChevronDown).Size(13, 13).TextColor(pal.Ink3)
+			ui.Text(c, conv.Title).
+				Grow(1).
+				MinWidth(0).
+				FontSize(12).
+				FontWeight(600).
+				TextColor(pal.Ink1).
+				SingleLine()
+			ui.Icon(c, theme.IconChevronDown).Size(13, 13).TextColor(pal.Ink3).Shrink(0)
 		})
 	})
 
@@ -266,7 +261,7 @@ func (a *App) renderCombinedNode(c *ui.Context, pal theme.Palette, conv model.Co
 	active := a.activeView == ViewLive && a.scope == scopeAll
 	row := ui.ButtonBase(c.Key("node-combined")).
 		FillWidth().
-		Padding(9, 11).
+		Padding(10, 11).
 		Radius(14).
 		Cursor(ui.CursorPointer).
 		Label(tr.WholeTree)
@@ -287,11 +282,8 @@ func (a *App) renderCombinedNode(c *ui.Context, pal theme.Palette, conv model.Co
 	row.Children(func() {
 		ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
 			ui.Row(c).Grow(1).MinWidth(0).Gap(9).AlignItems(ui.Center).Children(func() {
-				ui.Icon(c, theme.IconTree).Size(15, 15).TextColor(iconCol)
-				ui.Column(c).Grow(1).MinWidth(0).Gap(1).Children(func() {
-					ui.Text(c, tr.WholeTree).FontSize(12).FontWeight(600).TextColor(pal.Ink1).SingleLine()
-					ui.Text(c, tr.CombinedStats).FontSize(10.5).TextColor(pal.Ink3).SingleLine()
-				})
+				ui.Icon(c, theme.IconTree).Size(15, 15).TextColor(iconCol).Shrink(0)
+				ui.Text(c, tr.WholeTree).Grow(1).MinWidth(0).FontSize(12).FontWeight(600).TextColor(pal.Ink1).SingleLine()
 			})
 			ui.Text(c, fmtUSD(conv.TreeMetrics.SessionCostUSD)).
 				FontSize(12).
@@ -357,32 +349,38 @@ func (a *App) renderAgentTopologyTree(c *ui.Context, pal theme.Palette, conv mod
 						dashOffset = -float32(phase * 24.0)
 					}
 
+					// Stroke the shared vertical trunk ONCE so semi-transparent gray never
+					// composites N times into solid black when a conversation has many subagents.
+					lastEndY := float32(rootRowH+treeRowGap) + float32(len(subIDs)-1)*(subRowH+treeRowGap) + subRowH/2
+					trunk := (&ui.Path{}).
+						MoveTo(r.X+startX, r.Y+startY).
+						LineTo(r.X+startX, r.Y+lastEndY-8).
+						Cap(ui.RoundCap)
+					p.StrokePath(trunk, 1.35, strokeBase)
+
 					for i, sid := range subIDs {
 						rowTop := float32(rootRowH+treeRowGap) + float32(i)*(subRowH+treeRowGap)
 						endY := rowTop + subRowH/2
 
-						path := (&ui.Path{}).
-							MoveTo(r.X+startX, r.Y+startY).
-							LineTo(r.X+startX, r.Y+endY-8).
+						elbow := (&ui.Path{}).
+							MoveTo(r.X+startX, r.Y+endY-8).
 							QuadTo(r.X+startX, r.Y+endY, r.X+startX+8, r.Y+endY).
 							LineTo(r.X+endX, r.Y+endY).
 							Cap(ui.RoundCap)
-
-						p.StrokePath(path, 1.35, strokeBase)
+						p.StrokePath(elbow, 1.35, strokeBase)
 
 						isBranchHot := (running && sid == activeID) || sid == selectedScope
 						if isBranchHot {
+							fullPath := (&ui.Path{}).
+								MoveTo(r.X+startX, r.Y+startY).
+								LineTo(r.X+startX, r.Y+endY-8).
+								QuadTo(r.X+startX, r.Y+endY, r.X+startX+8, r.Y+endY).
+								LineTo(r.X+endX, r.Y+endY).
+								Cap(ui.RoundCap)
 							if running && !p.Preferences().ReduceMotion {
-								flowPath := (&ui.Path{}).
-									MoveTo(r.X+startX, r.Y+startY).
-									LineTo(r.X+startX, r.Y+endY-8).
-									QuadTo(r.X+startX, r.Y+endY, r.X+startX+8, r.Y+endY).
-									LineTo(r.X+endX, r.Y+endY).
-									Cap(ui.RoundCap).
-									Dash(dashOffset, 4, 20)
-								p.StrokePath(flowPath, 1.75, strokeAccent)
+								p.StrokePath(fullPath.Dash(dashOffset, 4, 20), 1.75, strokeAccent)
 							} else {
-								p.StrokePath(path, 1.6, strokeAccent.Alpha(0.65))
+								p.StrokePath(fullPath, 1.6, strokeAccent.Alpha(0.65))
 							}
 						}
 					}

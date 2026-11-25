@@ -37,7 +37,7 @@ func TestTier4_Scenario_MultiDayDeveloperWorkweek_LightZH(t *testing.T) {
 	verifyPNGFrame(t, tt, "t4_s1_history_light_zh.png")
 
 	clickMust(t, tt, "费用")
-	mustHaveText(t, tt, "费用走势（按模型族）")
+	mustHaveText(t, tt, "费用走势")
 
 	clickMust(t, tt, "SQL 慢查询排查")
 	if env.App.ActiveView() != desktop.ViewLive {
@@ -63,7 +63,7 @@ func TestTier4_Scenario_LowQuotaAfterFirstReading_DarkEN(t *testing.T) {
 	clickMust(t, env.Tester, "Usage History")
 	clickMust(t, env.Tester, "30D")
 	clickMust(t, env.Tester, "Cache %")
-	mustHaveText(t, env.Tester, "Prompt Cache Hit Rate")
+	mustHaveText(t, env.Tester, "Cache Hit Rate")
 	verifyPNGFrame(t, env.Tester, "t4_s2_history_dark_en.png")
 }
 

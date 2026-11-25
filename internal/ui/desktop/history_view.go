@@ -30,41 +30,24 @@ func (a *App) queryHistory(now time.Time) history.QueryResult {
 func (a *App) renderHistoryView(c *ui.Context, pal theme.Palette, now time.Time) {
 	tr := a.tr()
 	res := a.queryHistory(now)
-
-	bar := c.TitleBar()
-	rightTopPad := float32(0)
-	if bar.Right > 0 && bar.Height > 0 {
-		rightTopPad = max(float32(18), bar.Height-10)
-	}
+	lm := a.layout
+	rightTopPad := lm.headerRightPadT
 
 	ui.Column(c.Key("history-canvas")).
 		Grow(1).
 		MinWidth(0).
 		Padding(4, 6, 2, 6).
-		Gap(11).
+		Gap(lm.histSectionGap).
 		Children(func() {
-			// 1. Header: Title + scope subtitle on left; Range pill + Back button on right.
-			scopeSub := tr.HistoryScope7D
-			switch a.histRange {
-			case history.RangeToday:
-				scopeSub = tr.HistoryScopeToday
-			case history.Range30D:
-				scopeSub = tr.HistoryScope30D
-			case history.RangeAll:
-				scopeSub = tr.HistoryScopeAll
-			}
-
+			// 1. Header: Title on left; Range pill + Back button on right.
 			ui.Row(c.Key("hist-header")).
 				Padding(2, 4, 0, 4).
 				Justify(ui.SpaceBetween).
-				AlignItems(ui.End).
+				AlignItems(ui.Center).
 				Gap(10).
 				DragWindow().
 				Children(func() {
-					ui.Column(c).Gap(3).MinWidth(0).Children(func() {
-						ui.Text(c, tr.HistoryTitle).FontSize(20).FontWeight(600).LetterSpacing(-0.3).TextColor(pal.Ink1).NoWrap()
-						ui.Text(c, scopeSub).FontSize(11.5).TextColor(pal.Ink2).SingleLine()
-					})
+					ui.Text(c, tr.HistoryTitle).FontSize(lm.headerTitleSize).FontWeight(600).LetterSpacing(-0.3).TextColor(pal.Ink1).NoWrap()
 
 					ui.Row(c).Padding(rightTopPad, 0, 0, 0).Gap(7).AlignItems(ui.Center).Shrink(0).Children(func() {
 						rngIdx := 1
@@ -165,14 +148,14 @@ func (a *App) renderHistoryView(c *ui.Context, pal theme.Palette, now time.Time)
 				},
 			}
 
-			ui.Grid(c.Key("hist-kpi-grid")).Columns(4).Gap(11).Shrink(0).Children(func() {
+			ui.Grid(c.Key("hist-kpi-grid")).Columns(4).Gap(lm.histSectionGap).Shrink(0).Children(func() {
 				for _, sp := range kpis {
 					sel := sp.interactive && a.histMetric == sp.metric
 					tile := theme.GlassCard(c.Key(sp.key), pal, theme.CardOptions{
 						Radius:      18,
 						Selected:    sel,
 						Interactive: sp.interactive,
-					}).Padding(12, 14, 11, 14).Gap(8).Label(sp.title)
+					}).Padding(lm.cardPadY, lm.kpiPadX, lm.cardPadY-1, lm.kpiPadX).Gap(8 + 2*lm.scale).Label(sp.title)
 
 					tile.Children(func() {
 						ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
@@ -181,7 +164,7 @@ func (a *App) renderHistoryView(c *ui.Context, pal theme.Palette, now time.Time)
 						})
 						ui.Column(c).Gap(2).MinWidth(0).Children(func() {
 							ui.Text(c, sp.mainVal).
-								FontSize(21).
+								FontSize(lm.kpiHistValueSize).
 								FontWeight(600).
 								LetterSpacing(-0.4).
 								FontFeatures("tnum").
@@ -335,6 +318,7 @@ func (a *App) renderHistoryChartCard(c *ui.Context, pal theme.Palette, res histo
 		drawBuckets := append([]history.BucketSummary(nil), buckets...)
 		mode := a.histMetric
 		hovered := a.histHoverIdx
+		maxBarW := 34 + 20*a.layout.scale
 
 		plotBox.Draw(func(p *ui.Painter, r ui.Rect) {
 			n := len(drawBuckets)
@@ -352,7 +336,7 @@ func (a *App) renderHistoryChartCard(c *ui.Context, pal theme.Palette, res histo
 			p.Line(r.X, r.Y+padT+plotH, r.X+r.W, r.Y+padT+plotH, 1, pal.Divider)
 
 			slotW := r.W / float32(n)
-			barW := min(float32(34), slotW*0.58)
+			barW := min(maxBarW, slotW*0.56)
 			if barW < 4 {
 				barW = max(2, slotW-2)
 			}
@@ -528,10 +512,7 @@ func (a *App) renderHistoryTopSessionsCard(c *ui.Context, pal theme.Palette, res
 	}).Padding(12, 14, 12, 14).Gap(6)
 
 	card.Children(func() {
-		ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, tr.HistoryTopSessions).FontSize(12).FontWeight(600).TextColor(pal.Ink1).SingleLine()
-			ui.Text(c, tr.HistoryClickToInspect).FontSize(10.5).TextColor(pal.Ink3).NoWrap()
-		})
+		ui.Text(c, tr.HistoryTopSessions).FontSize(12).FontWeight(600).TextColor(pal.Ink1).SingleLine()
 		if len(res.TopSessions) == 0 {
 			ui.Text(c, tr.HistoryEmptyRange).FontSize(11).TextColor(pal.Ink3)
 			return
