@@ -14,8 +14,9 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-0A84FF)](https://github.com/oysterhyd/antigravity-monitor/releases/latest)
 [![Built with Go](https://img.shields.io/badge/Go-MyGo%20Native%20UI-5856D6)](https://github.com/egoist/mygo)
 [![Language](https://img.shields.io/badge/lang-中文%20%7C%20EN-34C759)](#核心功能)
+[![License: MIT](https://img.shields.io/badge/license-MIT-007AFF)](LICENSE)
 
-[下载安装](#下载安装) · [核心功能](#核心功能) · [使用说明](#使用说明) · [隐私与架构](#隐私与架构) · [从源码构建](#从源码构建) · [更新日志](CHANGELOG.md)
+[下载安装](#下载安装) · [核心功能](#核心功能) · [使用说明](#使用说明) · [隐私与架构](#隐私与架构) · [从源码构建](#从源码构建) · [更新日志](CHANGELOG.md) · [开源协议](#开源协议)
 
 <br />
 
@@ -97,3 +98,9 @@ $env:CGO_LDFLAGS = '-static'
 $env:GOFLAGS = '-tags=monitor_sqlite_cgo,mygo_nowebview'
 go run github.com/egoist/mygo/cmd/mygo@v0.10.0 build
 ```
+
+---
+
+## 开源协议
+
+本项目基于 [MIT License](LICENSE) 开源。
