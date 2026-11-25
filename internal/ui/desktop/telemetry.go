@@ -132,8 +132,7 @@ func (a *App) renderCurvePane(c *ui.Context, pal theme.Palette, conv model.Conve
 			}
 
 			_, activeIdx, _ := a.inspectedRequest(reqs)
-			ys := a.morpher.Tail(a.tailBuf, len(slice))
-			a.tailBuf = ys
+			drawYs := a.morpher.Tail(nil, len(slice))
 			crossFrac, hasCross := a.morpher.CrosshairFrac()
 
 			strokeCol := pal.Accent
@@ -154,10 +153,6 @@ func (a *App) renderCurvePane(c *ui.Context, pal theme.Palette, conv model.Conve
 				dotRing = ui.Hex("#181B24")
 			}
 
-			// Copy slices for Draw closure safety.
-			drawXs := append([]float32(nil), xs...)
-			drawYs := append([]float32(nil), ys...)
-
 			plotBox.Draw(func(p *ui.Painter, r ui.Rect) {
 				const padX = float32(10)
 				const padT = float32(14)
@@ -168,36 +163,36 @@ func (a *App) renderCurvePane(c *ui.Context, pal theme.Palette, conv model.Conve
 					W: r.W - padX*2,
 					H: r.H - padT - padB,
 				}
-				if inner.W <= 4 || inner.H <= 4 || len(drawXs) == 0 {
+				if inner.W <= 4 || inner.H <= 4 || len(xs) == 0 {
 					return
 				}
 
 				// Soft area wash beneath curve.
-				if len(drawXs) >= 2 {
-					areaPath := chart.Area(inner, drawXs, nil, drawYs, chart.CurveMonotone)
+				if len(xs) >= 2 {
+					areaPath := chart.Area(inner, xs, nil, drawYs, chart.CurveMonotone)
 					p.FillPathGradient(areaPath, ui.LinearGradient{
 						From:  fillTop,
 						To:    ui.Transparent,
 						Angle: 180,
 					})
 					// Luminous smooth monotone curve.
-					linePath := chart.Line(inner, drawXs, drawYs, chart.CurveMonotone).Cap(ui.RoundCap).Join(ui.RoundJoin)
+					linePath := chart.Line(inner, xs, drawYs, chart.CurveMonotone).Cap(ui.RoundCap).Join(ui.RoundJoin)
 					p.StrokePath(linePath, 2.2, strokeCol)
 				}
 
 				// Subtle discrete request markers.
-				for i := range drawXs {
+				for i := range xs {
 					if i == activeIdx {
 						continue
 					}
-					px := chart.X(inner, drawXs[i])
+					px := chart.X(inner, xs[i])
 					py := chart.Y(inner, drawYs[i])
 					p.FillPath((&ui.Path{}).Circle(px, py, 2.2), dotMuted)
 				}
 
 				// Spring-gliding vertical crosshair + luminous active marker.
-				if activeIdx >= 0 && activeIdx < len(drawXs) {
-					ax := chart.X(inner, drawXs[activeIdx])
+				if activeIdx >= 0 && activeIdx < len(xs) {
+					ax := chart.X(inner, xs[activeIdx])
 					ay := chart.Y(inner, drawYs[activeIdx])
 
 					cx := ax

@@ -5,6 +5,7 @@ go 1.27.3
 require (
 	github.com/egoist/mygo v0.10.0
 	github.com/fsnotify/fsnotify v1.10.1
+	github.com/mattn/go-sqlite3 v1.14.53
 	golang.org/x/sys v0.49.0
 	google.golang.org/protobuf v1.36.12
 	modernc.org/sqlite v1.63.0

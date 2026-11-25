@@ -33,23 +33,30 @@ func main() {
 	startHidden := flag.Bool("tray-only", false, "start resident in system tray without opening the desktop window")
 	flag.Parse()
 
+	mygo.App.SetName("Antigravity Monitor")
+	if *startHidden {
+		mygo.App.SetActivationPolicy(mygo.ActivationPolicyAccessory)
+	}
+	if !mygo.App.RequestSingleInstanceLock() {
+		log.Printf("[monitor] another instance is already running; exiting")
+		return
+	}
+
 	store, err := config.NewStore(*cfgPath)
 	if err != nil {
 		log.Fatalf("[monitor] load settings: %v", err)
 	}
 	settings := store.Get()
 
-	provider := buildProvider(*useMock, *mockInterval, *dataDir, settings)
-	defer func() { _ = provider.Close() }()
-
 	// Initialize the Usage History and Account Quota readers.
 	var histSvc history.Aggregator
 	var quotaSvc quota.Tracker
-	if !*useMock {
-		calc, calcErr := metrics.NewCalculator(settings.PricingOverridePath)
-		if calcErr != nil {
-			calc, _ = metrics.NewDefaultCalculator()
-		}
+	var provider model.SnapshotProvider
+	if *useMock {
+		provider = mock.New(*mockInterval)
+	} else {
+		var calc *metrics.Calculator
+		provider, calc = buildProvider(*dataDir, settings)
 		cfgDir := filepath.Dir(store.Path())
 		histCachePath := filepath.Join(cfgDir, "usage_cache.json")
 		quotaHistPath := filepath.Join(cfgDir, "quota_history.json")
@@ -58,20 +65,11 @@ func main() {
 		quotaSvc = quota.NewService(quotaHistPath, quota.ReadCLI)
 
 		// Warm up history index asynchronously so startup stays instant, then refresh periodically.
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			_ = hist.Refresh(ctx)
-			cancel()
-
-			ticker := time.NewTicker(45 * time.Second)
-			defer ticker.Stop()
-			for range ticker.C {
-				rCtx, rCancel := context.WithTimeout(context.Background(), 15*time.Second)
-				_ = hist.Refresh(rCtx)
-				rCancel()
-			}
-		}()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go refreshHistory(ctx, hist)
 	}
+	defer func() { _ = provider.Close() }()
 
 	var (
 		deskHost *desktopHost
@@ -106,15 +104,6 @@ func main() {
 		},
 	})
 
-	mygo.App.SetName("Antigravity Monitor")
-	if *startHidden {
-		mygo.App.SetActivationPolicy(mygo.ActivationPolicyAccessory)
-	}
-
-	if !mygo.App.RequestSingleInstanceLock() {
-		log.Printf("[monitor] another instance is already running; exiting")
-		return
-	}
 	mygo.App.OnSecondInstance(func(_ []string, _ string) {
 		if deskHost != nil {
 			deskHost.Show()
@@ -128,7 +117,7 @@ func main() {
 	})
 
 	mygo.App.OnWindowAllClosed(func() {
-		if !store.Get().KeepInTrayOnClose {
+		if deskHost != nil && deskHost.win != nil && !store.Get().KeepInTrayOnClose {
 			mygo.App.Quit()
 		}
 	})
@@ -154,22 +143,39 @@ func main() {
 	}
 }
 
-func buildProvider(useMock bool, interval time.Duration, dataDir string, settings model.Settings) model.SnapshotProvider {
-	if useMock {
-		return mock.New(interval)
-	}
-	p, err := source.NewProvider(source.Options{
-		RootDir:             dataDir,
-		PricingOverridePath: settings.PricingOverridePath,
-	})
+func buildProvider(dataDir string, settings model.Settings) (*source.Provider, *metrics.Calculator) {
+	calc, err := metrics.NewCalculator(settings.PricingOverridePath)
 	if err != nil {
 		log.Printf("[monitor] failed to initialize local Antigravity engine (%v); retrying without pricing override", err)
-		p, err = source.NewProvider(source.Options{RootDir: dataDir})
-		if err != nil {
-			log.Fatalf("[monitor] initialize local Antigravity data engine: %v", err)
+		calc, err = metrics.NewDefaultCalculator()
+	}
+	if err != nil {
+		log.Fatalf("[monitor] initialize local Antigravity data engine: %v", err)
+	}
+	provider, err := source.NewProvider(source.Options{RootDir: dataDir, Calculator: calc})
+	if err != nil {
+		log.Fatalf("[monitor] initialize local Antigravity data engine: %v", err)
+	}
+	return provider, calc
+}
+
+func refreshHistory(ctx context.Context, hist history.Aggregator) {
+	initial, cancel := context.WithTimeout(ctx, 20*time.Second)
+	_ = hist.Refresh(initial)
+	cancel()
+
+	ticker := time.NewTicker(45 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			refresh, cancel := context.WithTimeout(ctx, 15*time.Second)
+			_ = hist.Refresh(refresh)
+			cancel()
 		}
 	}
-	return p
 }
 
 // desktopHost manages the native Apple Liquid Glass desktop window lifecycle,
@@ -199,12 +205,12 @@ func newDesktopHost(provider model.SnapshotProvider, histSvc history.Aggregator,
 		Quota:         quotaSvc,
 		QuotaInterval: 30 * time.Second,
 		OnSettingsChange: func(next model.Settings) {
-			prevLaunch := h.settings.LaunchAtLogin
 			next = config.Normalize(next)
 			if err := h.store.Save(next); err != nil {
 				log.Printf("[monitor] save settings failed: %v", err)
 			}
 			h.mu.Lock()
+			prevLaunch := h.settings.LaunchAtLogin
 			h.settings = next
 			h.mu.Unlock()
 
@@ -218,7 +224,25 @@ func newDesktopHost(provider model.SnapshotProvider, histSvc history.Aggregator,
 			}
 		},
 	})
+	return h
+}
 
+func (h *desktopHost) show() {
+	if h.win == nil {
+		h.createWindow()
+	}
+	if h.win.IsMinimized() {
+		h.win.Restore()
+	}
+	h.win.Show()
+	h.win.Focus()
+	h.win.Invalidate()
+}
+
+func (h *desktopHost) createWindow() {
+	h.mu.Lock()
+	s := h.settings
+	h.mu.Unlock()
 	h.win = mygo.NewWindow(mygo.WindowOptions{
 		Title:          "Antigravity Monitor",
 		Width:          900,
@@ -244,36 +268,16 @@ func newDesktopHost(provider model.SnapshotProvider, histSvc history.Aggregator,
 		}
 	})
 
-	return h
 }
 
 func (h *desktopHost) Show() {
-	mygo.RunOnMain(func() {
-		if h.win == nil {
-			return
-		}
-		if h.win.IsMinimized() {
-			h.win.Restore()
-		}
-		h.win.Show()
-		h.win.Focus()
-		h.win.Invalidate()
-	})
+	mygo.RunOnMain(h.show)
 }
 
 func (h *desktopHost) FocusAgent(convID, agentID string) {
 	mygo.RunOnMain(func() {
-		if h.app != nil {
-			h.app.FocusConversationAgent(convID, agentID)
-		}
-		if h.win != nil {
-			if h.win.IsMinimized() {
-				h.win.Restore()
-			}
-			h.win.Show()
-			h.win.Focus()
-			h.win.Invalidate()
-		}
+		h.app.FocusConversationAgent(convID, agentID)
+		h.show()
 	})
 }
 

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -15,6 +16,12 @@ var (
 	ErrCLISetup = errors.New("could not prepare the quota reader")
 	ErrCLIUsage = errors.New("Antigravity CLI quota unavailable")
 )
+
+var validatedCLI struct {
+	sync.Mutex
+	path string
+	info os.FileInfo
+}
 
 func ReadCLI(ctx context.Context) (Reading, error) {
 	binary, err := findCLI(ctx)
@@ -26,9 +33,14 @@ func ReadCLI(ctx context.Context) (Reading, error) {
 	defer cancel()
 	output, err := runCLI(ctx, binary, "--output-format", "json", "--mode", "plan", "--print", "/usage")
 	if err != nil {
+		forgetCLI(binary)
 		return Reading{}, ErrCLIUsage
 	}
-	return parseUsage(output)
+	reading, err := parseUsage(output)
+	if err != nil {
+		forgetCLI(binary)
+	}
+	return reading, err
 }
 
 func findCLI(ctx context.Context) (string, error) {
@@ -55,10 +67,37 @@ func findCLI(ctx context.Context) (string, error) {
 }
 
 func cliSupportsUsage(ctx context.Context, binary string) bool {
+	info, err := os.Stat(binary)
+	if err != nil {
+		return false
+	}
+	validatedCLI.Lock()
+	previous := validatedCLI.info
+	validated := binary == validatedCLI.path && previous != nil &&
+		info.Size() == previous.Size() && info.ModTime().Equal(previous.ModTime()) && os.SameFile(info, previous)
+	validatedCLI.Unlock()
+	if validated {
+		return true
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	version, err := runCLI(ctx, binary, "--version")
-	return err == nil && supportsUsage(string(version))
+	if err != nil || !supportsUsage(string(version)) {
+		return false
+	}
+	validatedCLI.Lock()
+	validatedCLI.path, validatedCLI.info = binary, info
+	validatedCLI.Unlock()
+	return true
+}
+
+func forgetCLI(binary string) {
+	validatedCLI.Lock()
+	defer validatedCLI.Unlock()
+	if validatedCLI.path == binary {
+		validatedCLI.path, validatedCLI.info = "", nil
+	}
 }
 
 func runCLI(ctx context.Context, binary string, args ...string) ([]byte, error) {

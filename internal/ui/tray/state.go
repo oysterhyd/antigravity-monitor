@@ -70,6 +70,7 @@ func NewState(settings model.Settings, snap model.AppSnapshot) *State {
 // ApplySnapshot updates the current AppSnapshot and follows the active
 // conversation when AutoFollowActive is enabled (or when no valid selection exists).
 func (s *State) ApplySnapshot(snap model.AppSnapshot) {
+	prev, hadSelection := s.ActiveConversation()
 	s.Snapshot = snap
 	if len(snap.Conversations) == 0 {
 		s.SelectedConvID = ""
@@ -85,6 +86,12 @@ func (s *State) ApplySnapshot(snap model.AppSnapshot) {
 		} else {
 			s.SelectedConvID = snap.Conversations[0].ID
 		}
+	}
+	current, selected := s.ActiveConversation()
+	if hadSelection && selected && prev.ID == current.ID && prev.Root.ID == current.Root.ID &&
+		len(prev.Requests) == len(current.Requests) &&
+		(len(current.Requests) == 0 || &prev.Requests[0] == &current.Requests[0]) {
+		return
 	}
 	s.syncDotTargets()
 }

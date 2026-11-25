@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -60,12 +61,10 @@ type Provider struct {
 	summaries *SummariesReader
 	convPool  *ConvDBPool
 
-	tailersMu sync.Mutex
-	tailers   map[string]*TranscriptTailer
-
 	// Sync serialization prevents overlapping DB refreshes while keeping Snapshot() non-blocking.
-	syncMu     sync.Mutex
-	cachedRows []SummaryRow
+	syncMu  sync.Mutex
+	trees   []cachedTree
+	tailers map[string]*TranscriptTailer
 
 	snapMu   sync.RWMutex
 	snapshot model.AppSnapshot
@@ -80,6 +79,12 @@ type Provider struct {
 	stopCh    chan struct{}
 	doneCh    chan struct{}
 	hasLoop   bool
+}
+
+type cachedTree struct {
+	tree     ConversationTree
+	snapshot model.ConversationSnapshot
+	hydrated bool
 }
 
 // Compile-time assertion that *Provider implements model.SnapshotProvider.
@@ -128,17 +133,19 @@ func NewProvider(opts Options) (*Provider, error) {
 		doneCh:    make(chan struct{}),
 	}
 
+	if !opts.DisableWatcher {
+		w, err := newDirWatcher(opts.RootDir, opts.Debounce, p.enqueueEvent)
+		if err == nil {
+			p.watcher = w
+		}
+	}
+
 	// Perform initial synchronous refresh so Snapshot() is immediately ready.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	_ = p.Refresh(ctx)
 	cancel()
 
 	if !opts.DisableWatcher {
-		w, err := newDirWatcher(opts.RootDir, opts.Debounce, p.enqueueEvent)
-		if err == nil {
-			p.watcher = w
-			p.updateTranscriptWatches()
-		}
 		p.hasLoop = true
 		go p.runLoop()
 	}
@@ -218,24 +225,22 @@ func (p *Provider) Refresh(ctx context.Context) error {
 	p.syncMu.Lock()
 	defer p.syncMu.Unlock()
 
-	rows, err := p.summaries.ReadAll(ctx)
+	rows, changed, err := p.summaries.readChanges(ctx)
 	if err != nil {
 		// Keep previous cached rows if L1 DB had a transient error.
-		if len(p.cachedRows) == 0 {
+		if len(p.trees) == 0 {
 			return err
 		}
-		rows = p.cachedRows
-	} else {
-		p.cachedRows = rows
+	} else if changed && (len(rows) > 0 || len(p.trees) > 0) {
+		p.updateTrees(rows)
 	}
 
-	snap := p.buildSnapshotLocked(ctx, rows)
+	snap := p.buildSnapshotLocked(ctx)
 
 	p.snapMu.Lock()
 	p.snapshot = snap
 	p.snapMu.Unlock()
 
-	p.updateTranscriptWatchesFromRows(rows)
 	p.broadcast(snap)
 	return nil
 }
@@ -309,49 +314,36 @@ func (p *Provider) broadcast(snap model.AppSnapshot) {
 	}
 }
 
-func (p *Provider) updateTranscriptWatches() {
-	p.syncMu.Lock()
-	rows := append([]SummaryRow(nil), p.cachedRows...)
-	p.syncMu.Unlock()
-	p.updateTranscriptWatchesFromRows(rows)
-}
-
-func (p *Provider) updateTranscriptWatchesFromRows(rows []SummaryRow) {
-	if p.watcher == nil || len(rows) == 0 {
-		return
+func (p *Provider) updateTrees(rows []SummaryRow) {
+	previous := make(map[string]*cachedTree, len(p.trees))
+	for i := range p.trees {
+		previous[p.trees[i].tree.Root.ConversationID] = &p.trees[i]
 	}
 	trees := BuildConversationTrees(rows)
-	limit := p.opts.MaxHydratedTrees
-	var ids []string
+	if len(trees) > p.opts.MaxConversations {
+		trees = trees[:p.opts.MaxConversations]
+	}
+	p.trees = make([]cachedTree, len(trees))
 	for i, tree := range trees {
-		treeRunning := isTreeRunning(tree)
-		if !treeRunning && i >= limit {
-			continue
-		}
-		ids = append(ids, tree.Root.ConversationID)
-		for _, c := range tree.Children {
-			ids = append(ids, c.ConversationID)
+		if old := previous[tree.Root.ConversationID]; old != nil && reflect.DeepEqual(old.tree, tree) {
+			p.trees[i] = *old
+		} else {
+			p.trees[i].tree = tree
 		}
 	}
-	p.watcher.WatchTranscriptDirs(ids)
 }
 
-func (p *Provider) syncTranscript(convID string) TranscriptData {
-	p.tailersMu.Lock()
+func (p *Provider) syncTranscript(convID string) bool {
 	tailer := p.tailers[convID]
 	if tailer == nil {
 		tailer = NewTranscriptTailer(TranscriptPath(p.opts.RootDir, convID))
 		p.tailers[convID] = tailer
 	}
-	p.tailersMu.Unlock()
-
-	_, _ = tailer.Sync()
-	return tailer.Snapshot()
+	transcriptChanged, _ := tailer.Sync()
+	return transcriptChanged
 }
 
 func (p *Provider) pruneTailers(keepIDs map[string]bool) {
-	p.tailersMu.Lock()
-	defer p.tailersMu.Unlock()
 	for id := range p.tailers {
 		if !keepIDs[id] {
 			delete(p.tailers, id)
@@ -359,32 +351,50 @@ func (p *Provider) pruneTailers(keepIDs map[string]bool) {
 	}
 }
 
-func (p *Provider) buildSnapshotLocked(ctx context.Context, rows []SummaryRow) model.AppSnapshot {
-	trees := BuildConversationTrees(rows)
-	if len(trees) > p.opts.MaxConversations {
-		trees = trees[:p.opts.MaxConversations]
-	}
-
+func (p *Provider) buildSnapshotLocked(ctx context.Context) model.AppSnapshot {
 	snap := model.AppSnapshot{
 		GeneratedAt:   time.Now().UTC(),
-		Conversations: make([]model.ConversationSnapshot, 0, len(trees)),
+		Conversations: make([]model.ConversationSnapshot, 0, len(p.trees)),
 	}
 
-	keepIDs := make(map[string]bool, len(trees)*2)
+	keepIDs := make(map[string]bool, len(p.trees)*2)
+	hydratedIDs := make([]string, 0, len(p.trees)*2)
 	hydratedCount := 0
 
-	for _, tree := range trees {
-		running := isTreeRunning(tree)
-		hydrate := running || hydratedCount < p.opts.MaxHydratedTrees
+	for _, cached := range p.trees {
+		tree := cached.tree
+		if !isTreeRunning(tree) && hydratedCount >= p.opts.MaxHydratedTrees {
+			continue
+		}
+		hydratedCount++
+		keepIDs[tree.Root.ConversationID] = true
+		hydratedIDs = append(hydratedIDs, tree.Root.ConversationID)
+		for _, child := range tree.Children {
+			keepIDs[child.ConversationID] = true
+			hydratedIDs = append(hydratedIDs, child.ConversationID)
+		}
+	}
+	dbChanges := p.convPool.syncBatch(ctx, hydratedIDs)
+
+	for i := range p.trees {
+		cached := &p.trees[i]
+		tree := cached.tree
+		hydrate := keepIDs[tree.Root.ConversationID]
+		changed := cached.snapshot.ID == "" || cached.hydrated != hydrate
 		if hydrate {
-			hydratedCount++
-			keepIDs[tree.Root.ConversationID] = true
-			for _, c := range tree.Children {
-				keepIDs[c.ConversationID] = true
+			rootID := tree.Root.ConversationID
+			changed = p.syncTranscript(rootID) || dbChanges[rootID] || changed
+			for _, child := range tree.Children {
+				id := child.ConversationID
+				changed = p.syncTranscript(id) || dbChanges[id] || changed
 			}
 		}
 
-		convSnap := p.buildConversationSnapshot(ctx, tree, hydrate)
+		if changed {
+			cached.snapshot = p.buildConversationSnapshot(tree, hydrate)
+			cached.hydrated = hydrate
+		}
+		convSnap := cached.snapshot
 		if convSnap.Running {
 			snap.RunningCount++
 		}
@@ -408,11 +418,14 @@ func (p *Provider) buildSnapshotLocked(ctx context.Context, rows []SummaryRow) m
 
 	p.convPool.PruneCache(keepIDs)
 	p.pruneTailers(keepIDs)
+	if p.watcher != nil {
+		p.watcher.WatchTranscriptDirs(keepIDs)
+	}
 
 	return snap
 }
 
-func (p *Provider) buildConversationSnapshot(ctx context.Context, tree ConversationTree, hydrate bool) model.ConversationSnapshot {
+func (p *Provider) buildConversationSnapshot(tree ConversationTree, hydrate bool) model.ConversationSnapshot {
 	rootSum := tree.Root
 	running := isTreeRunning(tree)
 	lastUpdated := rootSum.LastModifiedTime
@@ -441,16 +454,17 @@ func (p *Provider) buildConversationSnapshot(ctx context.Context, tree Conversat
 		}
 	}
 
-	// Sync L2 + L3 for root.
-	_, rootGens, rootStepTimes, _ := p.convPool.Sync(ctx, rootSum.ConversationID)
-	rootTr := p.syncTranscript(rootSum.ConversationID)
+	p.convPool.mu.Lock()
+	defer p.convPool.mu.Unlock()
+	rootState := p.convPool.states[rootSum.ConversationID]
+	rootTr := p.tailers[rootSum.ConversationID].data()
 
 	rootLastUserTime := rootTr.LastUserInputTime()
 	if rootLastUserTime.IsZero() {
 		rootLastUserTime = rootSum.LastUserInputTime
 	}
 
-	// Sync L2 + L3 for all children and collect subagent naming descriptors.
+	// Collect subagent naming descriptors from the synchronized L2 and L3 data.
 	type childHydrated struct {
 		sum       SummaryRow
 		gens      []GenMetadata
@@ -461,12 +475,13 @@ func (p *Provider) buildConversationSnapshot(ctx context.Context, tree Conversat
 	descriptors := make([]SubagentDescriptor, len(tree.Children))
 
 	for i, child := range tree.Children {
-		_, gens, st, _ := p.convPool.Sync(ctx, child.ConversationID)
-		tr := p.syncTranscript(child.ConversationID)
+		state := p.convPool.states[child.ConversationID]
+		gens := state.records
+		tr := p.tailers[child.ConversationID].data()
 		childrenData[i] = childHydrated{
 			sum:       child,
 			gens:      gens,
-			stepTimes: st,
+			stepTimes: state.stepTimes,
 			tr:        tr,
 		}
 		subType := ""
@@ -503,8 +518,8 @@ func (p *Provider) buildConversationSnapshot(ctx context.Context, tree Conversat
 		rootSum,
 		model.RootAgentID,
 		"主 Agent",
-		rootGens,
-		rootStepTimes,
+		rootState.records,
+		rootState.stepTimes,
 		rootTr,
 		time.Time{},
 		0,

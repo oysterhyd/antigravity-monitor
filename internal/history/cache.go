@@ -1,6 +1,7 @@
 package history
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -149,7 +150,7 @@ func loadCache(cachePath, pricingHash string) (cacheFile, bool) {
 		}
 		return newEmptyCache(pricingHash), true
 	}
-	if len(strings.TrimSpace(string(raw))) == 0 {
+	if len(bytes.TrimSpace(raw)) == 0 {
 		return newEmptyCache(pricingHash), true
 	}
 	var cf cacheFile

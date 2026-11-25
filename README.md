@@ -31,6 +31,15 @@ go run ./cmd/probe
 go build -ldflags="-H=windowsgui" -o antigravity-monitor.exe ./cmd/monitor
 ```
 
+Windows 发布安装包使用 MinGW-w64 GCC 和内置 SQLite，构建命令与发布工作流一致。
+
+```powershell
+$env:CGO_ENABLED = '1'
+$env:CGO_LDFLAGS = '-static'
+$env:GOFLAGS = '-tags=monitor_sqlite_cgo,mygo_nowebview'
+go run github.com/egoist/mygo/cmd/mygo@v0.10.0 build
+```
+
 ## 文档与视觉定稿
 
 - 终版设计方案：[docs/DESIGN.md](docs/DESIGN.md)

@@ -43,6 +43,8 @@ type Controller struct {
 	flyout     *mygo.Window
 	menu       *mygo.Menu
 	followItem *mygo.MenuItem
+	toolTip    string
+	title      string
 
 	stopOnce sync.Once
 	cancel   func()
@@ -74,13 +76,15 @@ func (ctl *Controller) Start() error {
 	applyThemeSource(ctl.state.Settings.ThemeMode)
 
 	darkIcon := mygo.Theme.IsDark()
+	ctl.toolTip = TrayTooltipLang(ctl.state.Snapshot, ctl.state.SelectedConvID, ctl.state.Settings.Language)
+	ctl.title = ctl.macTrayTitle()
 	tr, err := mygo.NewTray(mygo.TrayOptions{
 		ID:              "antigravity-monitor.tray",
 		Icon:            TrayIconPNG(darkIcon),
 		IconIsTemplate:  runtime.GOOS == "darwin",
-		Title:           ctl.macTrayTitle(),
+		Title:           ctl.title,
 		MonospacedTitle: true,
-		ToolTip:         TrayTooltipLang(ctl.state.Snapshot, ctl.state.SelectedConvID, ctl.state.Settings.Language),
+		ToolTip:         ctl.toolTip,
 	})
 	if err != nil {
 		return fmt.Errorf("create system tray: %w", err)
@@ -356,9 +360,15 @@ func (ctl *Controller) syncTrayMetadata() {
 	if ctl.tray == nil {
 		return
 	}
-	ctl.tray.SetToolTip(TrayTooltipLang(ctl.state.Snapshot, ctl.state.SelectedConvID, ctl.state.Settings.Language))
+	if tip := TrayTooltipLang(ctl.state.Snapshot, ctl.state.SelectedConvID, ctl.state.Settings.Language); tip != ctl.toolTip {
+		ctl.tray.SetToolTip(tip)
+		ctl.toolTip = tip
+	}
 	if runtime.GOOS == "darwin" {
-		ctl.tray.SetTitle(ctl.macTrayTitle())
+		if title := ctl.macTrayTitle(); title != ctl.title {
+			ctl.tray.SetTitle(title)
+			ctl.title = title
+		}
 	}
 }
 

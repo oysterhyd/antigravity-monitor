@@ -24,7 +24,8 @@ type Service struct {
 	calc        *metrics.Calculator
 	pricingHash string
 
-	syncMu sync.Mutex
+	loadOnce sync.Once
+	syncMu   sync.Mutex
 
 	mu         sync.RWMutex
 	cache      cacheFile
@@ -55,18 +56,21 @@ func NewAggregator(dataRoot, cachePath string, calc *metrics.Calculator) *Servic
 	}
 
 	pricingHash := computePricingHash(calc)
-	cf, dirty := loadCache(cachePath, pricingHash)
 
 	return &Service{
 		dataRoot:    dataRoot,
 		cachePath:   cachePath,
 		calc:        calc,
 		pricingHash: pricingHash,
-		cache:       cf,
-		cacheDirty:  dirty,
 		summaries:   make(map[string]source.SummaryRow),
 		parents:     make(map[string]string),
 	}
+}
+
+func (s *Service) ensureCacheLoaded() {
+	s.loadOnce.Do(func() {
+		s.cache, s.cacheDirty = loadCache(s.cachePath, s.pricingHash)
+	})
 }
 
 // LastStats returns the cache hit/miss/prune counts from the most recent Refresh.
@@ -86,6 +90,7 @@ func (s *Service) Refresh(ctx context.Context) error {
 		return err
 	}
 
+	s.ensureCacheLoaded()
 	s.syncMu.Lock()
 	defer s.syncMu.Unlock()
 
@@ -252,7 +257,7 @@ func (s *Service) scanConvDB(ctx context.Context, convID, dbPath string, st conv
 		for rows.Next() {
 			var (
 				idx  int
-				blob []byte
+				blob sql.RawBytes
 			)
 			if scanErr := rows.Scan(&idx, &blob); scanErr != nil {
 				continue
@@ -441,7 +446,7 @@ func fetchStepTimestamps(ctx context.Context, db *sql.DB, idxs []int, dst map[in
 		for rows.Next() {
 			var (
 				sIdx int
-				meta []byte
+				meta sql.RawBytes
 			)
 			if err := rows.Scan(&sIdx, &meta); err != nil {
 				continue
@@ -457,6 +462,7 @@ func fetchStepTimestamps(ctx context.Context, db *sql.DB, idxs []int, dst map[in
 // Query aggregates historical usage across the requested Range using now's location
 // and half-open [Start, End) calendar bucket boundaries.
 func (s *Service) Query(r Range, now time.Time) QueryResult {
+	s.ensureCacheLoaded()
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -778,6 +784,7 @@ func (s *Service) Query(r Range, now time.Time) QueryResult {
 // ConsumptionSince returns pool-partitioned token & USD consumption for all requests
 // with non-zero timestamp >= since.
 func (s *Service) ConsumptionSince(since time.Time) PoolConsumption {
+	s.ensureCacheLoaded()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
