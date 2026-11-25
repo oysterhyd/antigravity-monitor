@@ -88,10 +88,8 @@ func (a *App) renderQuotaView(c *ui.Context, pal theme.Palette, now time.Time) {
 				switch {
 				case available:
 					message = tr.QuotaShowingLast
-				case errors.Is(q.SourceError, quota.ErrCLINotFound):
-					message = tr.QuotaSetupNeeded
-				case errors.Is(q.SourceError, quota.ErrCLIOutdated):
-					message = tr.QuotaUpdateNeeded
+				case errors.Is(q.SourceError, quota.ErrCLISetup):
+					message = tr.QuotaSetupFailed
 				}
 				ui.Row(c.Key("quota-src-err")).
 					FillWidth().

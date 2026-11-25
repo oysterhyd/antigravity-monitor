@@ -57,9 +57,9 @@ func TestR2QuotaRefreshAndUnavailableStatus(t *testing.T) {
 	mustHaveText(t, env.Tester, "--%")
 	mustHaveText(t, env.Tester, "No quota samples yet")
 
-	env.quotaSource.Store(&quotaResult{err: quota.ErrCLINotFound})
+	env.quotaSource.Store(&quotaResult{err: quota.ErrCLISetup})
 	clickMust(t, env.Tester, "↻ Refresh")
-	waitForQuotaFrame(t, env, "See the project instructions to set up quota reading")
+	waitForQuotaFrame(t, env, "Could not prepare quota reading. Check your connection and refresh.")
 
 	reading := quotaReading(anchorNow, 74, 41)
 	env.quotaSource.Store(&quotaResult{reading: reading})

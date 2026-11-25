@@ -171,8 +171,7 @@ type Strings struct {
 	QuotaResetSoon         string
 	QuotaResetDaysHoursFmt string
 	QuotaResetUnknown      string
-	QuotaSetupNeeded       string
-	QuotaUpdateNeeded      string
+	QuotaSetupFailed       string
 	QuotaUnavailable       string
 	QuotaShowingLast       string
 	QuotaTrendTitle        string
@@ -357,9 +356,8 @@ var zhStrings = Strings{
 	QuotaResetSoon:         "即将重置",
 	QuotaResetDaysHoursFmt: "%d 天 %d 小时",
 	QuotaResetUnknown:      "重置时间未知",
-	QuotaSetupNeeded:       "额度读取组件未安装，请参照项目说明配置",
-	QuotaUpdateNeeded:      "请更新额度读取组件后重试",
-	QuotaUnavailable:       "无法读取账号额度，请检查 Antigravity 登录状态和网络连接",
+	QuotaSetupFailed:       "暂时无法准备额度读取，请检查网络后刷新",
+	QuotaUnavailable:       "无法读取账号额度，请确认已登录 Antigravity 后刷新",
 	QuotaShowingLast:       "刷新失败，显示上次读取的额度",
 	QuotaTrendTitle:        "额度变化趋势",
 	QuotaFilterAll:         "全部",
@@ -542,9 +540,8 @@ var enStrings = Strings{
 	QuotaResetSoon:         "Resetting soon",
 	QuotaResetDaysHoursFmt: "%dd %dh",
 	QuotaResetUnknown:      "Reset time unknown",
-	QuotaSetupNeeded:       "See the project instructions to set up quota reading",
-	QuotaUpdateNeeded:      "Update the quota reader and retry",
-	QuotaUnavailable:       "Check your Antigravity sign-in and network connection",
+	QuotaSetupFailed:       "Could not prepare quota reading. Check your connection and refresh.",
+	QuotaUnavailable:       "Sign in to Antigravity and refresh if quota is unavailable",
 	QuotaShowingLast:       "Refresh failed. Showing the last quota reading.",
 	QuotaTrendTitle:        "Quota Usage Trend",
 	QuotaFilterAll:         "All",

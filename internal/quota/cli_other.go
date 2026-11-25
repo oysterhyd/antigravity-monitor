@@ -2,8 +2,19 @@
 
 package quota
 
-import "syscall"
+import (
+	"context"
+	"syscall"
+)
 
 func cliProcessAttributes() *syscall.SysProcAttr {
 	return nil
+}
+
+func cliCandidates() []string {
+	return nil
+}
+
+func prepareCLI(context.Context) (string, error) {
+	return "", ErrCLISetup
 }

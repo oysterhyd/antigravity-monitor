@@ -6,42 +6,59 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
 
 var (
-	ErrCLINotFound = errors.New("Antigravity CLI not found")
-	ErrCLIOutdated = errors.New("Antigravity CLI 1.1.11 or later required")
-	ErrCLIUsage    = errors.New("Antigravity CLI quota unavailable")
+	ErrCLISetup = errors.New("could not prepare the quota reader")
+	ErrCLIUsage = errors.New("Antigravity CLI quota unavailable")
 )
 
 func ReadCLI(ctx context.Context) (Reading, error) {
-	binary, err := exec.LookPath("agy")
-	if errors.Is(err, exec.ErrNotFound) && runtime.GOOS == "windows" && os.Getenv("LOCALAPPDATA") != "" {
-		binary, err = exec.LookPath(filepath.Join(os.Getenv("LOCALAPPDATA"), "agy", "bin", "agy.exe"))
-	}
+	binary, err := findCLI(ctx)
 	if err != nil {
-		return Reading{}, ErrCLINotFound
+		return Reading{}, err
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	version, err := runCLI(ctx, binary, "--version")
-	if err != nil {
-		return Reading{}, ErrCLIUsage
-	}
-	if !supportsUsage(string(version)) {
-		return Reading{}, ErrCLIOutdated
-	}
 	output, err := runCLI(ctx, binary, "--output-format", "json", "--mode", "plan", "--print", "/usage")
 	if err != nil {
 		return Reading{}, ErrCLIUsage
 	}
 	return parseUsage(output)
+}
+
+func findCLI(ctx context.Context) (string, error) {
+	candidates := cliCandidates()
+	if binary, err := exec.LookPath("agy"); err == nil {
+		candidates = append([]string{binary}, candidates...)
+	}
+	for _, candidate := range candidates {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if cliSupportsUsage(ctx, candidate) {
+			return candidate, nil
+		}
+	}
+	binary, err := prepareCLI(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !cliSupportsUsage(ctx, binary) {
+		return "", ErrCLISetup
+	}
+	return binary, nil
+}
+
+func cliSupportsUsage(ctx context.Context, binary string) bool {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	version, err := runCLI(ctx, binary, "--version")
+	return err == nil && supportsUsage(string(version))
 }
 
 func runCLI(ctx context.Context, binary string, args ...string) ([]byte, error) {
