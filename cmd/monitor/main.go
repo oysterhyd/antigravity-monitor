@@ -1,16 +1,21 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/oysterhyd/antigravity-monitor/internal/config"
+	"github.com/oysterhyd/antigravity-monitor/internal/history"
+	"github.com/oysterhyd/antigravity-monitor/internal/metrics"
 	"github.com/oysterhyd/antigravity-monitor/internal/mock"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
+	"github.com/oysterhyd/antigravity-monitor/internal/quota"
 	"github.com/oysterhyd/antigravity-monitor/internal/source"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/desktop"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/tray"
@@ -36,6 +41,39 @@ func main() {
 
 	provider := buildProvider(*useMock, *mockInterval, *dataDir, settings)
 	defer func() { _ = provider.Close() }()
+
+	// Initialize read-only Usage History aggregator & compliant Account Quota tracker.
+	var histSvc history.Aggregator
+	var quotaSvc quota.Tracker
+	if *useMock {
+		quotaSvc = quota.NewService("")
+	} else {
+		calc, calcErr := metrics.NewCalculator(settings.PricingOverridePath)
+		if calcErr != nil {
+			calc, _ = metrics.NewDefaultCalculator()
+		}
+		cfgDir := filepath.Dir(store.Path())
+		histCachePath := filepath.Join(cfgDir, "usage_cache.json")
+		quotaHistPath := filepath.Join(cfgDir, "quota_history.json")
+		hist := history.NewAggregator(*dataDir, histCachePath, calc)
+		histSvc = hist
+		quotaSvc = quota.NewService(quotaHistPath)
+
+		// Warm up history index asynchronously so startup stays instant, then refresh periodically.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			_ = hist.Refresh(ctx)
+			cancel()
+
+			ticker := time.NewTicker(45 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				rCtx, rCancel := context.WithTimeout(context.Background(), 15*time.Second)
+				_ = hist.Refresh(rCtx)
+				rCancel()
+			}
+		}()
+	}
 
 	var (
 		deskHost *desktopHost
@@ -98,7 +136,7 @@ func main() {
 	})
 
 	mygo.App.WhenReady(func() {
-		deskHost = newDesktopHost(provider, store, func(s model.Settings) {
+		deskHost = newDesktopHost(provider, histSvc, quotaSvc, store, func(s model.Settings) {
 			trayCtl.ApplySettings(s)
 		})
 
@@ -149,7 +187,7 @@ type desktopHost struct {
 	quitting bool
 }
 
-func newDesktopHost(provider model.SnapshotProvider, store *config.Store, onSettings func(model.Settings)) *desktopHost {
+func newDesktopHost(provider model.SnapshotProvider, histSvc history.Aggregator, quotaSvc quota.Tracker, store *config.Store, onSettings func(model.Settings)) *desktopHost {
 	s := store.Get()
 	h := &desktopHost{
 		store:      store,
@@ -159,6 +197,8 @@ func newDesktopHost(provider model.SnapshotProvider, store *config.Store, onSett
 
 	h.app = desktop.New(provider, desktop.Options{
 		Settings: &s,
+		History:  histSvc,
+		Quota:    quotaSvc,
 		OnSettingsChange: func(next model.Settings) {
 			prevLaunch := h.settings.LaunchAtLogin
 			next = config.Normalize(next)

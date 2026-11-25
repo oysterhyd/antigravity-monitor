@@ -10,8 +10,10 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
+	"github.com/oysterhyd/antigravity-monitor/internal/history"
 	"github.com/oysterhyd/antigravity-monitor/internal/i18n"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
+	"github.com/oysterhyd/antigravity-monitor/internal/quota"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/anim"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/theme"
 )
@@ -34,6 +36,15 @@ const (
 	ReqViewList  ReqViewMode = 1
 )
 
+// ActiveView identifies which right-hand canvas is currently displayed.
+type ActiveView string
+
+const (
+	ViewLive    ActiveView = "live"
+	ViewQuota   ActiveView = "quota"
+	ViewHistory ActiveView = "history"
+)
+
 const (
 	scopeAll       = "all"
 	chartWindowLen = 18
@@ -47,6 +58,12 @@ type Options struct {
 	Settings *model.Settings
 	// Window is the host mygo window, used for Update() wakeups and AlwaysOnTop toggles.
 	Window *mygo.Window
+	// History provides read-only historical usage aggregation for the Usage History view.
+	History history.Aggregator
+	// Quota provides compliant local quota tracking and calibration for the Account Quota view.
+	Quota quota.Tracker
+	// Now optionally overrides the wall-clock timestamp used for quota countdowns and history windows.
+	Now func() time.Time
 	// ShowDevToolbar shows subtle top-right dev harness controls (theme, live toggle, burst).
 	ShowDevToolbar bool
 	// LiveRunning indicates initial live stream state for the dev harness.
@@ -61,8 +78,10 @@ type Options struct {
 
 // App owns the desktop UI state, snapshot subscription, and 60fps animation engines.
 type App struct {
-	provider model.SnapshotProvider
-	opts     Options
+	provider   model.SnapshotProvider
+	historySvc history.Aggregator
+	quotaSvc   quota.Tracker
+	opts       Options
 
 	mu        sync.RWMutex
 	snap      model.AppSnapshot
@@ -74,6 +93,7 @@ type App struct {
 
 	// Interactive UI state (accessed on UI thread inside View / tests).
 	settings            model.Settings
+	activeView          ActiveView
 	convID              string
 	scope               string
 	metric              MetricKind
@@ -85,6 +105,29 @@ type App struct {
 	sessionPopoverOpen  bool
 	settingsPopoverOpen bool
 	liveRunning         bool
+
+	// Account Quota view interactive state.
+	quotaSeries     string // "all" | "gemini" | "claude"
+	quotaRange      string // "24h" | "7d"
+	quotaHoverIdx   int
+	quotaCalibOpen  bool
+	calibGemPct     string
+	calibGemHours   string
+	calibGemMins    string
+	calibClaPct     string
+	calibClaHours   string
+	calibClaMins    string
+	calibJSONSource string
+	calibError      string
+
+	// Usage History view interactive state.
+	histRange     history.Range
+	histMetric    string // "tokens" | "cost" | "cache"
+	histHoverIdx  int
+	histCached    history.QueryResult
+	histCachedAt  time.Time
+	histCachedRng history.Range
+	histHasCache  bool
 
 	// 60fps spring & morphing state.
 	springs     *anim.SpringBank
@@ -110,19 +153,34 @@ func New(provider model.SnapshotProvider, opts Options) *App {
 	}
 
 	a := &App{
-		provider:      provider,
-		opts:          opts,
-		win:           opts.Window,
-		settings:      settings,
-		scope:         scopeAll,
-		metric:        MetricTPS,
+		provider:       provider,
+		historySvc:     opts.History,
+		quotaSvc:       opts.Quota,
+		opts:           opts,
+		win:            opts.Window,
+		settings:       settings,
+		activeView:     ViewLive,
+		scope:          scopeAll,
+		metric:         MetricTPS,
 		reqView:        ReqViewCurve,
 		hoverChartIdx:  -1,
 		hoverCtxSegIdx: -1,
 		liveRunning:    opts.LiveRunning,
-		springs:       anim.NewSpringBank(anim.DefaultSpringConfig()),
-		morpher:       anim.NewCurveMorpher(chartWindowLen),
-		lastSeenSeq:   make(map[string]int, 4),
+		quotaSeries:    "all",
+		quotaRange:     "24h",
+		quotaHoverIdx:  -1,
+		calibGemPct:    "80",
+		calibGemHours:  "4",
+		calibGemMins:   "0",
+		calibClaPct:    "70",
+		calibClaHours:  "4",
+		calibClaMins:   "0",
+		histRange:      history.Range7D,
+		histMetric:     "tokens",
+		histHoverIdx:   -1,
+		springs:        anim.NewSpringBank(anim.DefaultSpringConfig()),
+		morpher:        anim.NewCurveMorpher(chartWindowLen),
+		lastSeenSeq:    make(map[string]int, 4),
 	}
 
 	if provider != nil {
@@ -189,11 +247,57 @@ func (a *App) SyncSnapshot() {
 	a.mu.Unlock()
 }
 
+// ActiveView returns the currently displayed main canvas view.
+func (a *App) ActiveView() ActiveView {
+	if a.activeView == "" {
+		return ViewLive
+	}
+	return a.activeView
+}
+
+// SetActiveView switches the right-hand main canvas between Live, Quota, and History views.
+func (a *App) SetActiveView(v ActiveView) {
+	switch v {
+	case ViewLive, ViewQuota, ViewHistory:
+	default:
+		v = ViewLive
+	}
+	a.activeView = v
+	a.sessionPopoverOpen = false
+	a.settingsPopoverOpen = false
+	a.quotaCalibOpen = false
+	a.quotaHoverIdx = -1
+	a.histHoverIdx = -1
+	if v == ViewHistory {
+		a.histHasCache = false
+	}
+}
+
+// SetView is a concise alias for SetActiveView.
+func (a *App) SetView(v ActiveView) {
+	a.SetActiveView(v)
+}
+
+// ToggleSubView toggles a sub-view (Quota or History); clicking the active one returns to Live Monitor.
+func (a *App) ToggleSubView(v ActiveView) {
+	if a.activeView == v {
+		a.SetActiveView(ViewLive)
+		return
+	}
+	a.SetActiveView(v)
+}
+
+// ToggleView is a concise alias for ToggleSubView.
+func (a *App) ToggleView(v ActiveView) {
+	a.ToggleSubView(v)
+}
+
 // FocusConversation selects a conversation; manual=true pins it (disables auto-follow).
 func (a *App) FocusConversation(convID string, manual bool) {
 	if convID == "" {
 		return
 	}
+	a.activeView = ViewLive
 	a.convID = convID
 	if manual && a.settings.AutoFollowActive {
 		a.settings.AutoFollowActive = false
@@ -204,6 +308,7 @@ func (a *App) FocusConversation(convID string, manual bool) {
 	a.expandedReqSeq = 0
 	a.hoverChartIdx = -1
 	a.sessionPopoverOpen = false
+	a.quotaCalibOpen = false
 	a.morpher.ClearCrosshair()
 }
 
@@ -212,6 +317,8 @@ func (a *App) FocusAgent(agentID string) {
 	if agentID == "" {
 		agentID = scopeAll
 	}
+	a.activeView = ViewLive
+	a.quotaCalibOpen = false
 	if a.scope == agentID {
 		return
 	}
@@ -349,37 +456,36 @@ func (a *App) View(c *ui.Context) {
 
 	// Resolve active conversation and scope view model.
 	conv, hasConv := snap.FindConversation(a.convID)
-	if !hasConv {
-		a.renderEmptyState(c, pal)
-		return
-	}
-	a.convID = conv.ID
-	if a.scope != scopeAll {
-		if _, ok := conv.FindAgent(a.scope); !ok {
-			a.scope = scopeAll
+	var vm scopeView
+	if hasConv {
+		a.convID = conv.ID
+		if a.scope != scopeAll {
+			if _, ok := conv.FindAgent(a.scope); !ok {
+				a.scope = scopeAll
+			}
 		}
-	}
 
-	vm := a.buildScopeView(conv)
-	a.updateAnimationTargets(conv, vm, c.Preferences().ReduceMotion)
+		vm = a.buildScopeView(conv)
+		a.updateAnimationTargets(conv, vm, c.Preferences().ReduceMotion)
 
-	// Advance physics & morphing only while active; idle settles to ~0% GPU.
-	animActive := false
-	if c.Preferences().ReduceMotion {
-		a.snapAllAnimations(conv, vm)
-	} else {
-		if a.springs.StepAll(dtSec) {
-			animActive = true
+		// Advance physics & morphing only while active; idle settles to ~0% GPU.
+		animActive := false
+		if c.Preferences().ReduceMotion {
+			a.snapAllAnimations(conv, vm)
+		} else {
+			if a.springs.StepAll(dtSec) {
+				animActive = true
+			}
+			if a.morpher.Step(dtSec) {
+				animActive = true
+			}
+			if a.heroPulse.Active(now) || a.badgePulse.Active(now) {
+				animActive = true
+			}
 		}
-		if a.morpher.Step(dtSec) {
-			animActive = true
+		if animActive {
+			c.AnimationFrame()
 		}
-		if a.heroPulse.Active(now) || a.badgePulse.Active(now) {
-			animActive = true
-		}
-	}
-	if animActive {
-		c.AnimationFrame()
 	}
 
 	// Root window vibrancy / atmospheric glass shell.
@@ -420,8 +526,23 @@ func (a *App) View(c *ui.Context) {
 			Gap(12).
 			AlignItems(ui.Stretch).
 			Children(func() {
-				a.renderSidebar(c, pal, snap, conv, now)
-				a.renderMainCanvas(c, pal, conv, vm, now)
+				wallNow := now
+				if a.opts.Now != nil {
+					wallNow = a.opts.Now()
+				}
+				a.renderSidebar(c, pal, snap, conv, hasConv, wallNow)
+				switch a.activeView {
+				case ViewQuota:
+					a.renderQuotaView(c, pal, wallNow)
+				case ViewHistory:
+					a.renderHistoryView(c, pal, wallNow)
+				default:
+					if !hasConv {
+						a.renderEmptyState(c, pal)
+					} else {
+						a.renderMainCanvas(c, pal, conv, vm, now)
+					}
+				}
 			})
 	})
 }
@@ -630,8 +751,7 @@ func (a *App) snapAllAnimations(conv model.ConversationSnapshot, vm scopeView) {
 
 func (a *App) renderEmptyState(c *ui.Context, pal theme.Palette) {
 	tr := a.tr()
-	c.Root().Background(pal.BackdropFrom)
-	ui.Column(c).Fill().Center().Gap(8).TextColor(pal.Ink1).Children(func() {
+	ui.Column(c.Key("live-empty-canvas")).Grow(1).MinWidth(0).Center().Gap(8).TextColor(pal.Ink1).Children(func() {
 		ui.Text(c, "Antigravity Monitor").FontSize(18).Bold()
 		ui.Text(c, tr.WaitingData).FontSize(13).TextColor(pal.Ink2)
 	})

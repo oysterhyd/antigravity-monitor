@@ -1,6 +1,7 @@
 package desktop_test
 
 import (
+	"context"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -8,8 +9,11 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/oysterhyd/antigravity-monitor/internal/history"
+	"github.com/oysterhyd/antigravity-monitor/internal/metrics"
 	"github.com/oysterhyd/antigravity-monitor/internal/mock"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
+	"github.com/oysterhyd/antigravity-monitor/internal/quota"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/desktop"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/theme"
 )
@@ -315,6 +319,117 @@ func TestContextBreakdownAndEnglishToggle(t *testing.T) {
 	tt.Advance(250 * time.Millisecond)
 	mustHaveText(t, tt, "Main Agent")
 	savePreview(t, tt, "09_dark_single_en.png")
+}
+
+type mockHistoryAgg struct{}
+
+func (m *mockHistoryAgg) Refresh(_ context.Context) error                { return nil }
+func (m *mockHistoryAgg) ConsumptionSince(_ time.Time) history.PoolConsumption { return history.PoolConsumption{} }
+func (m *mockHistoryAgg) Query(r history.Range, now time.Time) history.QueryResult {
+	return history.QueryResult{
+		Range:           r,
+		TotalTokens:     48_600_000,
+		OutputTokens:    2_900_000,
+		InputTokens:     3_200_000,
+		CacheReadTokens: 42_500_000,
+		TotalCostUSD:    42.86,
+		AvgCostUSD:      6.12,
+		CacheSavedUSD:   118.40,
+		CacheHitRate:    94.2,
+		SessionCount:    38,
+		RequestCount:    1846,
+		Buckets: []history.BucketSummary{
+			{Label: "11/18", CacheReadTokens: 4_200_000, InputTokens: 350_000, OutputTokens: 280_000, TotalTokens: 4_830_000, GeminiCostUSD: 2.90, ClaudeGPTCostUSD: 1.22, TotalCostUSD: 4.12, CacheHitPct: 92.3},
+			{Label: "11/19", CacheReadTokens: 6_100_000, InputTokens: 420_000, OutputTokens: 390_000, TotalTokens: 6_910_000, GeminiCostUSD: 3.60, ClaudeGPTCostUSD: 2.28, TotalCostUSD: 5.88, CacheHitPct: 93.6},
+			{Label: "11/20", CacheReadTokens: 8_400_000, InputTokens: 510_000, OutputTokens: 520_000, TotalTokens: 9_430_000, GeminiCostUSD: 5.10, ClaudeGPTCostUSD: 2.84, TotalCostUSD: 7.94, CacheHitPct: 94.3},
+			{Label: "11/21", CacheReadTokens: 3_900_000, InputTokens: 280_000, OutputTokens: 240_000, TotalTokens: 4_420_000, GeminiCostUSD: 2.80, ClaudeGPTCostUSD: 0.76, TotalCostUSD: 3.56, CacheHitPct: 93.3},
+			{Label: "11/22", CacheReadTokens: 5_500_000, InputTokens: 360_000, OutputTokens: 340_000, TotalTokens: 6_200_000, GeminiCostUSD: 3.40, ClaudeGPTCostUSD: 1.78, TotalCostUSD: 5.18, CacheHitPct: 93.9},
+			{Label: "11/23", CacheReadTokens: 8_100_000, InputTokens: 440_000, OutputTokens: 480_000, TotalTokens: 9_020_000, GeminiCostUSD: 5.30, ClaudeGPTCostUSD: 2.74, TotalCostUSD: 8.04, CacheHitPct: 94.8},
+			{Label: "11/24", CacheReadTokens: 8_700_000, InputTokens: 400_000, OutputTokens: 320_000, TotalTokens: 9_420_000, GeminiCostUSD: 5.60, ClaudeGPTCostUSD: 2.54, TotalCostUSD: 8.14, CacheHitPct: 95.4},
+		},
+		ByModel: []history.ModelUsage{
+			{Name: metrics.SubModelGeminiNeon, Pool: metrics.PoolGemini, CostUSD: 26.40, Tokens: 30_100_000, Share: 62},
+			{Name: metrics.SubModelClaude45, Pool: metrics.PoolClaudeGPT, CostUSD: 12.15, Tokens: 11_600_000, Share: 24},
+			{Name: metrics.SubModelGeminiFlash, Pool: metrics.PoolGemini, CostUSD: 4.31, Tokens: 6_900_000, Share: 14},
+		},
+		TopSessions: []history.SessionSummary{
+			{ConvID: "conv-monitor", Title: "Antigravity Token 实时统计面板", PrimaryPool: metrics.PoolGemini, TotalTokens: 14_200_000, CostUSD: 14.34},
+			{ConvID: "conv-payments", Title: "payments-api 重构", PrimaryPool: metrics.PoolClaudeGPT, TotalTokens: 8_400_000, CostUSD: 12.15},
+			{ConvID: "conv-sql", Title: "SQL 慢查询排查", PrimaryPool: metrics.PoolGemini, TotalTokens: 5_800_000, CostUSD: 5.59},
+		},
+	}
+}
+
+func TestQuotaAndHistoryVisualPreviews(t *testing.T) {
+	p := mock.New(0)
+	defer p.Close()
+
+	qSvc := quota.NewService(filepath.Join(t.TempDir(), "quota_history.json"))
+	now := time.Now()
+	_, _ = qSvc.Calibrate(quota.CalibrationInput{GeminiRemainingPct: 92, GeminiResetIn: 1 * time.Hour, ClaudeRemainingPct: 76, ClaudeResetIn: 4 * time.Hour}, now.Add(-6*time.Hour))
+	qSvc.SampleNow(now.Add(-5*time.Hour+10*time.Minute), history.PoolConsumption{GeminiCostUSD: 2.2, ClaudeCostUSD: 1.5})
+	qSvc.SampleNow(now.Add(-3*time.Hour), history.PoolConsumption{GeminiCostUSD: 1.8, ClaudeCostUSD: 1.2})
+	_, _ = qSvc.Calibrate(quota.CalibrationInput{GeminiRemainingPct: 74, GeminiResetIn: 3*time.Hour + 42*time.Minute, ClaudeRemainingPct: 41, ClaudeResetIn: 2*time.Hour + 15*time.Minute}, now.Add(-5*time.Minute))
+
+	app := desktop.New(p, desktop.Options{
+		ThemeMode: theme.ModeLight,
+		History:   &mockHistoryAgg{},
+		Quota:     qSvc,
+	})
+	defer app.Close()
+
+	tt := ui.NewTester(app.View, 900, 590)
+	tt.Advance(250 * time.Millisecond)
+
+	// 1. Account Quota Light ZH
+	if err := tt.Click("账号实时额度"); err != nil {
+		t.Fatalf("click quota nav: %v", err)
+	}
+	tt.Advance(250 * time.Millisecond)
+	mustHaveText(t, tt, "Gemini Models")
+	mustHaveText(t, tt, "Claude & GPT Models")
+	mustHaveText(t, tt, "额度变化趋势")
+	savePreview(t, tt, "10_quota_light_zh.png")
+
+	// 2. Account Quota Dark EN + Calibration Popover
+	app.SetThemeMode(theme.ModeDark)
+	app.SetLanguage("en")
+	tt.Frame()
+	tt.Advance(250 * time.Millisecond)
+	if err := tt.Click("Calibrate"); err != nil {
+		t.Fatalf("click Calibrate: %v", err)
+	}
+	tt.Advance(200 * time.Millisecond)
+	mustHaveText(t, tt, "Calibrate Quota Baseline")
+	savePreview(t, tt, "11_quota_dark_en_calib.png")
+	if err := tt.Click("Cancel"); err != nil {
+		t.Fatalf("click Cancel: %v", err)
+	}
+
+	// 3. Usage History Light ZH
+	app.SetThemeMode(theme.ModeLight)
+	app.SetLanguage("zh")
+	tt.Frame()
+	if err := tt.Click("历史消耗统计"); err != nil {
+		t.Fatalf("click history nav: %v", err)
+	}
+	tt.Advance(250 * time.Millisecond)
+	mustHaveText(t, tt, "48.6M")
+	mustHaveText(t, tt, "模型消耗占比")
+	mustHaveText(t, tt, "高消耗会话 Top 3")
+	savePreview(t, tt, "12_history_light_zh.png")
+
+	// 4. Usage History Dark EN (Cost metric)
+	app.SetThemeMode(theme.ModeDark)
+	app.SetLanguage("en")
+	tt.Frame()
+	if err := tt.Click("Cost"); err != nil {
+		t.Fatalf("click Cost metric: %v", err)
+	}
+	tt.Advance(250 * time.Millisecond)
+	mustHaveText(t, tt, "Usage History")
+	mustHaveText(t, tt, "Cost by Model Family")
+	savePreview(t, tt, "13_history_dark_en_cost.png")
 }
 
 func savePreview(t *testing.T, tt *ui.Tester, filename string) {

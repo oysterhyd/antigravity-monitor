@@ -23,9 +23,13 @@ type Palette struct {
 	Ink2 ui.Color
 	Ink3 ui.Color
 
-	// Accent palette: single Apple Blue primary + restrained Amber secondary/warn + Danger (>80%).
+	// Accent palette: Apple Blue primary + Indigo secondary + Teal/Green telemetry + Amber warn + Danger (>80%).
 	Accent     ui.Color
 	AccentSoft ui.Color
+	Indigo     ui.Color
+	IndigoSoft ui.Color
+	Teal       ui.Color
+	Green      ui.Color
 	Amber      ui.Color
 	AmberSoft  ui.Color
 	Danger     ui.Color
@@ -47,6 +51,8 @@ type Palette struct {
 	RimBottom  ui.Color
 	Divider    ui.Color
 	Track      ui.Color
+	RingBg     ui.Color
+	BarSep     ui.Color
 	SegBg      ui.Color
 	SegPill    ui.Color
 	Sheen      ui.Color
@@ -79,6 +85,10 @@ func LightPalette() Palette {
 
 		Accent:     ui.Hex("#007AFF"),
 		AccentSoft: ui.RGBA(0, 122, 255, 0.12),
+		Indigo:     ui.Hex("#5856D6"),
+		IndigoSoft: ui.RGBA(88, 86, 214, 0.13),
+		Teal:       ui.Hex("#32ADE6"),
+		Green:      ui.Hex("#34C759"),
 		Amber:      ui.Hex("#E58500"),
 		AmberSoft:  ui.RGBA(229, 133, 0, 0.16),
 		Danger:     ui.Hex("#FF3B30"),
@@ -98,6 +108,8 @@ func LightPalette() Palette {
 		RimBottom:  ui.RGBA(30, 58, 138, 0.06),
 		Divider:    ui.RGBA(17, 17, 19, 0.075),
 		Track:      ui.RGBA(17, 17, 19, 0.085),
+		RingBg:     ui.RGBA(17, 17, 19, 0.075),
+		BarSep:     ui.RGBA(255, 255, 255, 0.78),
 		SegBg:      ui.RGBA(17, 17, 19, 0.065),
 		SegPill:    ui.RGBA(255, 255, 255, 0.94),
 		Sheen:      ui.RGBA(255, 255, 255, 0.54),
@@ -129,6 +141,10 @@ func DarkPalette() Palette {
 
 		Accent:     ui.Hex("#0A84FF"),
 		AccentSoft: ui.RGBA(10, 132, 255, 0.22),
+		Indigo:     ui.Hex("#5E5CE6"),
+		IndigoSoft: ui.RGBA(94, 92, 230, 0.22),
+		Teal:       ui.Hex("#40C8E0"),
+		Green:      ui.Hex("#30D158"),
 		Amber:      ui.Hex("#FF9F0A"),
 		AmberSoft:  ui.RGBA(255, 159, 10, 0.20),
 		Danger:     ui.Hex("#FF453A"),
@@ -148,6 +164,8 @@ func DarkPalette() Palette {
 		RimBottom:  ui.RGBA(0, 0, 0, 0.35),
 		Divider:    ui.RGBA(255, 255, 255, 0.095),
 		Track:      ui.RGBA(255, 255, 255, 0.12),
+		RingBg:     ui.RGBA(255, 255, 255, 0.11),
+		BarSep:     ui.RGBA(18, 22, 32, 0.78),
 		SegBg:      ui.RGBA(255, 255, 255, 0.085),
 		SegPill:    ui.RGBA(255, 255, 255, 0.18),
 		Sheen:      ui.RGBA(255, 255, 255, 0.13),

@@ -321,6 +321,15 @@ func BuildConversationTrees(rows []SummaryRow) []ConversationTree {
 	return trees
 }
 
+// OpenReadOnlySQLite verifies dbPath exists and opens a SQLite database in strict
+// read-only WAL-compatible mode (mode=ro, query_only, busy_timeout; never immutable=1).
+func OpenReadOnlySQLite(dbPath string) (*sql.DB, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, err
+	}
+	return openReadOnlySQLite(dbPath)
+}
+
 // openReadOnlySQLite opens a SQLite database in strict read-only WAL-compatible mode.
 func openReadOnlySQLite(dbPath string) (*sql.DB, error) {
 	absPath, err := filepath.Abs(dbPath)

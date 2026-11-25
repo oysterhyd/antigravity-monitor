@@ -3,8 +3,14 @@ package theme
 import "github.com/egoist/mygo/ui"
 
 func monoIcon(body string) *ui.SVG {
+	return monoIconWithStroke("1.8", body)
+}
+
+func monoIconWithStroke(strokeWidth, body string) *ui.SVG {
 	return ui.MustParseSVG([]byte(
-		`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">` +
+		`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="` +
+			strokeWidth +
+			`" stroke-linecap="round" stroke-linejoin="round">` +
 			body +
 			`</svg>`,
 	))
@@ -66,5 +72,27 @@ var (
 
 	IconBurst = monoIcon(
 		`<path d="M12 5v14M5 12h14"/>`,
+	)
+
+	// Sidebar navigation & Quota / History action icons (v0.3.0).
+	IconGauge = monoIconWithStroke("1.85",
+		`<path d="M12 14l4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>`,
+	)
+
+	IconBarChart = monoIconWithStroke("1.85",
+		`<path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/>`,
+	)
+
+	IconRefresh = monoIcon(
+		`<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>` +
+			`<path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>`,
+	)
+
+	IconSliders = monoIcon(
+		`<path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4"/>`,
+	)
+
+	IconArrowLeft = monoIcon(
+		`<path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>`,
 	)
 )

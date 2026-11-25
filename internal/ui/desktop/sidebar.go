@@ -19,25 +19,32 @@ const (
 	treeRowGap   = 4
 )
 
-func (a *App) renderSidebar(c *ui.Context, pal theme.Palette, snap model.AppSnapshot, conv model.ConversationSnapshot, now time.Time) {
+func (a *App) renderSidebar(c *ui.Context, pal theme.Palette, snap model.AppSnapshot, conv model.ConversationSnapshot, hasConv bool, now time.Time) {
 	side := theme.GlassSidebar(c.Key("sidebar"), pal, sidebarWidth)
 
 	side.Children(func() {
 		// Top section: status bar, session picker, combined toggle, parent-child topology tree.
 		ui.Column(c.Key("sidebar-top")).Gap(14).Grow(1).MinHeight(0).Children(func() {
 			a.renderSidebarHeader(c, pal, snap, now)
-			a.renderSessionSwitcher(c, pal, snap, conv)
+			if hasConv {
+				a.renderSessionSwitcher(c, pal, snap, conv)
 
-			// Combined "整棵会话树" row — cleanly hidden for single-agent conversations.
-			if len(conv.Subagents) > 0 {
-				a.renderCombinedNode(c, pal, conv)
+				// Combined "整棵会话树" row — cleanly hidden for single-agent conversations.
+				if len(conv.Subagents) > 0 {
+					a.renderCombinedNode(c, pal, conv)
+				}
+
+				a.renderAgentTopologyTree(c, pal, conv)
+			} else {
+				tr := a.tr()
+				ui.Box(c.Key("sidebar-no-conv")).Padding(10, 6).Children(func() {
+					ui.Text(c, tr.NoActiveSession).FontSize(11.5).TextColor(pal.Ink3)
+				})
 			}
-
-			a.renderAgentTopologyTree(c, pal, conv)
 		})
 
-		// Quiet minimal footer inside sidebar: workspace path + settings gear.
-		a.renderSidebarFooter(c, pal, conv)
+		// Quiet minimal footer inside sidebar: workspace path + Quota / History / Settings buttons.
+		a.renderSidebarFooter(c, pal, conv, now)
 	})
 }
 
@@ -256,7 +263,7 @@ func (a *App) renderSessionSwitcher(c *ui.Context, pal theme.Palette, snap model
 
 func (a *App) renderCombinedNode(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot) {
 	tr := a.tr()
-	active := a.scope == scopeAll
+	active := a.activeView == ViewLive && a.scope == scopeAll
 	row := ui.ButtonBase(c.Key("node-combined")).
 		FillWidth().
 		Padding(9, 11).
@@ -385,13 +392,13 @@ func (a *App) renderAgentTopologyTree(c *ui.Context, pal theme.Palette, conv mod
 			wrap.Children(func() {
 				// Root Agent node.
 				root := conv.Root
-				isRootSelected := a.scope == root.ID || (len(subs) == 0 && a.scope == scopeAll)
+				isRootSelected := a.activeView == ViewLive && (a.scope == root.ID || (len(subs) == 0 && a.scope == scopeAll))
 				isRootHot := conv.Running && conv.ActiveAgentID == root.ID
 				a.renderAgentRow(c, pal, root, true, isRootSelected, isRootHot)
 
 				// Indented Subagent nodes.
 				for _, sub := range subs {
-					isSel := a.scope == sub.ID
+					isSel := a.activeView == ViewLive && a.scope == sub.ID
 					isHot := conv.Running && conv.ActiveAgentID == sub.ID
 					a.renderAgentRow(c, pal, sub, false, isSel, isHot)
 				}
@@ -467,15 +474,17 @@ func (a *App) renderAgentRow(c *ui.Context, pal theme.Palette, ag model.AgentNod
 	}
 }
 
-func (a *App) renderSidebarFooter(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot) {
+func (a *App) renderSidebarFooter(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot, now time.Time) {
 	tr := a.tr()
+	hasLowQuota := a.quotaSvc != nil && a.quotaSvc.State(now).HasLowQuota
+
 	ui.Row(c.Key("sidebar-footer")).
-		Padding(10, 4, 0, 4).
+		Padding(10, 2, 0, 4).
 		BorderWidth(1, 0, 0, 0).
 		BorderColor(pal.Divider).
 		Justify(ui.SpaceBetween).
 		AlignItems(ui.Center).
-		Gap(8).
+		Gap(6).
 		Children(func() {
 			ui.Text(c, conv.Workspace).
 				Grow(1).
@@ -484,121 +493,182 @@ func (a *App) renderSidebarFooter(c *ui.Context, pal theme.Palette, conv model.C
 				TextColor(pal.Ink3).
 				SingleLine()
 
-			gear := ui.ButtonBase(c.Key("settings-btn")).
-				Size(26, 26).
-				Radius(8).
-				Center().
-				Cursor(ui.CursorPointer).
-				Label(tr.Settings).
-				Tooltip(tr.Settings)
+			// Right: 3 monochrome SF-style icon buttons [Quota] [History] [Settings].
+			ui.Row(c.Key("sidebar-footer-actions")).Gap(3).AlignItems(ui.Center).Shrink(0).Children(func() {
+				// 1. Account Quota button (Gauge icon + quiet amber dot when < 25%).
+				quotaActive := a.activeView == ViewQuota
+				quotaBtn := ui.ButtonBase(c.Key("quota-nav-btn")).
+					Size(26, 26).
+					Radius(8).
+					Center().
+					Cursor(ui.CursorPointer).
+					Label(tr.QuotaTitle).
+					Tooltip(tr.QuotaTitle)
 
-			if gear.Hovered() || a.settingsPopoverOpen {
-				gear.Background(pal.CardHover)
-			}
-			gear.Children(func() {
-				ui.Icon(c, theme.IconSettings).Size(14, 14).TextColor(pal.Ink2)
-			})
-			if gear.Clicked() {
-				a.settingsPopoverOpen = !a.settingsPopoverOpen
-				a.sessionPopoverOpen = false
-			}
-
-			// Ultra-minimal Apple Liquid Glass Settings Popover (no redundant TPS mode toggle).
-			ui.PopoverBase(c.Key("settings-popover"), gear, &a.settingsPopoverOpen, func(panel ui.Element) {
-				theme.GlassPopover(panel, pal, 252).Margin(0, 0, 8, 0).Padding(14).Gap(11)
-
-				ui.Row(c).Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, tr.Settings).FontSize(12.5).FontWeight(600).TextColor(pal.Ink1)
-					doneBtn := ui.ButtonBase(c.Key("settings-done")).Cursor(ui.CursorPointer).Label(tr.Done)
-					doneBtn.Children(func() {
-						ui.Text(c, tr.Done).FontSize(12).FontWeight(500).TextColor(pal.Accent)
+				quotaIconCol := pal.Ink2
+				if quotaActive {
+					quotaBtn.Background(pal.AccentSoft).Border(1, pal.Accent.Alpha(0.24))
+					quotaIconCol = pal.Accent
+				} else if quotaBtn.Hovered() {
+					quotaBtn.Background(pal.CardHover)
+					quotaIconCol = pal.Ink1
+				}
+				if hasLowQuota {
+					amber := pal.Amber
+					quotaBtn.DrawOver(func(p *ui.Painter, r ui.Rect) {
+						p.FillPath((&ui.Path{}).Circle(r.X+r.W-5, r.Y+5, 2.5), amber)
 					})
-					if doneBtn.Clicked() {
-						a.settingsPopoverOpen = false
-					}
+				}
+				quotaBtn.Children(func() {
+					ui.Icon(c, theme.IconGauge).Size(14, 14).TextColor(quotaIconCol)
 				})
-
-				// Theme mode segmented selector (System / Light / Dark).
-				modeIdx := 0
-				switch a.settings.ThemeMode {
-				case theme.ModeLight:
-					modeIdx = 1
-				case theme.ModeDark:
-					modeIdx = 2
-				}
-				if theme.SegmentedPill(c, pal, "settings-theme-seg", &modeIdx, []string{tr.ThemeSystem, tr.ThemeLight, tr.ThemeDark}, theme.SegmentedOptions{
-					Height:   28,
-					FontSize: 11,
-					PaddingX: 6,
-				}) {
-					modes := []string{theme.ModeSystem, theme.ModeLight, theme.ModeDark}
-					a.SetThemeMode(modes[modeIdx])
+				if quotaBtn.Clicked() {
+					a.ToggleSubView(ViewQuota)
 				}
 
-				// Language selector row (中文 / English).
-				ui.Row(c.Key("set-lang-row")).Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-					ui.Text(c, tr.LanguageLabel).FontSize(12).TextColor(pal.Ink2).NoWrap()
-					langIdx := 0
-					if i18n.Normalize(a.settings.Language) == i18n.LangEN {
-						langIdx = 1
-					}
-					if theme.SegmentedPill(c, pal, "settings-lang-seg", &langIdx, []string{"中文", "EN"}, theme.SegmentedOptions{
-						Width:    112,
-						Height:   26,
-						FontSize: 11,
-						PaddingX: 8,
-					}) {
-						if langIdx == 1 {
-							a.SetLanguage(i18n.LangEN)
-						} else {
-							a.SetLanguage(i18n.LangZH)
+				// 2. Usage History button (3-Bar Chart icon).
+				histActive := a.activeView == ViewHistory
+				histBtn := ui.ButtonBase(c.Key("history-nav-btn")).
+					Size(26, 26).
+					Radius(8).
+					Center().
+					Cursor(ui.CursorPointer).
+					Label(tr.HistoryTitle).
+					Tooltip(tr.HistoryTitle)
+
+				histIconCol := pal.Ink2
+				if histActive {
+					histBtn.Background(pal.AccentSoft).Border(1, pal.Accent.Alpha(0.24))
+					histIconCol = pal.Accent
+				} else if histBtn.Hovered() {
+					histBtn.Background(pal.CardHover)
+					histIconCol = pal.Ink1
+				}
+				histBtn.Children(func() {
+					ui.Icon(c, theme.IconBarChart).Size(14, 14).TextColor(histIconCol)
+				})
+				if histBtn.Clicked() {
+					a.ToggleSubView(ViewHistory)
+				}
+
+				// 3. Settings gear button.
+				gear := ui.ButtonBase(c.Key("settings-btn")).
+					Size(26, 26).
+					Radius(8).
+					Center().
+					Cursor(ui.CursorPointer).
+					Label(tr.Settings).
+					Tooltip(tr.Settings)
+
+				if gear.Hovered() || a.settingsPopoverOpen {
+					gear.Background(pal.CardHover)
+				}
+				gear.Children(func() {
+					ui.Icon(c, theme.IconSettings).Size(14, 14).TextColor(pal.Ink2)
+				})
+				if gear.Clicked() {
+					a.settingsPopoverOpen = !a.settingsPopoverOpen
+					a.sessionPopoverOpen = false
+					a.quotaCalibOpen = false
+				}
+
+				// Ultra-minimal Apple Liquid Glass Settings Popover (no redundant TPS mode toggle).
+				ui.PopoverBase(c.Key("settings-popover"), gear, &a.settingsPopoverOpen, func(panel ui.Element) {
+					theme.GlassPopover(panel, pal, 252).Margin(0, 0, 8, 0).Padding(14).Gap(11)
+
+					ui.Row(c).Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
+						ui.Text(c, tr.Settings).FontSize(12.5).FontWeight(600).TextColor(pal.Ink1)
+						doneBtn := ui.ButtonBase(c.Key("settings-done")).Cursor(ui.CursorPointer).Label(tr.Done)
+						doneBtn.Children(func() {
+							ui.Text(c, tr.Done).FontSize(12).FontWeight(500).TextColor(pal.Accent)
+						})
+						if doneBtn.Clicked() {
+							a.settingsPopoverOpen = false
 						}
-					}
-				})
-
-				a.renderSettingSwitchRow(c, pal, "set-launch", tr.LaunchAtLogin, &a.settings.LaunchAtLogin, func() {
-					a.emitSettings()
-				})
-				a.renderSettingSwitchRow(c, pal, "set-tray", tr.KeepInTray, &a.settings.KeepInTrayOnClose, func() {
-					a.emitSettings()
-				})
-				a.renderSettingSwitchRow(c, pal, "set-ontop", tr.AlwaysOnTop, &a.settings.AlwaysOnTop, func() {
-					a.toggleAlwaysOnTop()
-				})
-
-				warnEnabled := a.settings.ContextWarnThreshold > 0
-				a.renderSettingSwitchRow(c, pal, "set-warn", tr.ContextWarn80, &warnEnabled, func() {
-					if warnEnabled {
-						a.settings.ContextWarnThreshold = 0.80
-					} else {
-						a.settings.ContextWarnThreshold = 0
-					}
-					a.emitSettings()
-				})
-
-				ui.Box(c).FillWidth().Height(1).Background(pal.Divider)
-
-				// Quiet version + Check for Updates row
-				ui.Row(c.Key("desk-update-row")).Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-					verText := appupdater.VersionLabel()
-					if avail := appupdater.AvailableVersion(); avail != "" {
-						verText = fmt.Sprintf("%s → v%s", verText, avail)
-					}
-					ui.Text(c, verText).FontSize(11).FontFeatures("tnum").TextColor(pal.Ink3).SingleLine()
-
-					checkBtn := ui.ButtonBase(c.Key("desk-check-updates")).
-						Padding(4, 10).Radius(8).Background(pal.SegBg).Cursor(ui.CursorPointer).
-						Label(tr.CheckUpdates)
-					if checkBtn.Hovered() {
-						checkBtn.Background(pal.CardHover)
-					}
-					checkBtn.Children(func() {
-						ui.Text(c, tr.CheckUpdates).FontSize(11).FontWeight(500).TextColor(pal.Accent).SingleLine()
 					})
-					if checkBtn.Clicked() {
-						a.settingsPopoverOpen = false
-						appupdater.CheckNow()
+
+					// Theme mode segmented selector (System / Light / Dark).
+					modeIdx := 0
+					switch a.settings.ThemeMode {
+					case theme.ModeLight:
+						modeIdx = 1
+					case theme.ModeDark:
+						modeIdx = 2
 					}
+					if theme.SegmentedPill(c, pal, "settings-theme-seg", &modeIdx, []string{tr.ThemeSystem, tr.ThemeLight, tr.ThemeDark}, theme.SegmentedOptions{
+						Height:   28,
+						FontSize: 11,
+						PaddingX: 6,
+					}) {
+						modes := []string{theme.ModeSystem, theme.ModeLight, theme.ModeDark}
+						a.SetThemeMode(modes[modeIdx])
+					}
+
+					// Language selector row (中文 / English).
+					ui.Row(c.Key("set-lang-row")).Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
+						ui.Text(c, tr.LanguageLabel).FontSize(12).TextColor(pal.Ink2).NoWrap()
+						langIdx := 0
+						if i18n.Normalize(a.settings.Language) == i18n.LangEN {
+							langIdx = 1
+						}
+						if theme.SegmentedPill(c, pal, "settings-lang-seg", &langIdx, []string{"中文", "EN"}, theme.SegmentedOptions{
+							Width:    112,
+							Height:   26,
+							FontSize: 11,
+							PaddingX: 8,
+						}) {
+							if langIdx == 1 {
+								a.SetLanguage(i18n.LangEN)
+							} else {
+								a.SetLanguage(i18n.LangZH)
+							}
+						}
+					})
+
+					a.renderSettingSwitchRow(c, pal, "set-launch", tr.LaunchAtLogin, &a.settings.LaunchAtLogin, func() {
+						a.emitSettings()
+					})
+					a.renderSettingSwitchRow(c, pal, "set-tray", tr.KeepInTray, &a.settings.KeepInTrayOnClose, func() {
+						a.emitSettings()
+					})
+					a.renderSettingSwitchRow(c, pal, "set-ontop", tr.AlwaysOnTop, &a.settings.AlwaysOnTop, func() {
+						a.toggleAlwaysOnTop()
+					})
+
+					warnEnabled := a.settings.ContextWarnThreshold > 0
+					a.renderSettingSwitchRow(c, pal, "set-warn", tr.ContextWarn80, &warnEnabled, func() {
+						if warnEnabled {
+							a.settings.ContextWarnThreshold = 0.80
+						} else {
+							a.settings.ContextWarnThreshold = 0
+						}
+						a.emitSettings()
+					})
+
+					ui.Box(c).FillWidth().Height(1).Background(pal.Divider)
+
+					// Quiet version + Check for Updates row
+					ui.Row(c.Key("desk-update-row")).Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
+						verText := appupdater.VersionLabel()
+						if avail := appupdater.AvailableVersion(); avail != "" {
+							verText = fmt.Sprintf("%s → v%s", verText, avail)
+						}
+						ui.Text(c, verText).FontSize(11).FontFeatures("tnum").TextColor(pal.Ink3).SingleLine()
+
+						checkBtn := ui.ButtonBase(c.Key("desk-check-updates")).
+							Padding(4, 10).Radius(8).Background(pal.SegBg).Cursor(ui.CursorPointer).
+							Label(tr.CheckUpdates)
+						if checkBtn.Hovered() {
+							checkBtn.Background(pal.CardHover)
+						}
+						checkBtn.Children(func() {
+							ui.Text(c, tr.CheckUpdates).FontSize(11).FontWeight(500).TextColor(pal.Accent).SingleLine()
+						})
+						if checkBtn.Clicked() {
+							a.settingsPopoverOpen = false
+							appupdater.CheckNow()
+						}
+					})
 				})
 			})
 		})

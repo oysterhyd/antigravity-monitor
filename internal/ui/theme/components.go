@@ -215,33 +215,7 @@ func SegmentedPill(c *ui.Context, pal Palette, key string, selected *int, labels
 		seg.Width(opts.Width)
 	}
 
-	animIdx := seg.AnimateTo("thumb", float32(cur), ui.Animation{
-		Spring: ui.SpringOptions{Stiffness: 290, Damping: 25},
-	})
-	n := float32(len(labels))
-	pillColor := pal.SegPill
-	rimTop := pal.RimTop
-	pillShadow := pal.ShadowPill
-
-	seg.Draw(func(p *ui.Painter, r ui.Rect) {
-		innerW := r.W - 6
-		innerH := r.H - 6
-		if innerW <= 0 || innerH <= 0 || n <= 0 {
-			return
-		}
-		segW := innerW / n
-		thumbRect := ui.Rect{
-			X: r.X + 3 + animIdx*segW,
-			Y: r.Y + 3,
-			W: segW,
-			H: innerH,
-		}
-		rad := innerH / 2
-		p.Shadow(thumbRect, rad, 0, 2, 8, 0, pillShadow)
-		p.Fill(thumbRect, pillColor, rad)
-		p.Stroke(thumbRect, rimTop.Alpha(0.55), rad, 0.75)
-	})
-
+	items := make([]ui.Element, len(labels))
 	changed := false
 	seg.Children(func() {
 		for i, lbl := range labels {
@@ -269,9 +243,72 @@ func SegmentedPill(c *ui.Context, pal Palette, key string, selected *int, labels
 			})
 			if item.Clicked() && i != cur {
 				*selected = i
+				cur = i
 				changed = true
 			}
+			items[i] = item
 		}
+	})
+
+	// Track the exact bounds of the active item so uneven label widths
+	// (e.g. "全部" vs "Claude & GPT", "Today" vs "7D") align cleanly.
+	segB := seg.Bounds()
+	activeB := items[cur].Bounds()
+	hasPrevBounds := segB.W > 0 && activeB.W > 0
+	targetX := float32(3)
+	targetW := float32(0)
+	if hasPrevBounds {
+		targetX = activeB.X - segB.X
+		targetW = activeB.W
+	}
+	animX := seg.AnimateTo("thumb-x", targetX, ui.Animation{
+		Spring: ui.SpringOptions{Stiffness: 290, Damping: 26},
+	})
+	animW := seg.AnimateTo("thumb-w", targetW, ui.Animation{
+		Spring: ui.SpringOptions{Stiffness: 290, Damping: 26},
+	})
+
+	n := float32(len(labels))
+	pillColor := pal.SegPill
+	rimTop := pal.RimTop
+	pillShadow := pal.ShadowPill
+	activeIdx := cur
+
+	seg.Draw(func(p *ui.Painter, r ui.Rect) {
+		innerW := r.W - 6
+		innerH := r.H - 6
+		if innerW <= 0 || innerH <= 0 || n <= 0 {
+			return
+		}
+		tx := r.X + animX
+		tw := animW
+		if !hasPrevBounds || tw <= 1 {
+			if ib := items[activeIdx].Bounds(); ib.W > 1 {
+				tx = ib.X
+				tw = ib.W
+			} else {
+				segW := innerW / n
+				tx = r.X + 3 + float32(activeIdx)*segW
+				tw = segW
+			}
+		}
+		// Clamp inside pill track padding.
+		if tx < r.X+3 {
+			tx = r.X + 3
+		}
+		if tx+tw > r.X+r.W-3 {
+			tw = max(float32(0), r.X+r.W-3-tx)
+		}
+		thumbRect := ui.Rect{
+			X: tx,
+			Y: r.Y + 3,
+			W: tw,
+			H: innerH,
+		}
+		rad := innerH / 2
+		p.Shadow(thumbRect, rad, 0, 2, 8, 0, pillShadow)
+		p.Fill(thumbRect, pillColor, rad)
+		p.Stroke(thumbRect, rimTop.Alpha(0.55), rad, 0.75)
 	})
 	return changed
 }
