@@ -28,7 +28,7 @@ func main() {
 	appupdater.Register(githubRepo)
 	useMock := flag.Bool("mock", false, "use simulated SnapshotProvider instead of reading local Antigravity records")
 	mockInterval := flag.Duration("mock-interval", 2800*time.Millisecond, "mock stream interval when -mock is enabled")
-	dataDir := flag.String("data-dir", "", "optional override path for ~/.gemini/antigravity")
+	dataDir := flag.String("data-dir", "", "optional single data root override (defaults to auto-discovering ~/.gemini/antigravity and T3 Code ACP roots)")
 	cfgPath := flag.String("config", "", "optional override path for settings.json")
 	startHidden := flag.Bool("tray-only", false, "start resident in system tray without opening the desktop window")
 	flag.Parse()

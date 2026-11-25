@@ -42,6 +42,30 @@ func (s SummaryRow) IsRunning() bool {
 	return s.NotFullyIdle || strings.EqualFold(s.Status, "CASCADE_RUN_STATUS_RUNNING")
 }
 
+// IsInternalHelperSession reports whether this conversation belongs to a transient
+// internal helper workspace (such as T3 Code's t3-antigravity-text-* scratch dirs
+// used for title/summary generation) that should be hidden from Live monitoring.
+func (s SummaryRow) IsInternalHelperSession() bool {
+	if isT3HelperWorkspace(s.Workspace) {
+		return true
+	}
+	for _, uri := range s.WorkspaceURIs {
+		if isT3HelperWorkspace(cleanWorkspaceURI(uri)) {
+			return true
+		}
+	}
+	return false
+}
+
+func isT3HelperWorkspace(ws string) bool {
+	ws = strings.TrimSpace(ws)
+	if ws == "" {
+		return false
+	}
+	base := strings.ToLower(filepath.Base(filepath.Clean(ws)))
+	return strings.HasPrefix(base, "t3-antigravity-text-")
+}
+
 // DisplayTitle returns the best non-empty title for UI presentation.
 func (s SummaryRow) DisplayTitle() string {
 	if t := strings.TrimSpace(s.Title); t != "" {
@@ -235,6 +259,12 @@ func (r *SummariesReader) readAllLocked(ctx context.Context, db *sql.DB) ([]Summ
 func (r *SummariesReader) mergeConversationParentsLocked(ctx context.Context, db *sql.DB, rows *[]SummaryRow, indexByID map[string]int) bool {
 	pRows, err := db.QueryContext(ctx, `SELECT conversation_id, parent_id FROM conversation_parents`)
 	if err != nil {
+		// Newer/ACP schemas omit the legacy conversation_parents table and store
+		// parent_conversation_id directly on conversation_summaries. Treat a missing
+		// table as a clean read so PRAGMA data_version caching remains active.
+		if strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			return true
+		}
 		return false
 	}
 	defer pRows.Close()

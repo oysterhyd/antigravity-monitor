@@ -17,12 +17,14 @@ import (
 )
 
 // Service implements Aggregator over local Antigravity SQLite databases with
-// WAL-safe incremental (conv_id, mtime, size) caching.
+// WAL-safe incremental (conv_id, mtime, size) caching across one or more data roots.
 type Service struct {
-	dataRoot    string
-	cachePath   string
-	calc        *metrics.Calculator
-	pricingHash string
+	roots        []string
+	autoDiscover bool
+	discoverFunc func() []string
+	cachePath    string
+	calc         *metrics.Calculator
+	pricingHash  string
 
 	loadOnce sync.Once
 	syncMu   sync.Mutex
@@ -39,13 +41,35 @@ type Service struct {
 var _ Aggregator = (*Service)(nil)
 
 // NewAggregator constructs a local read-only usage history aggregation Service.
-//   - dataRoot == "" defaults to source.DefaultRootDir().
+//   - dataRoot == "" enables automatic discovery across native ~/.gemini/antigravity,
+//     CLI, and T3 Code ACP provider directories.
+//   - dataRoot != "" restricts aggregation strictly to that single root directory.
 //   - cachePath == "" runs strictly in-memory without reading or writing disk cache.
 //   - calc == nil defaults to metrics.NewDefaultCalculator().
 func NewAggregator(dataRoot, cachePath string, calc *metrics.Calculator) *Service {
-	if strings.TrimSpace(dataRoot) == "" {
-		dataRoot = source.DefaultRootDir()
+	dataRoot = strings.TrimSpace(dataRoot)
+	if dataRoot == "" {
+		return newService(nil, true, source.DiscoverRootDirs, cachePath, calc)
 	}
+	return newService([]string{filepath.Clean(dataRoot)}, false, nil, cachePath, calc)
+}
+
+// NewMultiRootAggregator constructs a usage history aggregation Service over an explicit
+// list of Antigravity data root directories (disabling automatic discovery).
+func NewMultiRootAggregator(roots []string, cachePath string, calc *metrics.Calculator) *Service {
+	clean := make([]string, 0, len(roots))
+	for _, r := range roots {
+		if r = strings.TrimSpace(r); r != "" {
+			clean = append(clean, filepath.Clean(r))
+		}
+	}
+	if len(clean) == 0 {
+		return NewAggregator("", cachePath, calc)
+	}
+	return newService(clean, false, nil, cachePath, calc)
+}
+
+func newService(roots []string, autoDiscover bool, discoverFn func() []string, cachePath string, calc *metrics.Calculator) *Service {
 	cachePath = strings.TrimSpace(cachePath)
 	if calc == nil {
 		var err error
@@ -58,13 +82,25 @@ func NewAggregator(dataRoot, cachePath string, calc *metrics.Calculator) *Servic
 	pricingHash := computePricingHash(calc)
 
 	return &Service{
-		dataRoot:    dataRoot,
-		cachePath:   cachePath,
-		calc:        calc,
-		pricingHash: pricingHash,
-		summaries:   make(map[string]source.SummaryRow),
-		parents:     make(map[string]string),
+		roots:        roots,
+		autoDiscover: autoDiscover,
+		discoverFunc: discoverFn,
+		cachePath:    cachePath,
+		calc:         calc,
+		pricingHash:  pricingHash,
+		summaries:    make(map[string]source.SummaryRow),
+		parents:      make(map[string]string),
 	}
+}
+
+func (s *Service) resolveRoots() []string {
+	if s.autoDiscover && s.discoverFunc != nil {
+		if discovered := s.discoverFunc(); len(discovered) > 0 {
+			return discovered
+		}
+		return []string{source.DefaultRootDir()}
+	}
+	return s.roots
 }
 
 func (s *Service) ensureCacheLoaded() {
@@ -101,59 +137,93 @@ func (s *Service) Refresh(ctx context.Context) error {
 	dirty := s.cacheDirty
 	s.mu.RUnlock()
 
-	nextSummaries, nextParents, sumErr := s.readSummaries(ctx)
+	roots := s.resolveRoots()
+
+	nextSummaries, nextParents, sumErr := s.readSummaries(ctx, roots)
 	if sumErr != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		// Keep previous summaries if L1 DB had a transient error.
+		// Keep previous summaries if all L1 DBs had transient errors.
 		if len(prevSummaries) > 0 {
 			nextSummaries = prevSummaries
 			nextParents = prevParents
 		}
 	}
 
-	convDir := filepath.Join(s.dataRoot, "conversations")
-	dirEntries, err := os.ReadDir(convDir)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	type convCandidate struct {
+		root   string
+		dbPath string
+		stat   convFileStat
 	}
+	candidates := make(map[string]convCandidate)
+	var firstDirErr error
+	readAnyDir := false
 
-	var dbNames []string
-	for _, de := range dirEntries {
-		if de.IsDir() {
+	for _, root := range roots {
+		convDir := filepath.Join(root, "conversations")
+		dirEntries, err := os.ReadDir(convDir)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) && firstDirErr == nil {
+				firstDirErr = err
+			}
 			continue
 		}
-		name := de.Name()
-		if !strings.EqualFold(filepath.Ext(name), ".db") {
-			continue
-		}
-		dbNames = append(dbNames, name)
-	}
-	sort.Strings(dbNames)
+		readAnyDir = true
 
-	nextConvs := make(map[string]*cachedConv, len(dbNames))
-	seenIDs := make(map[string]bool, len(dbNames))
+		for _, de := range dirEntries {
+			if de.IsDir() {
+				continue
+			}
+			name := de.Name()
+			if !strings.EqualFold(filepath.Ext(name), ".db") {
+				continue
+			}
+			ext := filepath.Ext(name)
+			convID := strings.TrimSuffix(name, ext)
+			if convID == "" {
+				continue
+			}
+			dbPath := filepath.Join(convDir, name)
+			st, err := statConvDB(dbPath)
+			if err != nil {
+				continue
+			}
+			if existing, ok := candidates[convID]; ok {
+				if existing.stat.effectiveMtimeNs > st.effectiveMtimeNs ||
+					(existing.stat.effectiveMtimeNs == st.effectiveMtimeNs && existing.stat.effectiveSize >= st.effectiveSize) {
+					continue
+				}
+			}
+			candidates[convID] = convCandidate{
+				root:   root,
+				dbPath: dbPath,
+				stat:   st,
+			}
+		}
+	}
+	if !readAnyDir && firstDirErr != nil {
+		return firstDirErr
+	}
+
+	convIDs := make([]string, 0, len(candidates))
+	for id := range candidates {
+		convIDs = append(convIDs, id)
+	}
+	sort.Strings(convIDs)
+
+	nextConvs := make(map[string]*cachedConv, len(convIDs))
+	seenIDs := make(map[string]bool, len(convIDs))
 	var stats RefreshStats
 
-	for _, name := range dbNames {
+	for _, convID := range convIDs {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		ext := filepath.Ext(name)
-		convID := strings.TrimSuffix(name, ext)
-		if convID == "" {
-			continue
-		}
+		cand := candidates[convID]
 		seenIDs[convID] = true
 
-		dbPath := filepath.Join(convDir, name)
-		st, err := statConvDB(dbPath)
-		if err != nil {
-			continue
-		}
-
-		if prev, ok := prevConvs[convID]; ok && prev.matches(st) {
+		if prev, ok := prevConvs[convID]; ok && prev.matches(cand.stat) {
 			stats.Hits++
 			nextConvs[convID] = prev
 			continue
@@ -161,7 +231,7 @@ func (s *Service) Refresh(ctx context.Context) error {
 
 		stats.Misses++
 		dirty = true
-		entry, err := s.scanConvDB(ctx, convID, dbPath, st, nextSummaries[convID])
+		entry, err := s.scanConvDB(ctx, cand.root, convID, cand.dbPath, cand.stat, nextSummaries[convID])
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -203,27 +273,68 @@ func (s *Service) Refresh(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) readSummaries(ctx context.Context) (map[string]source.SummaryRow, map[string]string, error) {
-	sumPath := filepath.Join(s.dataRoot, "conversation_summaries.db")
-	reader := source.NewSummariesReader(sumPath)
-	defer reader.Close()
+func (s *Service) readSummaries(ctx context.Context, roots []string) (map[string]source.SummaryRow, map[string]string, error) {
+	summaries := make(map[string]source.SummaryRow)
+	parents := make(map[string]string)
+	var firstErr error
+	succeeded := 0
 
-	rows, err := reader.ReadAll(ctx)
-	if err != nil {
-		return make(map[string]source.SummaryRow), make(map[string]string), err
-	}
-	summaries := make(map[string]source.SummaryRow, len(rows))
-	parents := make(map[string]string, len(rows))
-	for _, row := range rows {
-		summaries[row.ConversationID] = row
-		if row.ParentConversationID != "" && row.ParentConversationID != row.ConversationID {
-			parents[row.ConversationID] = row.ParentConversationID
+	for _, root := range roots {
+		sumPath := filepath.Join(root, "conversation_summaries.db")
+		reader := source.NewSummariesReader(sumPath)
+		rows, err := reader.ReadAll(ctx)
+		_ = reader.Close()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
+		succeeded++
+		for _, row := range rows {
+			if existing, ok := summaries[row.ConversationID]; ok {
+				summaries[row.ConversationID] = mergeHistorySummary(existing, row)
+			} else {
+				summaries[row.ConversationID] = row
+			}
+			if row.ParentConversationID != "" && row.ParentConversationID != row.ConversationID {
+				if _, exists := parents[row.ConversationID]; !exists {
+					parents[row.ConversationID] = row.ParentConversationID
+				}
+			}
+		}
+	}
+	if succeeded == 0 && firstErr != nil {
+		return summaries, parents, firstErr
 	}
 	return summaries, parents, nil
 }
 
-func (s *Service) scanConvDB(ctx context.Context, convID, dbPath string, st convFileStat, sum source.SummaryRow) (*cachedConv, error) {
+func mergeHistorySummary(a, b source.SummaryRow) source.SummaryRow {
+	primary, secondary := a, b
+	if b.LastModifiedTime.After(a.LastModifiedTime) {
+		primary, secondary = b, a
+	}
+	if strings.TrimSpace(primary.Title) == "" {
+		primary.Title = secondary.Title
+	}
+	if strings.TrimSpace(primary.Preview) == "" {
+		primary.Preview = secondary.Preview
+	}
+	if strings.TrimSpace(primary.AgentName) == "" {
+		primary.AgentName = secondary.AgentName
+	}
+	if primary.Workspace == "" {
+		primary.Workspace = secondary.Workspace
+		primary.WorkspaceURIs = secondary.WorkspaceURIs
+	}
+	if primary.ParentConversationID == "" {
+		primary.ParentConversationID = secondary.ParentConversationID
+	}
+	return primary
+}
+
+func (s *Service) scanConvDB(ctx context.Context, rootDir, convID, dbPath string, st convFileStat, sum source.SummaryRow) (*cachedConv, error) {
 	db, err := source.OpenReadOnlySQLite(dbPath)
 	if err != nil {
 		return nil, err
@@ -307,7 +418,7 @@ func (s *Service) scanConvDB(ctx context.Context, convID, dbPath string, st conv
 
 	var tr source.TranscriptData
 	if needsTranscript {
-		tailer := source.NewTranscriptTailer(source.TranscriptPath(s.dataRoot, convID))
+		tailer := source.NewTranscriptTailer(source.TranscriptPath(rootDir, convID))
 		_, _ = tailer.Sync()
 		tr = tailer.Snapshot()
 	}

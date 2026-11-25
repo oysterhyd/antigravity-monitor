@@ -88,6 +88,17 @@ func (p *ConvDBPool) Sync(ctx context.Context, convID string) (changed bool, rec
 	return changed, cloneGenMetadata(state.records), cloneStepTimes(state.stepTimes), err
 }
 
+func (p *ConvDBPool) cachedState(convID string) ([]GenMetadata, map[int]time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	state := p.states[convID]
+	if state == nil {
+		return nil, nil
+	}
+	return cloneGenMetadata(state.records), cloneStepTimes(state.stepTimes)
+}
+
 func (p *ConvDBPool) syncBatch(ctx context.Context, ids []string) map[string]bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()

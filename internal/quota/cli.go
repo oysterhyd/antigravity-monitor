@@ -103,9 +103,30 @@ func forgetCLI(binary string) {
 func runCLI(ctx context.Context, binary string, args ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, binary, args...)
 	command.Dir = os.TempDir()
+	command.Stdin = nil
+	command.Env = cleanCLIEnv(os.Environ())
 	command.WaitDelay = time.Second
 	command.SysProcAttr = cliProcessAttributes()
 	return command.Output()
+}
+
+// cleanCLIEnv strips ACP-scoped isolation variables (e.g. when Monitor is launched
+// from inside a T3 Code terminal) so `agy /usage` uses the standard CLI profile
+// instead of failing auth against an isolated ACP directory.
+func cleanCLIEnv(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToUpper(key) {
+		case "GEMINI_HOME", "ANTIGRAVITY_APP_DATA_DIR", "AGY_ACP_FORCE_FILE_STORAGE":
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 func supportsUsage(version string) bool {

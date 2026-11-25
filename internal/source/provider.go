@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,13 +23,20 @@ const (
 
 // Options configures the local read-only Antigravity data engine.
 type Options struct {
-	// RootDir is the Antigravity data root (defaults to ~/.gemini/antigravity).
+	// RootDir is a single explicit Antigravity data root override. When both RootDir
+	// and RootDirs are empty, Provider auto-discovers all local Antigravity roots
+	// (native ~/.gemini/antigravity, CLI, and T3 Code ACP provider directories).
 	RootDir string
+	// RootDirs optionally specifies an explicit list of Antigravity data roots to merge.
+	// Takes precedence over RootDir and disables automatic root discovery.
+	RootDirs []string
+	// DiscoverRoots optionally overrides DiscoverRootDirs when auto-discovery is active (used in tests).
+	DiscoverRoots func() []string
 	// PricingOverridePath is an optional path to a user pricing override JSON file.
 	PricingOverridePath string
 	// Calculator optionally overrides the default pricing calculator.
 	Calculator *metrics.Calculator
-	// MaxOpenDBs limits concurrent open read-only per-conversation SQLite handles (default 5).
+	// MaxOpenDBs limits concurrent open read-only per-conversation SQLite handles per root (default 5).
 	MaxOpenDBs int
 	// MaxConversations caps how many top-level conversations appear in AppSnapshot (default 20).
 	MaxConversations int
@@ -51,20 +59,32 @@ func DefaultRootDir() string {
 	return filepath.Join(home, ".gemini", "antigravity")
 }
 
-// Provider implements model.SnapshotProvider over Antigravity's local 3-layer data store
-// (L1 conversation_summaries.db + L2 conversations/<id>.db + L3 transcript.jsonl).
-// All methods are safe for concurrent use by multiple goroutines.
-type Provider struct {
-	opts Options
-	calc *metrics.Calculator
-
+type rootSource struct {
+	key       string
+	rootDir   string
 	summaries *SummariesReader
 	convPool  *ConvDBPool
+	watcher   *dirWatcher
+	rows      []SummaryRow
+}
+
+// Provider implements model.SnapshotProvider over Antigravity's local 3-layer data store
+// (L1 conversation_summaries.db + L2 conversations/<id>.db + L3 transcript.jsonl),
+// transparently merging conversations across one or more local data roots.
+// All methods are safe for concurrent use by multiple goroutines.
+type Provider struct {
+	opts         Options
+	calc         *metrics.Calculator
+	autoDiscover bool
+	discoverFunc func() []string
 
 	// Sync serialization prevents overlapping DB refreshes while keeping Snapshot() non-blocking.
-	syncMu  sync.Mutex
-	trees   []cachedTree
-	tailers map[string]*TranscriptTailer
+	syncMu     sync.Mutex
+	roots      []*rootSource
+	rootsByKey map[string]*rootSource
+	convRoot   map[string]*rootSource
+	trees      []cachedTree
+	tailers    map[string]*TranscriptTailer
 
 	snapMu   sync.RWMutex
 	snapshot model.AppSnapshot
@@ -74,7 +94,6 @@ type Provider struct {
 	nextSub int
 	closed  bool
 
-	watcher   *dirWatcher
 	triggerCh chan watchEvent
 	stopCh    chan struct{}
 	doneCh    chan struct{}
@@ -93,9 +112,6 @@ var _ model.SnapshotProvider = (*Provider)(nil)
 // NewProvider initializes the read-only local data engine, performs an initial synchronous
 // snapshot build, and starts the fsnotify watcher unless Options.DisableWatcher is set.
 func NewProvider(opts Options) (*Provider, error) {
-	if opts.RootDir == "" {
-		opts.RootDir = DefaultRootDir()
-	}
 	if opts.MaxOpenDBs <= 0 {
 		opts.MaxOpenDBs = defaultMaxOpenDBs
 	}
@@ -121,23 +137,42 @@ func NewProvider(opts Options) (*Provider, error) {
 		}
 	}
 
-	p := &Provider{
-		opts:      opts,
-		calc:      calc,
-		summaries: NewSummariesReader(filepath.Join(opts.RootDir, "conversation_summaries.db")),
-		convPool:  NewConvDBPool(filepath.Join(opts.RootDir, "conversations"), opts.MaxOpenDBs),
-		tailers:   make(map[string]*TranscriptTailer),
-		subs:      make(map[int]chan model.AppSnapshot),
-		triggerCh: make(chan watchEvent, 64),
-		stopCh:    make(chan struct{}),
-		doneCh:    make(chan struct{}),
+	discoverFn := opts.DiscoverRoots
+	if discoverFn == nil {
+		discoverFn = DiscoverRootDirs
 	}
 
-	if !opts.DisableWatcher {
-		w, err := newDirWatcher(opts.RootDir, opts.Debounce, p.enqueueEvent)
-		if err == nil {
-			p.watcher = w
-		}
+	var initialRoots []string
+	autoDiscover := false
+	switch {
+	case len(opts.RootDirs) > 0:
+		initialRoots = dedupeRootDirs(opts.RootDirs)
+	case strings.TrimSpace(opts.RootDir) != "":
+		initialRoots = dedupeRootDirs([]string{opts.RootDir})
+	default:
+		autoDiscover = true
+		initialRoots = dedupeRootDirs(discoverFn())
+	}
+	if len(initialRoots) == 0 {
+		initialRoots = []string{DefaultRootDir()}
+	}
+
+	p := &Provider{
+		opts:         opts,
+		calc:         calc,
+		autoDiscover: autoDiscover,
+		discoverFunc: discoverFn,
+		rootsByKey:   make(map[string]*rootSource, len(initialRoots)),
+		convRoot:     make(map[string]*rootSource),
+		tailers:      make(map[string]*TranscriptTailer),
+		subs:         make(map[int]chan model.AppSnapshot),
+		triggerCh:    make(chan watchEvent, 64),
+		stopCh:       make(chan struct{}),
+		doneCh:       make(chan struct{}),
+	}
+
+	for _, dir := range initialRoots {
+		p.addRootLocked(dir)
 	}
 
 	// Perform initial synchronous refresh so Snapshot() is immediately ready.
@@ -151,6 +186,44 @@ func NewProvider(opts Options) (*Provider, error) {
 	}
 
 	return p, nil
+}
+
+func (p *Provider) addRootLocked(rootDir string) bool {
+	clean := filepath.Clean(strings.TrimSpace(rootDir))
+	if clean == "" {
+		return false
+	}
+	key := normalizeRootKey(clean)
+	if _, exists := p.rootsByKey[key]; exists {
+		return false
+	}
+	rs := &rootSource{
+		key:       key,
+		rootDir:   clean,
+		summaries: NewSummariesReader(filepath.Join(clean, "conversation_summaries.db")),
+		convPool:  NewConvDBPool(filepath.Join(clean, "conversations"), p.opts.MaxOpenDBs),
+	}
+	if !p.opts.DisableWatcher {
+		if w, err := newDirWatcher(clean, p.opts.Debounce, p.enqueueEvent); err == nil {
+			rs.watcher = w
+		}
+	}
+	p.roots = append(p.roots, rs)
+	p.rootsByKey[key] = rs
+	return true
+}
+
+func (p *Provider) syncDiscoveredRootsLocked() bool {
+	if !p.autoDiscover || p.discoverFunc == nil {
+		return false
+	}
+	added := false
+	for _, dir := range dedupeRootDirs(p.discoverFunc()) {
+		if p.addRootLocked(dir) {
+			added = true
+		}
+	}
+	return added
 }
 
 // Snapshot implements model.SnapshotProvider without blocking on I/O.
@@ -200,39 +273,72 @@ func (p *Provider) Close() error {
 	}
 	p.subMu.Unlock()
 
-	if p.watcher != nil {
-		_ = p.watcher.Close()
-	}
 	if p.hasLoop {
 		<-p.doneCh
 	}
 
-	err1 := p.convPool.Close()
-	err2 := p.summaries.Close()
-	if err1 != nil {
-		return err1
+	p.syncMu.Lock()
+	defer p.syncMu.Unlock()
+
+	var firstErr error
+	for _, rs := range p.roots {
+		if rs.watcher != nil {
+			_ = rs.watcher.Close()
+		}
+		if err := rs.convPool.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if err := rs.summaries.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return err2
+	return firstErr
 }
 
-// OpenConvDBHandles returns the number of currently open L2 SQLite handles (for diagnostics/tests).
+// OpenConvDBHandles returns the number of currently open L2 SQLite handles across all roots (for diagnostics/tests).
 func (p *Provider) OpenConvDBHandles() int {
-	return p.convPool.OpenHandleCount()
+	p.syncMu.Lock()
+	defer p.syncMu.Unlock()
+	total := 0
+	for _, rs := range p.roots {
+		total += rs.convPool.OpenHandleCount()
+	}
+	return total
 }
 
-// Refresh forces an immediate L1 + L2 + L3 incremental sync and broadcasts the updated snapshot.
+// Refresh forces an immediate L1 + L2 + L3 incremental sync across all roots and broadcasts the updated snapshot.
 func (p *Provider) Refresh(ctx context.Context) error {
 	p.syncMu.Lock()
 	defer p.syncMu.Unlock()
 
-	rows, changed, err := p.summaries.readChanges(ctx)
-	if err != nil {
-		// Keep previous cached rows if L1 DB had a transient error.
-		if len(p.trees) == 0 {
-			return err
+	anyChanged := p.syncDiscoveredRootsLocked()
+	var firstErr error
+	succeeded := 0
+
+	for _, rs := range p.roots {
+		rows, changed, err := rs.summaries.readChanges(ctx)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
-	} else if changed && (len(rows) > 0 || len(p.trees) > 0) {
-		p.updateTrees(rows)
+		succeeded++
+		if changed {
+			rs.rows = rows
+			anyChanged = true
+		}
+	}
+
+	if succeeded == 0 && firstErr != nil && len(p.trees) == 0 {
+		return firstErr
+	}
+
+	if anyChanged {
+		merged := p.mergeSummaryRowsLocked()
+		if len(merged) > 0 || len(p.trees) > 0 {
+			p.updateTrees(merged)
+		}
 	}
 
 	snap := p.buildSnapshotLocked(ctx)
@@ -333,10 +439,171 @@ func (p *Provider) updateTrees(rows []SummaryRow) {
 	}
 }
 
+func (p *Provider) mergeSummaryRowsLocked() []SummaryRow {
+	type candidate struct {
+		row  SummaryRow
+		root *rootSource
+	}
+
+	helperIDs := make(map[string]bool)
+	byID := make(map[string]candidate)
+	order := make([]string, 0)
+
+	for _, rs := range p.roots {
+		for _, row := range rs.rows {
+			if row.ConversationID == "" {
+				continue
+			}
+			if row.IsInternalHelperSession() {
+				helperIDs[row.ConversationID] = true
+				continue
+			}
+			existing, ok := byID[row.ConversationID]
+			if !ok {
+				byID[row.ConversationID] = candidate{row: row, root: rs}
+				order = append(order, row.ConversationID)
+				continue
+			}
+			if preferSummaryCandidate(row, rs.rootDir, existing.row, existing.root.rootDir) {
+				byID[row.ConversationID] = candidate{
+					row:  mergeSummaryMetadata(row, existing.row),
+					root: rs,
+				}
+			} else {
+				byID[row.ConversationID] = candidate{
+					row:  mergeSummaryMetadata(existing.row, row),
+					root: existing.root,
+				}
+			}
+		}
+	}
+
+	nextConvRoot := make(map[string]*rootSource, len(byID))
+	merged := make([]SummaryRow, 0, len(byID))
+	for _, id := range order {
+		if helperIDs[id] {
+			continue
+		}
+		cand := byID[id]
+		if cand.row.ParentConversationID != "" && helperIDs[cand.row.ParentConversationID] {
+			continue
+		}
+		nextConvRoot[id] = cand.root
+		merged = append(merged, cand.row)
+	}
+	p.convRoot = nextConvRoot
+	return merged
+}
+
+func preferSummaryCandidate(cand SummaryRow, candRoot string, cur SummaryRow, curRoot string) bool {
+	candHasLocal, candLocalMtime := localConvFreshness(candRoot, cand.ConversationID)
+	curHasLocal, curLocalMtime := localConvFreshness(curRoot, cur.ConversationID)
+	if candHasLocal != curHasLocal {
+		return candHasLocal
+	}
+	if cand.IsRunning() != cur.IsRunning() {
+		return cand.IsRunning()
+	}
+	if candHasLocal && candLocalMtime != curLocalMtime {
+		return candLocalMtime > curLocalMtime
+	}
+	if !cand.LastModifiedTime.Equal(cur.LastModifiedTime) {
+		return cand.LastModifiedTime.After(cur.LastModifiedTime)
+	}
+	return cand.StepCount > cur.StepCount
+}
+
+func mergeSummaryMetadata(primary, fallback SummaryRow) SummaryRow {
+	if strings.TrimSpace(primary.Title) == "" {
+		primary.Title = fallback.Title
+	}
+	if strings.TrimSpace(primary.Preview) == "" {
+		primary.Preview = fallback.Preview
+	}
+	if primary.Workspace == "" {
+		primary.Workspace = fallback.Workspace
+		primary.WorkspaceURIs = fallback.WorkspaceURIs
+	}
+	if primary.ParentConversationID == "" {
+		primary.ParentConversationID = fallback.ParentConversationID
+	}
+	if primary.AgentName == "" {
+		primary.AgentName = fallback.AgentName
+	}
+	if primary.LastUserInputTime.IsZero() {
+		primary.LastUserInputTime = fallback.LastUserInputTime
+	}
+	if primary.LastUserInputStepIndex < 0 && fallback.LastUserInputStepIndex >= 0 {
+		primary.LastUserInputStepIndex = fallback.LastUserInputStepIndex
+	}
+	return primary
+}
+
+func localConvFreshness(rootDir, convID string) (bool, int64) {
+	dbPath := filepath.Join(rootDir, "conversations", convID+".db")
+	if fi, err := os.Stat(dbPath); err == nil {
+		mtime := fi.ModTime().UnixNano()
+		if walFi, err := os.Stat(dbPath + "-wal"); err == nil && walFi.Size() > 0 {
+			if wm := walFi.ModTime().UnixNano(); wm > mtime {
+				mtime = wm
+			}
+		}
+		return true, mtime
+	}
+	trPath := TranscriptPath(rootDir, convID)
+	if fi, err := os.Stat(trPath); err == nil {
+		return true, fi.ModTime().UnixNano()
+	}
+	return false, 0
+}
+
+func (p *Provider) rootForConvLocked(convID string) *rootSource {
+	if rs := p.convRoot[convID]; rs != nil {
+		return rs
+	}
+	if len(p.roots) > 0 {
+		return p.roots[0]
+	}
+	return nil
+}
+
+func (p *Provider) resolveStorageRootLocked(convID string) *rootSource {
+	primary := p.rootForConvLocked(convID)
+	if primary == nil || len(p.roots) <= 1 {
+		return primary
+	}
+	if hasLocal, _ := localConvFreshness(primary.rootDir, convID); hasLocal {
+		return primary
+	}
+	var best *rootSource
+	var bestMtime int64
+	for _, rs := range p.roots {
+		if rs == primary {
+			continue
+		}
+		if ok, mtime := localConvFreshness(rs.rootDir, convID); ok {
+			if best == nil || mtime > bestMtime {
+				best = rs
+				bestMtime = mtime
+			}
+		}
+	}
+	if best != nil {
+		p.convRoot[convID] = best
+		return best
+	}
+	return primary
+}
+
 func (p *Provider) syncTranscript(convID string) bool {
+	rs := p.rootForConvLocked(convID)
+	if rs == nil {
+		return false
+	}
+	wantPath := TranscriptPath(rs.rootDir, convID)
 	tailer := p.tailers[convID]
-	if tailer == nil {
-		tailer = NewTranscriptTailer(TranscriptPath(p.opts.RootDir, convID))
+	if tailer == nil || tailer.path != wantPath {
+		tailer = NewTranscriptTailer(wantPath)
 		p.tailers[convID] = tailer
 	}
 	transcriptChanged, _ := tailer.Sync()
@@ -358,8 +625,24 @@ func (p *Provider) buildSnapshotLocked(ctx context.Context) model.AppSnapshot {
 	}
 
 	keepIDs := make(map[string]bool, len(p.trees)*2)
-	hydratedIDs := make([]string, 0, len(p.trees)*2)
+	hydratedByRoot := make(map[*rootSource][]string, len(p.roots))
+	keepByRoot := make(map[*rootSource]map[string]bool, len(p.roots))
 	hydratedCount := 0
+
+	addHydrated := func(id string) {
+		keepIDs[id] = true
+		rs := p.resolveStorageRootLocked(id)
+		if rs == nil {
+			return
+		}
+		hydratedByRoot[rs] = append(hydratedByRoot[rs], id)
+		rk := keepByRoot[rs]
+		if rk == nil {
+			rk = make(map[string]bool)
+			keepByRoot[rs] = rk
+		}
+		rk[id] = true
+	}
 
 	for _, cached := range p.trees {
 		tree := cached.tree
@@ -367,14 +650,20 @@ func (p *Provider) buildSnapshotLocked(ctx context.Context) model.AppSnapshot {
 			continue
 		}
 		hydratedCount++
-		keepIDs[tree.Root.ConversationID] = true
-		hydratedIDs = append(hydratedIDs, tree.Root.ConversationID)
+		addHydrated(tree.Root.ConversationID)
 		for _, child := range tree.Children {
-			keepIDs[child.ConversationID] = true
-			hydratedIDs = append(hydratedIDs, child.ConversationID)
+			addHydrated(child.ConversationID)
 		}
 	}
-	dbChanges := p.convPool.syncBatch(ctx, hydratedIDs)
+
+	dbChanges := make(map[string]bool)
+	for rs, ids := range hydratedByRoot {
+		for id, ch := range rs.convPool.syncBatch(ctx, ids) {
+			if ch {
+				dbChanges[id] = true
+			}
+		}
+	}
 
 	for i := range p.trees {
 		cached := &p.trees[i]
@@ -416,11 +705,14 @@ func (p *Provider) buildSnapshotLocked(ctx context.Context) model.AppSnapshot {
 		snap.ActiveConversationID = snap.Conversations[0].ID
 	}
 
-	p.convPool.PruneCache(keepIDs)
-	p.pruneTailers(keepIDs)
-	if p.watcher != nil {
-		p.watcher.WatchTranscriptDirs(keepIDs)
+	for _, rs := range p.roots {
+		rk := keepByRoot[rs]
+		rs.convPool.PruneCache(rk)
+		if rs.watcher != nil {
+			rs.watcher.WatchTranscriptDirs(rk)
+		}
 	}
+	p.pruneTailers(keepIDs)
 
 	return snap
 }
@@ -454,10 +746,15 @@ func (p *Provider) buildConversationSnapshot(tree ConversationTree, hydrate bool
 		}
 	}
 
-	p.convPool.mu.Lock()
-	defer p.convPool.mu.Unlock()
-	rootState := p.convPool.states[rootSum.ConversationID]
-	rootTr := p.tailers[rootSum.ConversationID].data()
+	var rootGens []GenMetadata
+	var rootStepTimes map[int]time.Time
+	if rs := p.rootForConvLocked(rootSum.ConversationID); rs != nil {
+		rootGens, rootStepTimes = rs.convPool.cachedState(rootSum.ConversationID)
+	}
+	var rootTr TranscriptData
+	if tailer := p.tailers[rootSum.ConversationID]; tailer != nil {
+		rootTr = tailer.data()
+	}
 
 	rootLastUserTime := rootTr.LastUserInputTime()
 	if rootLastUserTime.IsZero() {
@@ -475,13 +772,19 @@ func (p *Provider) buildConversationSnapshot(tree ConversationTree, hydrate bool
 	descriptors := make([]SubagentDescriptor, len(tree.Children))
 
 	for i, child := range tree.Children {
-		state := p.convPool.states[child.ConversationID]
-		gens := state.records
-		tr := p.tailers[child.ConversationID].data()
+		var gens []GenMetadata
+		var stepTimes map[int]time.Time
+		if rs := p.rootForConvLocked(child.ConversationID); rs != nil {
+			gens, stepTimes = rs.convPool.cachedState(child.ConversationID)
+		}
+		var tr TranscriptData
+		if tailer := p.tailers[child.ConversationID]; tailer != nil {
+			tr = tailer.data()
+		}
 		childrenData[i] = childHydrated{
 			sum:       child,
 			gens:      gens,
-			stepTimes: state.stepTimes,
+			stepTimes: stepTimes,
 			tr:        tr,
 		}
 		subType := ""
@@ -518,8 +821,8 @@ func (p *Provider) buildConversationSnapshot(tree ConversationTree, hydrate bool
 		rootSum,
 		model.RootAgentID,
 		"主 Agent",
-		rootState.records,
-		rootState.stepTimes,
+		rootGens,
+		rootStepTimes,
 		rootTr,
 		time.Time{},
 		0,

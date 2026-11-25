@@ -89,3 +89,17 @@ func TestCLIValidationExpiresWhenBinaryChanges(t *testing.T) {
 		t.Fatal("replacement reused validation for the old binary")
 	}
 }
+
+func TestCleanCLIEnvStripsACPVars(t *testing.T) {
+	in := []string{
+		"PATH=/usr/bin",
+		"GEMINI_HOME=C:\\t3\\isolated",
+		"antigravity_app_data_dir=C:\\t3\\isolated\\antigravity-acp",
+		"AGY_ACP_FORCE_FILE_STORAGE=1",
+		"USERPROFILE=C:\\Users\\oyster",
+	}
+	got := cleanCLIEnv(in)
+	if len(got) != 2 || got[0] != "PATH=/usr/bin" || got[1] != "USERPROFILE=C:\\Users\\oyster" {
+		t.Fatalf("cleanCLIEnv = %v, want only PATH and USERPROFILE", got)
+	}
+}
