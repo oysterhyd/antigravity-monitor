@@ -1,13 +1,16 @@
 package source
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -139,60 +142,61 @@ func (t *TranscriptTailer) Sync() (changed bool, err error) {
 		return false, err
 	}
 
-	raw, err := io.ReadAll(f)
-	if err != nil {
-		return false, err
-	}
-	if len(raw) == 0 {
-		return changed, nil
-	}
-
-	// Only consume up to the last newline so a half-flushed line is retried on the next sync.
-	lastNL := bytes.LastIndexByte(raw, '\n')
-	if lastNL < 0 {
-		return changed, nil
-	}
-	complete := raw[:lastNL+1]
-	t.offset += int64(len(complete))
-
-	lines := bytes.Split(complete, []byte{'\n'})
-	for _, line := range lines {
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 {
+	reader := bufio.NewReaderSize(f, 32*1024)
+	var partial []byte
+	for {
+		line, err := reader.ReadSlice('\n')
+		switch err {
+		case io.EOF:
+			return changed, nil
+		case bufio.ErrBufferFull:
+			partial = append(partial, line...)
 			continue
+		case nil:
+		default:
+			return changed, err
 		}
-		t.parseLine(line)
-		changed = true
+		t.offset += int64(len(partial) + len(line))
+		if len(partial) > 0 {
+			partial = append(partial, line...)
+			line = partial
+			partial = partial[:0]
+		}
+		if line = bytes.TrimSpace(line); len(line) > 0 {
+			t.parseLine(line)
+			changed = true
+		}
 	}
-	return changed, nil
 }
 
 // Snapshot returns a safe copy of the parsed transcript state.
 func (t *TranscriptTailer) Snapshot() TranscriptData {
-	d := TranscriptData{
-		UserInputSteps: append([]int(nil), t.userInputSteps...),
-		UserInputTimes: append([]time.Time(nil), t.userInputTimes...),
-		Planners:       append([]TranscriptPlanner(nil), t.planners...),
+	return TranscriptData{
+		UserInputSteps: slices.Clone(t.userInputSteps),
+		UserInputTimes: slices.Clone(t.userInputTimes),
+		StepTimestamps: cloneMap(t.stepTimestamps),
+		Planners:       slices.Clone(t.planners),
+		PlannersByStep: cloneMap(t.plannersByStep),
+		SubagentRoles:  cloneMap(t.subagentRoles),
 	}
-	if len(t.stepTimestamps) > 0 {
-		d.StepTimestamps = make(map[int]time.Time, len(t.stepTimestamps))
-		for k, v := range t.stepTimestamps {
-			d.StepTimestamps[k] = v
-		}
+}
+
+func cloneMap[K comparable, V any](src map[K]V) map[K]V {
+	if len(src) == 0 {
+		return nil
 	}
-	if len(t.plannersByStep) > 0 {
-		d.PlannersByStep = make(map[int]TranscriptPlanner, len(t.plannersByStep))
-		for k, v := range t.plannersByStep {
-			d.PlannersByStep[k] = v
-		}
+	return maps.Clone(src)
+}
+
+func (t *TranscriptTailer) data() TranscriptData {
+	return TranscriptData{
+		UserInputSteps: t.userInputSteps,
+		UserInputTimes: t.userInputTimes,
+		StepTimestamps: t.stepTimestamps,
+		Planners:       t.planners,
+		PlannersByStep: t.plannersByStep,
+		SubagentRoles:  t.subagentRoles,
 	}
-	if len(t.subagentRoles) > 0 {
-		d.SubagentRoles = make(map[string]string, len(t.subagentRoles))
-		for k, v := range t.subagentRoles {
-			d.SubagentRoles[k] = v
-		}
-	}
-	return d
 }
 
 type transcriptLine struct {
@@ -257,7 +261,8 @@ func (t *TranscriptTailer) parseLine(line []byte) {
 			CacheReadTokens: entry.CacheReadTokens,
 			OutputTokens:    entry.OutputTokens,
 		}
-		if existingIdx, ok := findPlannerIndex(t.planners, entry.StepIndex); ok {
+		if _, exists := t.plannersByStep[entry.StepIndex]; exists {
+			existingIdx, _ := findPlannerIndex(t.planners, entry.StepIndex)
 			t.planners[existingIdx] = p
 		} else {
 			t.planners = append(t.planners, p)

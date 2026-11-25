@@ -84,7 +84,36 @@ func (p *ConvDBPool) Sync(ctx context.Context, convID string) (changed bool, rec
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	state := p.states[convID]
+	changed, state, err := p.syncLocked(ctx, convID)
+	return changed, cloneGenMetadata(state.records), cloneStepTimes(state.stepTimes), err
+}
+
+func (p *ConvDBPool) syncBatch(ctx context.Context, ids []string) map[string]bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	cached := 0
+	for i, id := range ids {
+		if p.handles[id] != nil {
+			ids[cached], ids[i] = ids[i], ids[cached]
+			cached++
+		}
+	}
+
+	var changed map[string]bool
+	for _, id := range ids {
+		if updated, _, _ := p.syncLocked(ctx, id); updated {
+			if changed == nil {
+				changed = make(map[string]bool)
+			}
+			changed[id] = true
+		}
+	}
+	return changed
+}
+
+func (p *ConvDBPool) syncLocked(ctx context.Context, convID string) (changed bool, state *convCacheState, err error) {
+	state = p.states[convID]
 	if state == nil {
 		state = &convCacheState{
 			lastIdx:   -1,
@@ -96,27 +125,27 @@ func (p *ConvDBPool) Sync(ctx context.Context, convID string) (changed bool, rec
 	db, err := p.acquireLocked(convID)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, cloneGenMetadata(state.records), cloneStepTimes(state.stepTimes), nil
+			return false, state, nil
 		}
-		return false, cloneGenMetadata(state.records), cloneStepTimes(state.stepTimes), err
+		return false, state, err
 	}
 
 	rows, err := db.QueryContext(ctx, `SELECT idx, data FROM gen_metadata WHERE idx > ? ORDER BY idx ASC`, state.lastIdx)
 	if err != nil {
 		// Evict possibly stale handle on error so next sync reopens cleanly.
 		p.evictByIDLocked(convID)
-		return false, cloneGenMetadata(state.records), cloneStepTimes(state.stepTimes), fmt.Errorf("query gen_metadata %s: %w", convID, err)
+		return false, state, fmt.Errorf("query gen_metadata %s: %w", convID, err)
 	}
 
 	var newStepIdxs []int
 	for rows.Next() {
 		var (
 			idx  int
-			blob []byte
+			blob sql.RawBytes
 		)
 		if err := rows.Scan(&idx, &blob); err != nil {
 			_ = rows.Close()
-			return changed, cloneGenMetadata(state.records), cloneStepTimes(state.stepTimes), fmt.Errorf("scan gen_metadata %s: %w", convID, err)
+			return changed, state, fmt.Errorf("scan gen_metadata %s: %w", convID, err)
 		}
 		if idx > state.lastIdx {
 			state.lastIdx = idx
@@ -139,7 +168,7 @@ func (p *ConvDBPool) Sync(ctx context.Context, convID string) (changed bool, rec
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return changed, cloneGenMetadata(state.records), cloneStepTimes(state.stepTimes), fmt.Errorf("iterate gen_metadata %s: %w", convID, err)
+		return changed, state, fmt.Errorf("iterate gen_metadata %s: %w", convID, err)
 	}
 	_ = rows.Close()
 
@@ -147,7 +176,7 @@ func (p *ConvDBPool) Sync(ctx context.Context, convID string) (changed bool, rec
 		p.fetchStepTimestampsLocked(ctx, db, newStepIdxs, state.stepTimes)
 	}
 
-	return changed, cloneGenMetadata(state.records), cloneStepTimes(state.stepTimes), nil
+	return changed, state, nil
 }
 
 // PruneCache drops cached state for conversation IDs not in keepIDs, preventing unbounded memory growth.
@@ -232,7 +261,7 @@ func (p *ConvDBPool) fetchStepTimestampsLocked(ctx context.Context, db *sql.DB, 
 		for rows.Next() {
 			var (
 				sIdx int
-				meta []byte
+				meta sql.RawBytes
 			)
 			if err := rows.Scan(&sIdx, &meta); err != nil {
 				continue

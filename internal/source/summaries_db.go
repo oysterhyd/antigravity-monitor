@@ -13,8 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	_ "modernc.org/sqlite"
 )
 
 // SummaryRow represents a single conversation entry from L1 conversation_summaries.db.
@@ -69,9 +67,11 @@ type ConversationTree struct {
 
 // SummariesReader maintains a single read-only WAL handle to conversation_summaries.db.
 type SummariesReader struct {
-	mu     sync.Mutex
-	dbPath string
-	db     *sql.DB
+	mu           sync.Mutex
+	dbPath       string
+	db           *sql.DB
+	version      int64
+	versionKnown bool
 }
 
 // NewSummariesReader creates a read-only L1 reader for conversation_summaries.db.
@@ -86,6 +86,7 @@ func (r *SummariesReader) Close() error {
 	if r.db != nil {
 		err := r.db.Close()
 		r.db = nil
+		r.versionKnown = false
 		return err
 	}
 	return nil
@@ -120,6 +121,39 @@ func (r *SummariesReader) ReadAll(ctx context.Context) ([]SummaryRow, error) {
 		return nil, err
 	}
 
+	rows, _, err := r.readAllLocked(ctx, db)
+	return rows, err
+}
+
+func (r *SummariesReader) readChanges(ctx context.Context) ([]SummaryRow, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	db, err := r.ensureOpenLocked()
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, true, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+
+	var version int64
+	err = db.QueryRowContext(ctx, `PRAGMA data_version`).Scan(&version)
+	if err == nil && r.versionKnown && r.version == version {
+		return nil, false, nil
+	}
+	r.versionKnown = false
+	rows, parentsRead, readErr := r.readAllLocked(ctx, db)
+	if readErr != nil {
+		return nil, false, readErr
+	}
+	if err == nil && ctx.Err() == nil && parentsRead {
+		r.version, r.versionKnown = version, true
+	}
+	return rows, true, nil
+}
+
+func (r *SummariesReader) readAllLocked(ctx context.Context, db *sql.DB) ([]SummaryRow, bool, error) {
 	const q = `
 		SELECT
 			conversation_id,
@@ -145,7 +179,8 @@ func (r *SummariesReader) ReadAll(ctx context.Context) ([]SummaryRow, error) {
 		// Reopen on next attempt in case the file was replaced.
 		_ = r.db.Close()
 		r.db = nil
-		return nil, fmt.Errorf("query conversation_summaries: %w", err)
+		r.versionKnown = false
+		return nil, false, fmt.Errorf("query conversation_summaries: %w", err)
 	}
 	defer rows.Close()
 
@@ -154,12 +189,12 @@ func (r *SummariesReader) ReadAll(ctx context.Context) ([]SummaryRow, error) {
 
 	for rows.Next() {
 		var (
-			row               SummaryRow
-			modRaw            string
-			urisRaw           string
-			lastUserRaw       string
-			notFullyIdleVal   any
-			killedVal         any
+			row             SummaryRow
+			modRaw          string
+			urisRaw         string
+			lastUserRaw     string
+			notFullyIdleVal any
+			killedVal       any
 		)
 		if err := rows.Scan(
 			&row.ConversationID,
@@ -177,7 +212,7 @@ func (r *SummariesReader) ReadAll(ctx context.Context) ([]SummaryRow, error) {
 			&lastUserRaw,
 			&row.LastUserInputStepIndex,
 		); err != nil {
-			return nil, fmt.Errorf("scan conversation_summaries: %w", err)
+			return nil, false, fmt.Errorf("scan conversation_summaries: %w", err)
 		}
 		row.LastModifiedTime = parseSQLiteTime(modRaw)
 		row.LastUserInputTime = parseSQLiteTime(lastUserRaw)
@@ -189,19 +224,18 @@ func (r *SummariesReader) ReadAll(ctx context.Context) ([]SummaryRow, error) {
 		result = append(result, row)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate conversation_summaries: %w", err)
+		return nil, false, fmt.Errorf("iterate conversation_summaries: %w", err)
 	}
 
 	// Best-effort backfill from conversation_parents if the table exists.
-	r.mergeConversationParentsLocked(ctx, db, &result, indexByID)
-
-	return result, nil
+	parentsRead := r.mergeConversationParentsLocked(ctx, db, &result, indexByID)
+	return result, parentsRead, nil
 }
 
-func (r *SummariesReader) mergeConversationParentsLocked(ctx context.Context, db *sql.DB, rows *[]SummaryRow, indexByID map[string]int) {
+func (r *SummariesReader) mergeConversationParentsLocked(ctx context.Context, db *sql.DB, rows *[]SummaryRow, indexByID map[string]int) bool {
 	pRows, err := db.QueryContext(ctx, `SELECT conversation_id, parent_id FROM conversation_parents`)
 	if err != nil {
-		return
+		return false
 	}
 	defer pRows.Close()
 
@@ -224,6 +258,7 @@ func (r *SummariesReader) mergeConversationParentsLocked(ctx context.Context, db
 			})
 		}
 	}
+	return pRows.Err() == nil
 }
 
 // BuildConversationTrees organizes flat SummaryRows into top-level conversation trees
@@ -337,7 +372,7 @@ func openReadOnlySQLite(dbPath string) (*sql.DB, error) {
 		absPath = dbPath
 	}
 	dsn := buildReadOnlyDSN(absPath)
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open(sqliteDriver, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite ro %q: %w", dbPath, err)
 	}

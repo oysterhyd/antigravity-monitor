@@ -11,6 +11,10 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      CGO_ENABLED: '1'
+      GOFLAGS: -tags=monitor_sqlite_cgo,mygo_nowebview
+      CGO_LDFLAGS: -static
     steps:
       - uses: actions/checkout@v4
 
@@ -20,6 +24,7 @@ jobs:
 
       - name: Verify tests
         run: |
+          gcc --version
           go vet ./...
           go test ./...
 

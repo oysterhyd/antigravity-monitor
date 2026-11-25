@@ -7,11 +7,13 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
+	_ "modernc.org/sqlite"
 )
 
 func createTestSummariesDB(t *testing.T, rootDir string) *sql.DB {
@@ -307,7 +309,7 @@ func TestTranscriptTailer_IncrementalAndPartialLine(t *testing.T) {
 
 	// Write complete line 1 + partial line 2 (no trailing newline).
 	part1 := `{"step_index":0,"type":"USER_INPUT","created_at":"2026-11-24T14:00:00Z"}` + "\n" +
-		`{"step_index":1,"type":"PLANNER_RESPONSE","input_tokens":100`
+		`{"step_index":1,"type":"PLANNER_RESPONSE","content":"` + strings.Repeat("x", 96*1024) + `","input_tokens":100`
 	if err := os.WriteFile(tp, []byte(part1), 0o644); err != nil {
 		t.Fatalf("write part1: %v", err)
 	}
@@ -346,6 +348,57 @@ func TestTranscriptTailer_IncrementalAndPartialLine(t *testing.T) {
 	turn2, inCur2 := snap2.TurnForStep(6, -1)
 	if turn1 != 1 || inCur1 || turn2 != 2 || !inCur2 {
 		t.Fatalf("unexpected turn alignment: step1=(%d,%v) step6=(%d,%v)", turn1, inCur1, turn2, inCur2)
+	}
+}
+
+func TestProviderReusesUnchangedRequestsAndObservesWALUpdates(t *testing.T) {
+	root := t.TempDir()
+	summaries := createTestSummariesDB(t, root)
+	defer summaries.Close()
+	now := time.Now().UTC()
+	if _, err := summaries.Exec(`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time) VALUES ('live', 'Original', ?)`, now.Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	db := createTestConvDB(t, root, "live")
+	defer db.Close()
+	insertGenRow(t, db, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 100, 900, 0, 20, 1020, 512000, time.Second, 2*time.Second, now, "")
+
+	prov, err := NewProvider(Options{RootDir: root, DisableWatcher: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+	first, _ := prov.Snapshot().FindConversation("live")
+	if len(first.Requests) != 1 {
+		t.Fatalf("initial requests = %d", len(first.Requests))
+	}
+
+	refresh := func() model.ConversationSnapshot {
+		t.Helper()
+		if err := prov.Refresh(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		conv, found := prov.Snapshot().FindConversation("live")
+		if !found || len(conv.Requests) == 0 {
+			t.Fatalf("missing live conversation or requests after refresh")
+		}
+		return conv
+	}
+	if unchanged := refresh(); &unchanged.Requests[0] != &first.Requests[0] {
+		t.Fatal("unchanged refresh rebuilt request records")
+	}
+	if _, err := summaries.Exec(`UPDATE conversation_summaries SET title = 'Updated' WHERE conversation_id = 'live'`); err != nil {
+		t.Fatal(err)
+	}
+	if renamed := refresh(); renamed.Title != "Updated" {
+		t.Fatalf("title after summary WAL update = %q", renamed.Title)
+	}
+	insertGenRow(t, db, 1, 2, "gemini-4-neon", "Gemini 4 Neon (High)", 200, 900, 0, 40, 1140, 512000, time.Second, 2*time.Second, now.Add(time.Second), "")
+	if updated := refresh(); len(updated.Requests) != 2 || updated.Requests[1].Seq != 2 {
+		t.Fatalf("requests after conversation WAL update: %+v", updated.Requests)
+	}
+	if first.Title != "Original" || len(first.Requests) != 1 || first.Requests[0].Seq != 1 {
+		t.Fatal("refresh mutated a previously published snapshot")
 	}
 }
 

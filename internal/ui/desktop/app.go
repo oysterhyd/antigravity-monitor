@@ -125,6 +125,12 @@ type App struct {
 	histCachedRng history.Range
 	histHasCache  bool
 
+	scopeKey     scopeViewKey
+	scopeCache   scopeView
+	targetKey    scopeViewKey
+	targetMetric MetricKind
+	targetReduce bool
+
 	// 60fps spring & morphing state.
 	springs     *anim.SpringBank
 	morpher     *anim.CurveMorpher
@@ -132,7 +138,6 @@ type App struct {
 	badgePulse  anim.Pulse
 	lastFrame   time.Time
 	lastSeenSeq map[string]int
-	tailBuf     []float32
 }
 
 // New constructs a desktop UI App bound to a frozen model.SnapshotProvider.
@@ -245,7 +250,7 @@ func (a *App) watchQuota(ctx context.Context) {
 		win := a.win
 		a.mu.RUnlock()
 		if win != nil && ctx.Err() == nil {
-			win.Update(func() {})
+			win.Invalidate()
 		}
 	}
 }
@@ -266,7 +271,7 @@ func (a *App) watchSnapshots(ch <-chan model.AppSnapshot) {
 		a.mu.Unlock()
 
 		if win != nil {
-			win.Update(func() {})
+			win.Invalidate()
 		}
 	}
 }
@@ -498,13 +503,23 @@ func (a *App) View(c *ui.Context) {
 			}
 		}
 
-		vm = a.buildScopeView(conv)
-		a.updateAnimationTargets(conv, vm, c.Preferences().ReduceMotion)
+		key := scopeViewKey{revision: rev, conversation: conv.ID, scope: a.scope}
+		if a.scopeKey != key {
+			a.scopeCache = a.buildScopeView(conv)
+			a.scopeKey = key
+		}
+		vm = a.scopeCache
+		reduceMotion := c.Preferences().ReduceMotion
+		if a.targetKey != key || a.targetMetric != a.metric || a.targetReduce != reduceMotion {
+			a.updateAnimationTargets(conv, vm, reduceMotion)
+			a.targetKey, a.targetMetric, a.targetReduce = key, a.metric, reduceMotion
+		}
+		a.updateCrosshairTarget(vm.requests, reduceMotion)
 
 		// Advance physics & morphing only while active; idle settles to ~0% GPU.
 		animActive := false
-		if c.Preferences().ReduceMotion {
-			a.snapAllAnimations(conv, vm)
+		if reduceMotion {
+			a.morpher.Step(10)
 		} else {
 			if a.springs.StepAll(dtSec) {
 				animActive = true
@@ -519,6 +534,9 @@ func (a *App) View(c *ui.Context) {
 		if animActive {
 			c.AnimationFrame()
 		}
+	} else {
+		a.scopeKey, a.targetKey = scopeViewKey{}, scopeViewKey{}
+		a.scopeCache = scopeView{}
 	}
 
 	// Root window vibrancy / atmospheric glass shell.
@@ -653,6 +671,12 @@ type scopeView struct {
 	latestSource string
 }
 
+type scopeViewKey struct {
+	revision     uint64
+	conversation string
+	scope        string
+}
+
 func (a *App) buildScopeView(conv model.ConversationSnapshot) scopeView {
 	hasSubs := len(conv.Subagents) > 0
 	isTree := a.scope == scopeAll && hasSubs
@@ -690,10 +714,19 @@ func (a *App) buildScopeView(conv model.ConversationSnapshot) scopeView {
 		ag = conv.Root
 	}
 
-	filtered := make([]model.RequestRecord, 0, len(conv.Requests))
+	count := 0
 	for _, r := range conv.Requests {
 		if r.AgentID == ag.ID {
-			filtered = append(filtered, r)
+			count++
+		}
+	}
+	filtered := conv.Requests
+	if count != len(conv.Requests) {
+		filtered = make([]model.RequestRecord, 0, count)
+		for _, r := range conv.Requests {
+			if r.AgentID == ag.ID {
+				filtered = append(filtered, r)
+			}
 		}
 	}
 
@@ -756,7 +789,8 @@ func (a *App) updateAnimationTargets(conv model.ConversationSnapshot, vm scopeVi
 	// Sync morphing curve targets with robust outlier-resistant Y-scaling so a single
 	// micro-burst spike (e.g. 1000 t/s on 29 tokens) never crushes normal 120-160 t/s waves.
 	slice := tailRequests(vm.requests, chartWindowLen)
-	vals := make([]float64, len(slice))
+	var values [chartWindowLen]float64
+	vals := values[:len(slice)]
 	for i, r := range slice {
 		vals[i] = metricValue(a.metric, r)
 	}
@@ -767,7 +801,10 @@ func (a *App) updateAnimationTargets(conv model.ConversationSnapshot, vm scopeVi
 		a.morpher.SetTargets(scaled, ceiling)
 	}
 
-	_, idx, _ := a.inspectedRequest(vm.requests)
+}
+
+func (a *App) updateCrosshairTarget(requests []model.RequestRecord, instant bool) {
+	_, idx, slice := a.inspectedRequest(requests)
 	if idx >= 0 && len(slice) > 0 {
 		frac := 0.5
 		if len(slice) > 1 {
@@ -775,11 +812,6 @@ func (a *App) updateAnimationTargets(conv model.ConversationSnapshot, vm scopeVi
 		}
 		a.morpher.SetCrosshairTarget(frac, instant)
 	}
-}
-
-func (a *App) snapAllAnimations(conv model.ConversationSnapshot, vm scopeView) {
-	a.updateAnimationTargets(conv, vm, true)
-	a.morpher.Step(10)
 }
 
 func (a *App) renderEmptyState(c *ui.Context, pal theme.Palette) {

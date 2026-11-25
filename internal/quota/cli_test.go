@@ -1,7 +1,10 @@
 package quota
 
 import (
+	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -59,5 +62,30 @@ func TestSupportsUsage(t *testing.T) {
 		if got := supportsUsage(test.version); got != test.want {
 			t.Errorf("supportsUsage(%q) = %t, want %t", test.version, got, test.want)
 		}
+	}
+}
+
+func TestCLIValidationExpiresWhenBinaryChanges(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "agy.exe")
+	if err := os.WriteFile(binary, []byte("original"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatedCLI.Lock()
+	validatedCLI.path, validatedCLI.info = binary, info
+	validatedCLI.Unlock()
+	t.Cleanup(func() { forgetCLI(binary) })
+
+	if !cliSupportsUsage(context.Background(), binary) {
+		t.Fatal("unchanged binary missed validation cache")
+	}
+	if err := os.WriteFile(binary, []byte("replacement"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if cliSupportsUsage(context.Background(), binary) {
+		t.Fatal("replacement reused validation for the old binary")
 	}
 }

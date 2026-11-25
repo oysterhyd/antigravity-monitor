@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	defaultDebounce     = 150 * time.Millisecond
-	summariesTimerKey   = "__summaries__"
+	defaultDebounce   = 150 * time.Millisecond
+	summariesTimerKey = "__summaries__"
 )
 
 // watchEvent is emitted after per-conversation debouncing completes.
@@ -33,10 +33,12 @@ type dirWatcher struct {
 	stopCh chan struct{}
 	doneCh chan struct{}
 
-	mu           sync.Mutex
-	closed       bool
-	watchedDirs  map[string]bool
-	timers       map[string]*time.Timer
+	dirsMu      sync.Mutex
+	watchedDirs map[string]bool
+
+	mu     sync.Mutex
+	closed bool
+	timers map[string]*time.Timer
 }
 
 func newDirWatcher(rootDir string, debounce time.Duration, onEvent func(watchEvent)) (*dirWatcher, error) {
@@ -61,7 +63,7 @@ func newDirWatcher(rootDir string, debounce time.Duration, onEvent func(watchEve
 	}
 
 	// Best-effort add rootDir and conversations dir if they exist.
-	w.addDirIfExists(rootDir)
+	w.addDirIfExists(w.rootDir)
 	w.addDirIfExists(w.convDir)
 
 	go w.loop()
@@ -70,9 +72,7 @@ func newDirWatcher(rootDir string, debounce time.Duration, onEvent func(watchEve
 
 func (w *dirWatcher) addDirIfExists(dir string) {
 	clean := filepath.Clean(dir)
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.closed || w.watchedDirs[clean] {
+	if w.watchedDirs[clean] {
 		return
 	}
 	if fi, err := os.Stat(clean); err != nil || !fi.IsDir() {
@@ -85,14 +85,27 @@ func (w *dirWatcher) addDirIfExists(dir string) {
 
 // WatchTranscriptDirs ensures transcript log directories for the given conversation IDs
 // are watched for real-time USER_INPUT / subagent Role updates.
-func (w *dirWatcher) WatchTranscriptDirs(convIDs []string) {
-	w.addDirIfExists(w.rootDir)
-	w.addDirIfExists(w.convDir)
-	for _, id := range convIDs {
+func (w *dirWatcher) WatchTranscriptDirs(convIDs map[string]bool) {
+	w.dirsMu.Lock()
+	defer w.dirsMu.Unlock()
+
+	dirs := make(map[string]bool, len(convIDs)+2)
+	dirs[filepath.Clean(w.rootDir)] = true
+	dirs[filepath.Clean(w.convDir)] = true
+	for id := range convIDs {
 		if id == "" {
 			continue
 		}
 		dir := filepath.Dir(TranscriptPath(w.rootDir, id))
+		dirs[dir] = true
+	}
+	for dir := range w.watchedDirs {
+		if !dirs[dir] {
+			_ = w.fsw.Remove(dir)
+			delete(w.watchedDirs, dir)
+		}
+	}
+	for dir := range dirs {
 		w.addDirIfExists(dir)
 	}
 }
