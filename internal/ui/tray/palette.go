@@ -24,7 +24,10 @@ type palette struct {
 	Ink3          ui.Color
 	Accent        ui.Color
 	AccentSoft    ui.Color
+	Indigo        ui.Color
+	Green         ui.Color
 	Amber         ui.Color
+	AmberSoft     ui.Color
 	Danger        ui.Color
 	FlyoutGlass   ui.Color // Translucent wash over OS vibrancy/acrylic
 	FlyoutOpaque  ui.Color // Fallback surface when OS vibrancy is unavailable
@@ -52,7 +55,10 @@ var (
 		Ink3:          ui.RGBA(17, 17, 19, 0.36),
 		Accent:        ui.Hex("#007AFF"),
 		AccentSoft:    ui.RGBA(0, 122, 255, 0.12),
+		Indigo:        ui.Hex("#5856D6"),
+		Green:         ui.Hex("#34C759"),
 		Amber:         ui.Hex("#E58500"),
+		AmberSoft:     ui.RGBA(229, 133, 0, 0.12),
 		Danger:        ui.Hex("#FF3B30"),
 		FlyoutGlass:   ui.RGBA(255, 255, 255, 0.38),
 		FlyoutOpaque:  ui.RGBA(246, 248, 252, 0.97),
@@ -79,7 +85,10 @@ var (
 		Ink3:          ui.RGBA(255, 255, 255, 0.36),
 		Accent:        ui.Hex("#0A84FF"),
 		AccentSoft:    ui.RGBA(10, 132, 255, 0.22),
+		Indigo:        ui.Hex("#5E5CE6"),
+		Green:         ui.Hex("#30D158"),
 		Amber:         ui.Hex("#FF9F0A"),
+		AmberSoft:     ui.RGBA(255, 159, 10, 0.16),
 		Danger:        ui.Hex("#FF453A"),
 		FlyoutGlass:   ui.RGBA(24, 27, 36, 0.42),
 		FlyoutOpaque:  ui.RGBA(26, 29, 38, 0.97),

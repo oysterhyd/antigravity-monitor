@@ -78,14 +78,22 @@ func (ctl *Controller) buildView(c *ui.Context) {
 	})
 
 	conv, hasConv := st.ActiveConversation()
+	wallNow := ctl.now(c.Now())
 
 	shell.Children(func() {
-		ctl.renderSegmentedTabs(c, pal)
-		ctl.renderHeader(c, pal, conv, hasConv)
-		ctl.renderHeroPair(c, pal, conv, hasConv)
-		ctl.renderDotMatrixBlock(c, pal)
-		ctl.renderMiddleSection(c, pal, conv, hasConv)
-		ctl.renderBottomSection(c, pal, conv, hasConv)
+		switch st.View {
+		case ViewQuota:
+			ctl.renderQuotaView(c, pal, wallNow)
+		case ViewHistory:
+			ctl.renderHistoryView(c, pal, wallNow)
+		default:
+			ctl.renderSegmentedTabs(c, pal)
+			ctl.renderHeader(c, pal, conv, hasConv)
+			ctl.renderHeroPair(c, pal, conv, hasConv)
+			ctl.renderDotMatrixBlock(c, pal)
+			ctl.renderMiddleSection(c, pal, conv, hasConv)
+			ctl.renderBottomSection(c, pal, conv, hasConv)
+		}
 		ctl.renderFooter(c, pal)
 	})
 }
@@ -743,21 +751,72 @@ func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 			ctl.openDesktop()
 		}
 
-		gearAnchor = ui.ButtonBase(c.Key("settings-gear-btn")).
-			Size(28, 28).Radius(14).Center().Cursor(ui.CursorPointer).
-			Label(tr.Settings).Tooltip(tr.Settings)
-		if gearAnchor.Hovered() || st.SettingsOpen {
-			gearAnchor.Background(pal.SegBg)
-		}
-		gearAnchor.Children(func() {
-			ui.Icon(c, iconGear).Size(15, 15).TextColor(pal.Ink2)
-		})
-		if gearAnchor.Clicked() {
-			st.SettingsOpen = !st.SettingsOpen
-			if st.SettingsOpen {
-				st.SessionMenuOpen = false
+		// Right: 3 monochrome SF-style icon buttons matching Desktop sidebar [Quota] [History] [Settings].
+		hasLowQuota := ctl.opts.Quota != nil && ctl.opts.Quota.HasLowQuota()
+		ui.Row(c.Key("tray-footer-actions")).AlignItems(ui.Center).Gap(4).Shrink(0).Children(func() {
+			quotaActive := st.View == ViewQuota
+			quotaBtn := ui.ButtonBase(c.Key("tray-quota-nav")).
+				Size(28, 28).Radius(10).Center().Cursor(ui.CursorPointer).
+				Label(tr.QuotaTitle).Tooltip(tr.QuotaTitle)
+			quotaIconCol := pal.Ink2
+			if quotaActive {
+				quotaBtn.Background(pal.AccentSoft).Border(1, pal.Accent.Alpha(0.24))
+				quotaIconCol = pal.Accent
+			} else if quotaBtn.Hovered() {
+				quotaBtn.Background(pal.SegBg)
+				quotaIconCol = pal.Ink1
 			}
-		}
+			if hasLowQuota {
+				amber := pal.Amber
+				quotaBtn.DrawOver(func(p *ui.Painter, r ui.Rect) {
+					p.FillPath((&ui.Path{}).Circle(r.X+r.W-5.5, r.Y+5.5, 2.5), amber)
+				})
+			}
+			quotaBtn.Children(func() {
+				ui.Icon(c, theme.IconGauge).Size(14, 14).TextColor(quotaIconCol)
+			})
+			if quotaBtn.Clicked() {
+				st.ToggleView(ViewQuota)
+			}
+
+			histActive := st.View == ViewHistory
+			histBtn := ui.ButtonBase(c.Key("tray-history-nav")).
+				Size(28, 28).Radius(10).Center().Cursor(ui.CursorPointer).
+				Label(tr.HistoryTitle).Tooltip(tr.HistoryTitle)
+			histIconCol := pal.Ink2
+			if histActive {
+				histBtn.Background(pal.AccentSoft).Border(1, pal.Accent.Alpha(0.24))
+				histIconCol = pal.Accent
+			} else if histBtn.Hovered() {
+				histBtn.Background(pal.SegBg)
+				histIconCol = pal.Ink1
+			}
+			histBtn.Children(func() {
+				ui.Icon(c, theme.IconBarChart).Size(14, 14).TextColor(histIconCol)
+			})
+			if histBtn.Clicked() {
+				st.ToggleView(ViewHistory)
+				if st.View == ViewHistory {
+					ctl.histHasCache = false
+				}
+			}
+
+			gearAnchor = ui.ButtonBase(c.Key("settings-gear-btn")).
+				Size(28, 28).Radius(10).Center().Cursor(ui.CursorPointer).
+				Label(tr.Settings).Tooltip(tr.Settings)
+			if gearAnchor.Hovered() || st.SettingsOpen {
+				gearAnchor.Background(pal.SegBg)
+			}
+			gearAnchor.Children(func() {
+				ui.Icon(c, iconGear).Size(15, 15).TextColor(pal.Ink2)
+			})
+			if gearAnchor.Clicked() {
+				st.SettingsOpen = !st.SettingsOpen
+				if st.SettingsOpen {
+					st.SessionMenuOpen = false
+				}
+			}
+		})
 	})
 
 	// Ultra-minimal frosted Settings Popover (crisp opaque surface, no bleed-through).

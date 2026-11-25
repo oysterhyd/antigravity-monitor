@@ -1,16 +1,21 @@
 package tray
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"runtime"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/oysterhyd/antigravity-monitor/internal/config"
+	"github.com/oysterhyd/antigravity-monitor/internal/history"
 	"github.com/oysterhyd/antigravity-monitor/internal/i18n"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
+	"github.com/oysterhyd/antigravity-monitor/internal/quota"
 	appupdater "github.com/oysterhyd/antigravity-monitor/internal/updater"
 )
 
@@ -18,6 +23,7 @@ import (
 // desktop window once merged in cmd/monitor).
 type Callbacks struct {
 	OnOpenDesktop    func()
+	OnOpenView       func(ViewMode)
 	OnFocusAgent     func(convID, agentID string)
 	OnSettingsChange func(model.Settings)
 	OnQuit           func()
@@ -26,7 +32,10 @@ type Callbacks struct {
 // Options configures a tray Controller.
 type Options struct {
 	Provider    model.SnapshotProvider
+	History     history.Aggregator
+	Quota       quota.Tracker
 	Store       *config.Store
+	Now         func() time.Time
 	Callbacks   Callbacks
 	ShowOnStart bool
 }
@@ -45,6 +54,13 @@ type Controller struct {
 	followItem *mygo.MenuItem
 	toolTip    string
 	title      string
+
+	// Lightweight short-lived cache for tray History view queries.
+	histCached      history.QueryResult
+	histCachedAt    time.Time
+	histCachedRng   history.Range
+	histHasCache    bool
+	quotaRefreshing atomic.Bool
 
 	stopOnce sync.Once
 	cancel   func()
@@ -145,6 +161,7 @@ func (ctl *Controller) ShowFlyout() {
 		return
 	}
 	ctl.dotMatrix.markDirty()
+	ctl.histHasCache = false
 	ctl.flyout = mygo.NewFlyout(mygo.FlyoutOptions{
 		Tray:         ctl.tray,
 		Placement:    mygo.PlacementBottom,
@@ -167,6 +184,7 @@ func (ctl *Controller) ShowFlyout() {
 		ctl.state.SessionMenuOpen = false
 		ctl.state.SettingsOpen = false
 		ctl.state.HoverDotCol = -1
+		ctl.state.HoverHistIdx = -1
 	})
 }
 
@@ -290,10 +308,64 @@ func (ctl *Controller) updateSettings(mut func(*model.Settings)) {
 }
 
 func (ctl *Controller) openDesktop() {
+	view := ctl.state.View
 	ctl.HideFlyout()
+	if ctl.opts.Callbacks.OnOpenView != nil {
+		ctl.opts.Callbacks.OnOpenView(view)
+		return
+	}
 	if ctl.opts.Callbacks.OnOpenDesktop != nil {
 		ctl.opts.Callbacks.OnOpenDesktop()
 	}
+}
+
+func (ctl *Controller) now(fallback time.Time) time.Time {
+	if ctl.opts.Now != nil {
+		return ctl.opts.Now()
+	}
+	return fallback
+}
+
+func (ctl *Controller) queryHistory(now time.Time) history.QueryResult {
+	if ctl.opts.History == nil {
+		return history.QueryResult{Range: ctl.state.HistoryRange}
+	}
+	if ctl.histHasCache && ctl.histCachedRng == ctl.state.HistoryRange && now.Sub(ctl.histCachedAt) < 2*time.Second {
+		return ctl.histCached
+	}
+	res := ctl.opts.History.Query(ctl.state.HistoryRange, now)
+	ctl.histCached = res
+	ctl.histCachedRng = ctl.state.HistoryRange
+	ctl.histCachedAt = now
+	ctl.histHasCache = true
+	return res
+}
+
+func (ctl *Controller) currentQuotaSnapshot(now time.Time) quota.QuotaSnapshot {
+	if ctl.opts.Quota == nil {
+		return quota.QuotaSnapshot{}
+	}
+	return ctl.opts.Quota.State(now)
+}
+
+func (ctl *Controller) refreshQuotaAsync() {
+	if ctl.opts.Quota == nil {
+		return
+	}
+	if !ctl.quotaRefreshing.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer ctl.quotaRefreshing.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_ = ctl.opts.Quota.Refresh(ctx, ctl.now(time.Now()))
+		mygo.RunOnMain(func() {
+			if ctl.flyout != nil {
+				ctl.flyout.Invalidate()
+			}
+		})
+	}()
 }
 
 func (ctl *Controller) focusAgent(convID, agentID string) {

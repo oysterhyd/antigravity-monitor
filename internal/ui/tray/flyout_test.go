@@ -1,6 +1,7 @@
 package tray
 
 import (
+	"context"
 	"fmt"
 	"image/png"
 	"os"
@@ -9,8 +10,11 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/oysterhyd/antigravity-monitor/internal/history"
+	"github.com/oysterhyd/antigravity-monitor/internal/metrics"
 	"github.com/oysterhyd/antigravity-monitor/internal/mock"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
+	"github.com/oysterhyd/antigravity-monitor/internal/quota"
 )
 
 func TestTrayAgentTreeLayoutAndCopy(t *testing.T) {
@@ -138,5 +142,199 @@ func TestTraySessionPopoverAlignment(t *testing.T) {
 		if err := png.Encode(f, img); err != nil {
 			t.Fatalf("encode preview: %v", err)
 		}
+	}
+}
+
+type stubTrayHistory struct{}
+
+func (s *stubTrayHistory) Refresh(_ context.Context) error { return nil }
+func (s *stubTrayHistory) ConsumptionSince(_ time.Time) history.PoolConsumption {
+	return history.PoolConsumption{}
+}
+func (s *stubTrayHistory) Query(r history.Range, _ time.Time) history.QueryResult {
+	return history.QueryResult{
+		Range:           r,
+		TotalTokens:     751_800_000,
+		OutputTokens:    5_900_000,
+		InputTokens:     42_000_000,
+		CacheReadTokens: 703_900_000,
+		TotalCostUSD:    224.16,
+		AvgCostUSD:      32.02,
+		CacheSavedUSD:   926.47,
+		CacheHitRate:    92.5,
+		SessionCount:    37,
+		RequestCount:    3744,
+		Buckets: []history.BucketSummary{
+			{Label: "11/18", CacheReadTokens: 15_000_000, InputTokens: 1_200_000, OutputTokens: 300_000, TotalTokens: 16_500_000, TotalCostUSD: 8.10, CacheHitPct: 91.2},
+			{Label: "11/19", CacheReadTokens: 52_000_000, InputTokens: 3_400_000, OutputTokens: 700_000, TotalTokens: 56_100_000, TotalCostUSD: 19.40, CacheHitPct: 92.4},
+			{Label: "11/20", CacheReadTokens: 98_000_000, InputTokens: 6_200_000, OutputTokens: 1_100_000, TotalTokens: 105_300_000, TotalCostUSD: 34.80, CacheHitPct: 93.1},
+			{Label: "11/21", CacheReadTokens: 82_000_000, InputTokens: 5_100_000, OutputTokens: 900_000, TotalTokens: 88_000_000, TotalCostUSD: 28.50, CacheHitPct: 92.0},
+			{Label: "11/22", CacheReadTokens: 145_000_000, InputTokens: 8_900_000, OutputTokens: 1_300_000, TotalTokens: 155_200_000, TotalCostUSD: 44.10, CacheHitPct: 93.5},
+			{Label: "11/23", CacheReadTokens: 126_000_000, InputTokens: 7_800_000, OutputTokens: 1_100_000, TotalTokens: 134_900_000, TotalCostUSD: 33.53, CacheHitPct: 92.8},
+			{Label: "11/24", CacheReadTokens: 185_200_000, InputTokens: 12_200_000, OutputTokens: 2_100_000, TotalTokens: 199_500_000, TotalCostUSD: 55.73, CacheHitPct: 93.8},
+		},
+		TopSessions: []history.SessionSummary{
+			{ConvID: "conv-monitor", Title: "Antigravity Token 实时统计面板", PrimaryPool: metrics.PoolGemini, TotalTokens: 171_600_000, CostUSD: 44.05},
+			{ConvID: "conv-payments", Title: "Project Overview And Improvement", PrimaryPool: metrics.PoolClaudeGPT, TotalTokens: 124_200_000, CostUSD: 24.17},
+			{ConvID: "conv-sql", Title: "作业内容梳理与分析", PrimaryPool: metrics.PoolGemini, TotalTokens: 46_700_000, CostUSD: 16.42},
+		},
+	}
+}
+
+func saveTrayPreview(t *testing.T, tt *ui.Tester, filename string) {
+	t.Helper()
+	dir := os.Getenv("TRAY_UI_PREVIEW_DIR")
+	if dir == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir preview dir: %v", err)
+	}
+	f, err := os.Create(filepath.Join(dir, filename))
+	if err != nil {
+		t.Fatalf("create preview %s: %v", filename, err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, tt.Image()); err != nil {
+		t.Fatalf("encode preview %s: %v", filename, err)
+	}
+}
+
+func TestTrayQuotaAndHistoryViews(t *testing.T) {
+	p := mock.New(0)
+	defer p.Close()
+
+	now := time.Date(2026, 11, 24, 15, 30, 0, 0, time.Local)
+	reading := quota.Reading{
+		Gemini: quota.PoolQuota{
+			FiveHour: quota.WindowQuota{RemainingPct: 88, ResetAt: now.Add(3*time.Hour + 18*time.Minute)},
+			Weekly:   quota.WindowQuota{RemainingPct: 62, ResetAt: now.Add(5*24*time.Hour + 4*time.Hour)},
+		},
+		ClaudeGPT: quota.PoolQuota{
+			FiveHour: quota.WindowQuota{RemainingPct: 22, ResetAt: now.Add(1*time.Hour + 45*time.Minute)},
+			Weekly:   quota.WindowQuota{RemainingPct: 74, ResetAt: now.Add(4*24*time.Hour + 2*time.Hour)},
+		},
+	}
+	qSvc := quota.NewService(filepath.Join(t.TempDir(), "quota.json"), func(context.Context) (quota.Reading, error) {
+		return reading, nil
+	})
+	_ = qSvc.Refresh(context.Background(), now.Add(-4*time.Hour))
+	reading.Gemini.FiveHour.RemainingPct = 76
+	reading.ClaudeGPT.FiveHour.RemainingPct = 18
+	_ = qSvc.Refresh(context.Background(), now.Add(-10*time.Minute))
+
+	var openedView ViewMode
+	openedCalled := false
+	var focusedConv string
+
+	ctl := New(Options{
+		Provider: p,
+		History:  &stubTrayHistory{},
+		Quota:    qSvc,
+		Now:      func() time.Time { return now },
+		Callbacks: Callbacks{
+			OnOpenView: func(v ViewMode) {
+				openedView = v
+				openedCalled = true
+			},
+			OnFocusAgent: func(convID, _ string) {
+				focusedConv = convID
+			},
+		},
+	})
+
+	tt := ui.NewTester(ctl.buildView, flyoutWidth, 510)
+	tt.Advance(250 * time.Millisecond)
+
+	// 1. Switch to Quota view via footer Gauge icon.
+	if err := tt.Click("账号实时额度"); err != nil {
+		t.Fatalf("click tray quota nav: %v", err)
+	}
+	tt.Advance(250 * time.Millisecond)
+	if ctl.state.View != ViewQuota {
+		t.Fatalf("expected ViewQuota, got %v", ctl.state.View)
+	}
+	for _, want := range []string{"账号实时额度", "Gemini Models", "Claude & GPT Models", "76%", "18%", "62%", "74%"} {
+		if !tt.HasText(want) {
+			t.Fatalf("quota view missing %q; got %q", want, tt.Texts())
+		}
+	}
+	saveTrayPreview(t, tt, "tray_quota_light_zh.png")
+
+	// Clicking "打开主面板" while in Quota view forwards ViewQuota to OnOpenView.
+	if err := tt.Click("打开主面板"); err != nil {
+		t.Fatalf("click open desktop: %v", err)
+	}
+	if !openedCalled || openedView != ViewQuota {
+		t.Fatalf("expected OnOpenView(ViewQuota), got called=%v view=%v", openedCalled, openedView)
+	}
+
+	// 2. Switch to History view via footer BarChart icon.
+	if err := tt.Click("历史消耗统计"); err != nil {
+		t.Fatalf("click tray history nav: %v", err)
+	}
+	tt.Advance(250 * time.Millisecond)
+	if ctl.state.View != ViewHistory {
+		t.Fatalf("expected ViewHistory, got %v", ctl.state.View)
+	}
+	for _, want := range []string{"历史消耗统计", "751.8M", "$224.16", "$926.47", "高消耗会话 Top 3", "Antigravity Token 实时统计面板"} {
+		if !tt.HasText(want) {
+			t.Fatalf("history view missing %q; got %q", want, tt.Texts())
+		}
+	}
+	saveTrayPreview(t, tt, "tray_history_light_zh.png")
+
+	// Switch range to "今日" and verify hourly average label.
+	if err := tt.Click("今日"); err != nil {
+		t.Fatalf("click 今日 range: %v", err)
+	}
+	tt.Advance(200 * time.Millisecond)
+	if ctl.state.HistoryRange != history.RangeToday {
+		t.Fatalf("expected RangeToday, got %v", ctl.state.HistoryRange)
+	}
+	if !tt.HasText("时均") {
+		t.Fatalf("expected hourly avg label 时均; got %q", tt.Texts())
+	}
+
+	// Clicking a Top 3 session calls OnFocusAgent with that conversation ID.
+	if err := tt.Click("作业内容梳理与分析"); err != nil {
+		t.Fatalf("click top session row: %v", err)
+	}
+	if focusedConv != "conv-sql" {
+		t.Fatalf("expected focus conv-sql, got %q", focusedConv)
+	}
+
+	// 3. Dark EN visual check for History & Quota.
+	ctl.state.Settings.ThemeMode = "dark"
+	ctl.state.Settings.Language = "en"
+	ctl.state.SetHistoryRange(history.Range7D)
+	tt.Frame()
+	tt.Advance(250 * time.Millisecond)
+	if !tt.HasText("Usage History") || !tt.HasText("Top 3 Sessions") {
+		t.Fatalf("expected EN history labels; got %q", tt.Texts())
+	}
+	saveTrayPreview(t, tt, "tray_history_dark_en.png")
+
+	ctl.state.SetView(ViewQuota)
+	tt.Frame()
+	tt.Advance(250 * time.Millisecond)
+	if !tt.HasText("Account Quota") || !tt.HasText("5-hour limit") {
+		t.Fatalf("expected EN quota labels; got %q", tt.Texts())
+	}
+	saveTrayPreview(t, tt, "tray_quota_dark_en.png")
+
+	// Clicking the header Back button returns cleanly to Live view.
+	if err := tt.Click("← Live View"); err != nil {
+		t.Fatalf("click back to live: %v", err)
+	}
+	tt.Advance(150 * time.Millisecond)
+	if ctl.state.View != ViewLive {
+		t.Fatalf("expected back button to return to ViewLive, got %v", ctl.state.View)
+	}
+	// ToggleView idempotency check.
+	ctl.state.ToggleView(ViewQuota)
+	ctl.state.ToggleView(ViewQuota)
+	if ctl.state.View != ViewLive {
+		t.Fatalf("expected ToggleView x2 to return to ViewLive, got %v", ctl.state.View)
 	}
 }

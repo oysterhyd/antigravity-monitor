@@ -78,11 +78,26 @@ func main() {
 
 	trayCtl = tray.New(tray.Options{
 		Provider: provider,
+		History:  histSvc,
+		Quota:    quotaSvc,
 		Store:    store,
 		Callbacks: tray.Callbacks{
 			OnOpenDesktop: func() {
 				if deskHost != nil {
 					deskHost.Show()
+				}
+			},
+			OnOpenView: func(view tray.ViewMode) {
+				if deskHost == nil {
+					return
+				}
+				switch view {
+				case tray.ViewQuota:
+					deskHost.ShowView(desktop.ViewQuota)
+				case tray.ViewHistory:
+					deskHost.ShowView(desktop.ViewHistory)
+				default:
+					deskHost.ShowView(desktop.ViewLive)
 				}
 			},
 			OnFocusAgent: func(convID, agentID string) {
@@ -272,6 +287,15 @@ func (h *desktopHost) createWindow() {
 
 func (h *desktopHost) Show() {
 	mygo.RunOnMain(h.show)
+}
+
+func (h *desktopHost) ShowView(v desktop.ActiveView) {
+	mygo.RunOnMain(func() {
+		if h.app != nil {
+			h.app.SetActiveView(v)
+		}
+		h.show()
+	})
 }
 
 func (h *desktopHost) FocusAgent(convID, agentID string) {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/oysterhyd/antigravity-monitor/internal/history"
 	"github.com/oysterhyd/antigravity-monitor/internal/i18n"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
 )
@@ -15,6 +16,15 @@ const (
 	TabOverview Tab = iota
 	TabPerf
 	TabAgents
+)
+
+// ViewMode selects the active flyout surface: Live Monitor, Account Quota, or Usage History.
+type ViewMode uint8
+
+const (
+	ViewLive ViewMode = iota
+	ViewQuota
+	ViewHistory
 )
 
 // TabLabels matches docs/prototype.html (#traySeg).
@@ -38,9 +48,12 @@ const (
 // State holds all pure UI state for the tray flyout. It is decoupled from mygo
 // window handles so every transition and calculation is directly unit-testable.
 type State struct {
+	View            ViewMode
 	Tab             Tab
 	SelectedConvID  string
 	HoverDotCol     int
+	HistoryRange    history.Range
+	HoverHistIdx    int
 	SessionMenuOpen bool
 	SettingsOpen    bool
 	Settings        model.Settings
@@ -56,9 +69,12 @@ type State struct {
 // NewState initializes tray flyout state with the given settings and initial snapshot.
 func NewState(settings model.Settings, snap model.AppSnapshot) *State {
 	st := &State{
-		Tab:         TabOverview,
-		HoverDotCol: -1,
-		Settings:    settings,
+		View:         ViewLive,
+		Tab:          TabOverview,
+		HoverDotCol:  -1,
+		HistoryRange: history.Range7D,
+		HoverHistIdx: -1,
+		Settings:     settings,
 	}
 	st.ApplySnapshot(snap)
 	// Start dot levels directly at initial targets so the first paint is crisp.
@@ -110,8 +126,39 @@ func (s *State) SetTab(tab Tab) {
 	if tab < TabOverview || tab > TabAgents {
 		return
 	}
+	s.View = ViewLive
 	s.Tab = tab
 	s.syncDotTargets()
+}
+
+// SetView switches between Live, Quota, and History flyout surfaces.
+func (s *State) SetView(v ViewMode) {
+	if v > ViewHistory {
+		v = ViewLive
+	}
+	s.View = v
+	s.SessionMenuOpen = false
+	s.SettingsOpen = false
+	s.HoverDotCol = -1
+	s.HoverHistIdx = -1
+}
+
+// ToggleView toggles a sub-view (Quota or History); selecting the active view returns to Live.
+func (s *State) ToggleView(v ViewMode) {
+	if s.View == v {
+		s.SetView(ViewLive)
+		return
+	}
+	s.SetView(v)
+}
+
+// SetHistoryRange updates the active historical query window.
+func (s *State) SetHistoryRange(r history.Range) {
+	switch r {
+	case history.RangeToday, history.Range7D, history.Range30D, history.RangeAll:
+		s.HistoryRange = r
+		s.HoverHistIdx = -1
+	}
 }
 
 // SelectConversation switches the displayed conversation. A manual selection
