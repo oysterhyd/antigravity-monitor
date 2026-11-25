@@ -12,7 +12,6 @@ import (
 	"github.com/oysterhyd/antigravity-monitor/internal/config"
 	"github.com/oysterhyd/antigravity-monitor/internal/i18n"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
-	"github.com/oysterhyd/antigravity-monitor/internal/quota"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/theme"
 )
 
@@ -83,7 +82,7 @@ func TestR4ThemeAndI18n(t *testing.T) {
 
 	t.Run("QuotaViewLightDarkZHEn", func(t *testing.T) {
 		fx := seedRealisticHistoryRoot(t)
-		cal := quota.CalibrationInput{GeminiRemainingPct: 74, GeminiResetIn: 3 * time.Hour, ClaudeRemainingPct: 41, ClaudeResetIn: 2 * time.Hour}
+		reading := quotaReading(anchorNow, 74, 41)
 		for _, tc := range []struct {
 			mode  string
 			lang  string
@@ -95,7 +94,7 @@ func TestR4ThemeAndI18n(t *testing.T) {
 			{theme.ModeLight, "en", "Account Quota", "Quota Usage Trend"},
 			{theme.ModeDark, "en", "Account Quota", "Quota Usage Trend"},
 		} {
-			env := newE2EDesktopApp(t, fx, tc.mode, tc.lang, &cal)
+			env := newE2EDesktopApp(t, fx, tc.mode, tc.lang, &reading)
 			clickMust(t, env.Tester, tc.label)
 			mustHaveText(t, env.Tester, tc.title)
 			verifyPNGFrame(t, env.Tester, "r4_quota_"+tc.mode+"_"+tc.lang+".png")

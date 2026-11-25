@@ -196,7 +196,7 @@ func (a *App) renderSessionSwitcher(c *ui.Context, pal theme.Palette, snap model
 					}
 					for _, item := range snap.Conversations {
 						isSel := item.ID == conv.ID
-						row := ui.ButtonBase(c.Key("conv-" + item.ID)).
+						row := ui.ButtonBase(c.Key("conv-"+item.ID)).
 							FillWidth().
 							Padding(8, 10).
 							Radius(11).
@@ -421,7 +421,7 @@ func (a *App) renderAgentRow(c *ui.Context, pal theme.Palette, ag model.AgentNod
 		titleWeight = 600
 	}
 
-	row := ui.ButtonBase(c.Key("agent-" + ag.ID)).
+	row := ui.ButtonBase(c.Key("agent-"+ag.ID)).
 		Height(h).
 		Padding(0, 10).
 		Radius(14).
@@ -476,7 +476,7 @@ func (a *App) renderAgentRow(c *ui.Context, pal theme.Palette, ag model.AgentNod
 
 func (a *App) renderSidebarFooter(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot, now time.Time) {
 	tr := a.tr()
-	hasLowQuota := a.quotaSvc != nil && a.quotaSvc.State(now).HasLowQuota
+	hasLowQuota := a.quotaSvc != nil && a.quotaSvc.HasLowQuota()
 
 	ui.Row(c.Key("sidebar-footer")).
 		Padding(10, 2, 0, 4).
@@ -569,7 +569,6 @@ func (a *App) renderSidebarFooter(c *ui.Context, pal theme.Palette, conv model.C
 				if gear.Clicked() {
 					a.settingsPopoverOpen = !a.settingsPopoverOpen
 					a.sessionPopoverOpen = false
-					a.quotaCalibOpen = false
 				}
 
 				// Ultra-minimal Apple Liquid Glass Settings Popover (no redundant TPS mode toggle).

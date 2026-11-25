@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
@@ -60,8 +61,10 @@ type Options struct {
 	Window *mygo.Window
 	// History provides read-only historical usage aggregation for the Usage History view.
 	History history.Aggregator
-	// Quota provides compliant local quota tracking and calibration for the Account Quota view.
+	// Quota provides account quota snapshots.
 	Quota quota.Tracker
+	// QuotaInterval enables an initial refresh and periodic sampling when positive.
+	QuotaInterval time.Duration
 	// Now optionally overrides the wall-clock timestamp used for quota countdowns and history windows.
 	Now func() time.Time
 	// ShowDevToolbar shows subtle top-right dev harness controls (theme, live toggle, burst).
@@ -89,6 +92,7 @@ type App struct {
 	seenRev   uint64
 	win       *mygo.Window
 	stopSub   func()
+	stopQuota context.CancelFunc
 	closeOnce sync.Once
 
 	// Interactive UI state (accessed on UI thread inside View / tests).
@@ -107,18 +111,10 @@ type App struct {
 	liveRunning         bool
 
 	// Account Quota view interactive state.
-	quotaSeries     string // "all" | "gemini" | "claude"
-	quotaRange      string // "24h" | "7d"
-	quotaHoverIdx   int
-	quotaCalibOpen  bool
-	calibGemPct     string
-	calibGemHours   string
-	calibGemMins    string
-	calibClaPct     string
-	calibClaHours   string
-	calibClaMins    string
-	calibJSONSource string
-	calibError      string
+	quotaSeries   string // "all" | "gemini" | "claude"
+	quotaRange    string // "24h" | "7d"
+	quotaHoverIdx int
+	quotaRefresh  chan struct{}
 
 	// Usage History view interactive state.
 	histRange     history.Range
@@ -169,12 +165,6 @@ func New(provider model.SnapshotProvider, opts Options) *App {
 		quotaSeries:    "all",
 		quotaRange:     "24h",
 		quotaHoverIdx:  -1,
-		calibGemPct:    "80",
-		calibGemHours:  "4",
-		calibGemMins:   "0",
-		calibClaPct:    "70",
-		calibClaHours:  "4",
-		calibClaMins:   "0",
 		histRange:      history.Range7D,
 		histMetric:     "tokens",
 		histHoverIdx:   -1,
@@ -202,6 +192,13 @@ func New(provider model.SnapshotProvider, opts Options) *App {
 		go a.watchSnapshots(ch)
 	}
 
+	if opts.Quota != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		a.stopQuota = cancel
+		a.quotaRefresh = make(chan struct{}, 1)
+		go a.watchQuota(ctx)
+	}
+
 	return a
 }
 
@@ -218,7 +215,46 @@ func (a *App) Close() {
 		if a.stopSub != nil {
 			a.stopSub()
 		}
+		if a.stopQuota != nil {
+			a.stopQuota()
+		}
 	})
+}
+
+func (a *App) watchQuota(ctx context.Context) {
+	var tick <-chan time.Time
+	if a.opts.QuotaInterval > 0 {
+		timer := time.NewTicker(a.opts.QuotaInterval)
+		defer timer.Stop()
+		tick = timer.C
+		a.requestQuotaRefresh()
+	}
+	for ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick:
+		case <-a.quotaRefresh:
+		}
+		now := time.Now()
+		if a.opts.Now != nil {
+			now = a.opts.Now()
+		}
+		_ = a.quotaSvc.Refresh(ctx, now)
+		a.mu.RLock()
+		win := a.win
+		a.mu.RUnlock()
+		if win != nil && ctx.Err() == nil {
+			win.Update(func() {})
+		}
+	}
+}
+
+func (a *App) requestQuotaRefresh() {
+	select {
+	case a.quotaRefresh <- struct{}{}:
+	default:
+	}
 }
 
 func (a *App) watchSnapshots(ch <-chan model.AppSnapshot) {
@@ -265,7 +301,6 @@ func (a *App) SetActiveView(v ActiveView) {
 	a.activeView = v
 	a.sessionPopoverOpen = false
 	a.settingsPopoverOpen = false
-	a.quotaCalibOpen = false
 	a.quotaHoverIdx = -1
 	a.histHoverIdx = -1
 	if v == ViewHistory {
@@ -308,7 +343,6 @@ func (a *App) FocusConversation(convID string, manual bool) {
 	a.expandedReqSeq = 0
 	a.hoverChartIdx = -1
 	a.sessionPopoverOpen = false
-	a.quotaCalibOpen = false
 	a.morpher.ClearCrosshair()
 }
 
@@ -318,7 +352,6 @@ func (a *App) FocusAgent(agentID string) {
 		agentID = scopeAll
 	}
 	a.activeView = ViewLive
-	a.quotaCalibOpen = false
 	if a.scope == agentID {
 		return
 	}
@@ -626,10 +659,10 @@ func (a *App) buildScopeView(conv model.ConversationSnapshot) scopeView {
 
 	if isTree {
 		sv := scopeView{
-			isTreeView: true,
+			isTreeView:  true,
 			activeAgent: conv.Root,
-			metrics:    conv.TreeMetrics,
-			requests:   conv.Requests,
+			metrics:     conv.TreeMetrics,
+			requests:    conv.Requests,
 		}
 		if conv.TreeMetrics.LatestRequest != nil {
 			sv.latestReq = *conv.TreeMetrics.LatestRequest

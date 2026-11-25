@@ -162,44 +162,27 @@ type Strings struct {
 	// R1 Navigation & Shared Sub-View Actions
 	BackToLive string
 
-	// R2 Account Quota View & Calibration
-	QuotaTitle               string
-	QuotaSummaryPrefix       string
-	QuotaRefresh             string
-	QuotaCalibrate           string
-	QuotaRemaining           string
-	QuotaResetInFmt          string // fmt: "3h 42m"
-	QuotaResetSoon           string
-	QuotaSourceLocal         string
-	QuotaSourceJSON          string
-	QuotaSourceUncalibrated  string
-	QuotaUncalibratedShort   string
-	QuotaUncalibratedTitle   string
-	QuotaUncalibratedDesc    string
-	QuotaCalibrateNow        string
-	QuotaTrendTitle          string
-	QuotaFilterAll           string
-	QuotaResetMarker         string
-	QuotaInspNowSuffix       string
-	QuotaInspDeltaFmt        string // fmt: geminiDelta, claudeDelta
-	QuotaInsp7dNote          string
-	QuotaTrendEmpty          string
-	QuotaTrendSinglePoint    string
-	QuotaCalibTitle          string
-	QuotaCalibPrivacyNote    string
-	QuotaCalibRemPct         string
-	QuotaCalibResetLabel     string
-	QuotaCalibHoursUnit      string
-	QuotaCalibMinutesUnit    string
-	QuotaCalibJSONLabel      string
-	QuotaCalibJSONHint       string
-	QuotaCalibSave           string
-	QuotaCalibClear          string
-	QuotaCalibCancel         string
-	QuotaErrInvalidPct       string
-	QuotaErrInvalidReset     string
-	QuotaErrUnsafeJSONSource string
-	QuotaErrJSONFallbackFmt  string // fmt: short error reason
+	// Account Quota
+	QuotaTitle             string
+	QuotaFiveHour          string
+	QuotaWeekly            string
+	QuotaRefresh           string
+	QuotaResetInFmt        string // fmt: "3h 42m"
+	QuotaResetSoon         string
+	QuotaResetDaysHoursFmt string
+	QuotaResetUnknown      string
+	QuotaSetupNeeded       string
+	QuotaUpdateNeeded      string
+	QuotaUnavailable       string
+	QuotaShowingLast       string
+	QuotaTrendTitle        string
+	QuotaFilterAll         string
+	QuotaResetMarker       string
+	QuotaInspNowSuffix     string
+	QuotaInspDeltaFmt      string // fmt: geminiDelta, claudeDelta
+	QuotaInsp7dNote        string
+	QuotaTrendEmpty        string
+	QuotaTrendSinglePoint  string
 
 	// R3 Usage History View
 	HistoryTitle           string
@@ -366,43 +349,26 @@ var zhStrings = Strings{
 
 	BackToLive: "← 返回监控",
 
-	QuotaTitle:               "账号实时额度",
-	QuotaSummaryPrefix:       "当前窗口状态",
-	QuotaRefresh:             "↻ 刷新采样",
-	QuotaCalibrate:           "校准",
-	QuotaRemaining:           "剩余额度",
-	QuotaResetInFmt:          "%s 后重置",
-	QuotaResetSoon:           "即将重置",
-	QuotaSourceLocal:         "本地校准窗口",
-	QuotaSourceJSON:          "本地 JSON 源",
-	QuotaSourceUncalibrated:  "未校准 · 仅本地估算",
-	QuotaUncalibratedShort:   "未校准",
-	QuotaUncalibratedTitle:   "尚未校准额度基线",
-	QuotaUncalibratedDesc:    "点击「立即校准」输入当前剩余 % 与重置倒计时，或配置本地 JSON 源以追踪本地窗口消耗。",
-	QuotaCalibrateNow:        "立即校准",
-	QuotaTrendTitle:          "额度变化趋势",
-	QuotaFilterAll:           "全部",
-	QuotaResetMarker:         "↺ 重置",
-	QuotaInspNowSuffix:       " (当前)",
-	QuotaInspDeltaFmt:        "较上采样点: Gemini %s · Claude & GPT %s",
-	QuotaInsp7dNote:          "每日窗口最低剩余水位快照",
-	QuotaTrendEmpty:          "暂无趋势采样，完成校准或点击「刷新采样」后生成曲线",
-	QuotaTrendSinglePoint:    "已记录首个采样点，继续采样后将绘制平滑趋势曲线",
-	QuotaCalibTitle:          "校准本地额度基线",
-	QuotaCalibPrivacyNote:    "纯本地窗口追踪，不探测未公开服务或读取 OAuth 凭据",
-	QuotaCalibRemPct:         "剩余 %",
-	QuotaCalibResetLabel:     "重置倒计时",
-	QuotaCalibHoursUnit:      "时",
-	QuotaCalibMinutesUnit:    "分",
-	QuotaCalibJSONLabel:      "本地 JSON 源 (可选)",
-	QuotaCalibJSONHint:       "支持本地文件路径或 http://127.0.0.1/... URL；留空使用上方校准值",
-	QuotaCalibSave:           "保存",
-	QuotaCalibClear:          "清除校准",
-	QuotaCalibCancel:         "取消",
-	QuotaErrInvalidPct:       "请输入 0–100 的有效百分比",
-	QuotaErrInvalidReset:     "请输入有效的重置倒计时（小时 ≥ 0，分钟 0–59）",
-	QuotaErrUnsafeJSONSource: "仅支持本地文件路径、file:// 或 localhost/127.0.0.1 地址",
-	QuotaErrJSONFallbackFmt:  "JSON 源读取失败，已回退本地估算 (%s)",
+	QuotaTitle:             "账号实时额度",
+	QuotaFiveHour:          "5 小时额度",
+	QuotaWeekly:            "周额度",
+	QuotaRefresh:           "↻ 刷新采样",
+	QuotaResetInFmt:        "%s 后重置",
+	QuotaResetSoon:         "即将重置",
+	QuotaResetDaysHoursFmt: "%d 天 %d 小时",
+	QuotaResetUnknown:      "重置时间未知",
+	QuotaSetupNeeded:       "额度读取组件未安装，请参照项目说明配置",
+	QuotaUpdateNeeded:      "请更新额度读取组件后重试",
+	QuotaUnavailable:       "无法读取账号额度，请检查 Antigravity 登录状态和网络连接",
+	QuotaShowingLast:       "刷新失败，显示上次读取的额度",
+	QuotaTrendTitle:        "额度变化趋势",
+	QuotaFilterAll:         "全部",
+	QuotaResetMarker:       "↺ 重置",
+	QuotaInspNowSuffix:     " (当前)",
+	QuotaInspDeltaFmt:      "较上采样点: Gemini %s · Claude & GPT %s",
+	QuotaInsp7dNote:        "每日窗口最低剩余水位快照",
+	QuotaTrendEmpty:        "暂无趋势采样",
+	QuotaTrendSinglePoint:  "已记录首个采样点，继续采样后将绘制平滑趋势曲线",
 
 	HistoryTitle:           "历史消耗统计",
 	HistoryScopeToday:      "本地只读聚合 · 今日分时段",
@@ -568,43 +534,26 @@ var enStrings = Strings{
 
 	BackToLive: "← Live View",
 
-	QuotaTitle:               "Account Quota",
-	QuotaSummaryPrefix:       "Current Window",
-	QuotaRefresh:             "↻ Refresh",
-	QuotaCalibrate:           "Calibrate",
-	QuotaRemaining:           "Remaining",
-	QuotaResetInFmt:          "Resets in %s",
-	QuotaResetSoon:           "Resetting soon",
-	QuotaSourceLocal:         "Local Calibrated Window",
-	QuotaSourceJSON:          "Local JSON Source",
-	QuotaSourceUncalibrated:  "Uncalibrated · Setup Needed",
-	QuotaUncalibratedShort:   "Uncalibrated",
-	QuotaUncalibratedTitle:   "Quota Baseline Not Calibrated",
-	QuotaUncalibratedDesc:    "Click Calibrate Now to set your remaining % and reset timer, or configure a local JSON source.",
-	QuotaCalibrateNow:        "Calibrate Now",
-	QuotaTrendTitle:          "Quota Usage Trend",
-	QuotaFilterAll:           "All",
-	QuotaResetMarker:         "↺ Reset",
-	QuotaInspNowSuffix:       " (Now)",
-	QuotaInspDeltaFmt:        "Delta: Gemini %s · Claude & GPT %s",
-	QuotaInsp7dNote:          "Daily lowest remaining window snapshot",
-	QuotaTrendEmpty:          "No trend snapshots yet — calibrate or click Refresh",
-	QuotaTrendSinglePoint:    "First snapshot recorded — trend curve builds as samples accumulate",
-	QuotaCalibTitle:          "Calibrate Quota Baseline",
-	QuotaCalibPrivacyNote:    "Local window tracking only; no host probing or OAuth access",
-	QuotaCalibRemPct:         "Remaining %",
-	QuotaCalibResetLabel:     "Resets in",
-	QuotaCalibHoursUnit:      "h",
-	QuotaCalibMinutesUnit:    "m",
-	QuotaCalibJSONLabel:      "Local JSON Source (Optional)",
-	QuotaCalibJSONHint:       "Local file path or http://127.0.0.1/... URL; blank uses manual baseline",
-	QuotaCalibSave:           "Save",
-	QuotaCalibClear:          "Clear",
-	QuotaCalibCancel:         "Cancel",
-	QuotaErrInvalidPct:       "Enter a valid percentage (0–100)",
-	QuotaErrInvalidReset:     "Enter a valid reset timer (hours ≥ 0, minutes 0–59)",
-	QuotaErrUnsafeJSONSource: "Only local file paths, file://, or localhost/127.0.0.1 URLs allowed",
-	QuotaErrJSONFallbackFmt:  "JSON source failed, using local estimate (%s)",
+	QuotaTitle:             "Account Quota",
+	QuotaFiveHour:          "5-hour limit",
+	QuotaWeekly:            "Weekly limit",
+	QuotaRefresh:           "↻ Refresh",
+	QuotaResetInFmt:        "Resets in %s",
+	QuotaResetSoon:         "Resetting soon",
+	QuotaResetDaysHoursFmt: "%dd %dh",
+	QuotaResetUnknown:      "Reset time unknown",
+	QuotaSetupNeeded:       "See the project instructions to set up quota reading",
+	QuotaUpdateNeeded:      "Update the quota reader and retry",
+	QuotaUnavailable:       "Check your Antigravity sign-in and network connection",
+	QuotaShowingLast:       "Refresh failed. Showing the last quota reading.",
+	QuotaTrendTitle:        "Quota Usage Trend",
+	QuotaFilterAll:         "All",
+	QuotaResetMarker:       "↺ Reset",
+	QuotaInspNowSuffix:     " (Now)",
+	QuotaInspDeltaFmt:      "Delta: Gemini %s · Claude & GPT %s",
+	QuotaInsp7dNote:        "Daily lowest remaining window snapshot",
+	QuotaTrendEmpty:        "No quota samples yet",
+	QuotaTrendSinglePoint:  "First snapshot recorded — trend curve builds as samples accumulate",
 
 	HistoryTitle:           "Usage History",
 	HistoryScopeToday:      "Local Read-Only · Today Hourly",

@@ -1,95 +1,34 @@
 package desktop
 
 import (
+	"errors"
 	"fmt"
 	"math"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/chart"
-	"github.com/oysterhyd/antigravity-monitor/internal/history"
 	"github.com/oysterhyd/antigravity-monitor/internal/i18n"
-	"github.com/oysterhyd/antigravity-monitor/internal/metrics"
 	"github.com/oysterhyd/antigravity-monitor/internal/quota"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/theme"
 )
 
 func (a *App) currentQuotaSnapshot(now time.Time) quota.QuotaSnapshot {
 	if a.quotaSvc == nil {
-		return quota.QuotaSnapshot{Source: quota.SourceUncalibrated}
+		return quota.QuotaSnapshot{}
 	}
 	return a.quotaSvc.State(now)
-}
-
-func (a *App) syncCalibDraftFromSnap(q quota.QuotaSnapshot, now time.Time) {
-	a.calibError = ""
-	if !q.Calibrated {
-		return
-	}
-	a.calibGemPct = fmt.Sprintf("%.0f", math.Round(q.Gemini.RemainingPct))
-	gh, gm := splitResetHM(q.Gemini.ResetAt, now)
-	a.calibGemHours = strconv.Itoa(gh)
-	a.calibGemMins = strconv.Itoa(gm)
-
-	a.calibClaPct = fmt.Sprintf("%.0f", math.Round(q.ClaudeGPT.RemainingPct))
-	ch, cm := splitResetHM(q.ClaudeGPT.ResetAt, now)
-	a.calibClaHours = strconv.Itoa(ch)
-	a.calibClaMins = strconv.Itoa(cm)
-
-	a.calibJSONSource = q.SourcePath
-}
-
-func (a *App) refreshQuotaSample(now time.Time) {
-	if a.quotaSvc == nil {
-		return
-	}
-	var burn history.PoolConsumption
-	if a.historySvc != nil {
-		since := a.quotaSvc.LastSampledAt()
-		if !since.IsZero() {
-			burn = a.historySvc.ConsumptionSince(since)
-		}
-	}
-	_, _ = a.quotaSvc.Refresh(now, burn)
 }
 
 func (a *App) renderQuotaView(c *ui.Context, pal theme.Palette, now time.Time) {
 	tr := a.tr()
 	q := a.currentQuotaSnapshot(now)
+	available := !q.UpdatedAt.IsZero()
 
 	bar := c.TitleBar()
 	rightTopPad := float32(0)
 	if bar.Right > 0 && bar.Height > 0 {
 		rightTopPad = max(float32(18), bar.Height-10)
-	}
-
-	// Build clean subtitle without stray empty separators.
-	var subParts []string
-	if strings.TrimSpace(q.AccountLabel) != "" {
-		subParts = append(subParts, strings.TrimSpace(q.AccountLabel))
-	}
-	if strings.TrimSpace(q.PlanLabel) != "" {
-		subParts = append(subParts, strings.TrimSpace(q.PlanLabel))
-	}
-	if len(subParts) == 0 {
-		switch q.Source {
-		case quota.SourceJSON:
-			subParts = append(subParts, tr.QuotaSourceJSON)
-		case quota.SourceLocal:
-			subParts = append(subParts, tr.QuotaSourceLocal)
-		default:
-			subParts = append(subParts, tr.QuotaSourceUncalibrated)
-		}
-	}
-	subtitle := strings.Join(subParts, " · ")
-
-	gemSummary := "--%"
-	claSummary := "--%"
-	if q.Calibrated {
-		gemSummary = fmtQuotaPct(q.Gemini.RemainingPct)
-		claSummary = fmtQuotaPct(q.ClaudeGPT.RemainingPct)
 	}
 
 	ui.Column(c.Key("quota-canvas")).
@@ -99,53 +38,16 @@ func (a *App) renderQuotaView(c *ui.Context, pal theme.Palette, now time.Time) {
 		Gap(11).
 		Children(func() {
 			// 1. Header
-			var calibBtn ui.Element
 			ui.Row(c.Key("quota-header")).
 				Padding(2, 4, 0, 4).
 				Justify(ui.SpaceBetween).
-				AlignItems(ui.End).
+				AlignItems(ui.Center).
 				Gap(10).
 				DragWindow().
 				Children(func() {
-					ui.Column(c).Gap(4).MinWidth(0).Children(func() {
-						ui.Row(c).Gap(8).AlignItems(ui.Baseline).Children(func() {
-							ui.Text(c, tr.QuotaTitle).FontSize(20).FontWeight(600).LetterSpacing(-0.3).TextColor(pal.Ink1).NoWrap()
-							ui.Text(c, subtitle).FontSize(11.5).TextColor(pal.Ink2).SingleLine()
-						})
-						ui.Row(c.Key("quota-hdr-split")).Gap(7).AlignItems(ui.Center).Children(func() {
-							ui.Text(c, tr.QuotaSummaryPrefix).FontSize(11.5).TextColor(pal.Ink2).NoWrap()
-							costRatioPair(c, pal, "Gemini", gemSummary)
-							ui.Text(c, "/").FontSize(11.5).TextColor(pal.Ink3)
-							costRatioPair(c, pal, "Claude & GPT", claSummary)
-						})
-					})
+					ui.Text(c, tr.QuotaTitle).FontSize(20).FontWeight(600).LetterSpacing(-0.3).TextColor(pal.Ink1).NoWrap()
 
 					ui.Row(c).Padding(rightTopPad, 0, 0, 0).Gap(6).AlignItems(ui.Center).Shrink(0).Children(func() {
-						calibBtn = ui.ButtonBase(c.Key("quota-calib-btn")).
-							Padding(5, 10).
-							Radius(999).
-							Background(pal.CardBg).
-							Border(1, pal.RimEdge).
-							Cursor(ui.CursorPointer).
-							Label(tr.QuotaCalibrate)
-						if calibBtn.Hovered() || a.quotaCalibOpen {
-							calibBtn.Background(pal.CardHover)
-						}
-						calibBtn.Children(func() {
-							ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
-								ui.Icon(c, theme.IconSliders).Size(11.5, 11.5).TextColor(pal.Ink2)
-								ui.Text(c, tr.QuotaCalibrate).FontSize(11).FontWeight(500).TextColor(pal.Ink1).NoWrap()
-							})
-						})
-						if calibBtn.Clicked() {
-							if !a.quotaCalibOpen {
-								a.syncCalibDraftFromSnap(q, now)
-							}
-							a.quotaCalibOpen = !a.quotaCalibOpen
-							a.settingsPopoverOpen = false
-							a.sessionPopoverOpen = false
-						}
-
 						refreshBtn := ui.ButtonBase(c.Key("quota-refresh-btn")).
 							Padding(5, 10).
 							Radius(999).
@@ -160,7 +62,7 @@ func (a *App) renderQuotaView(c *ui.Context, pal theme.Palette, now time.Time) {
 							ui.Text(c, tr.QuotaRefresh).FontSize(11).FontWeight(500).TextColor(pal.Ink1).NoWrap()
 						})
 						if refreshBtn.Clicked() {
-							a.refreshQuotaSample(now)
+							a.requestQuotaRefresh()
 						}
 
 						backBtn := ui.ButtonBase(c.Key("quota-back-btn")).
@@ -181,37 +83,16 @@ func (a *App) renderQuotaView(c *ui.Context, pal theme.Palette, now time.Time) {
 					})
 				})
 
-			// Calibration Popover anchored to Calibrate button.
-			if calibBtn.Valid() {
-				a.renderQuotaCalibrationPopover(c, pal, calibBtn, now)
-			}
-
-			// Compact uncalibrated prompt banner OR JSON fallback warning strip.
-			if !q.Calibrated {
-				banner := theme.GlassCard(c.Key("quota-uncal-banner"), pal, theme.CardOptions{Radius: 16}).
-					Padding(9, 14, 9, 14).Shrink(0)
-				banner.Children(func() {
-					ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(10).Children(func() {
-						ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
-							ui.Text(c, tr.QuotaUncalibratedTitle).FontSize(12).FontWeight(600).TextColor(pal.Ink1).SingleLine()
-							ui.Text(c, tr.QuotaUncalibratedDesc).FontSize(10.5).TextColor(pal.Ink2).SingleLine()
-						})
-						cta := ui.ButtonBase(c.Key("quota-cal-now-btn")).
-							Padding(5, 12).
-							Radius(999).
-							Background(pal.Accent).
-							Cursor(ui.CursorPointer).
-							Label(tr.QuotaCalibrateNow)
-						cta.Children(func() {
-							ui.Text(c, tr.QuotaCalibrateNow).FontSize(11).FontWeight(600).TextColor(ui.RGB(255, 255, 255)).NoWrap()
-						})
-						if cta.Clicked() {
-							a.syncCalibDraftFromSnap(q, now)
-							a.quotaCalibOpen = true
-						}
-					})
-				})
-			} else if q.SourceError != "" {
+			if q.SourceError != nil {
+				message := tr.QuotaUnavailable
+				switch {
+				case available:
+					message = tr.QuotaShowingLast
+				case errors.Is(q.SourceError, quota.ErrCLINotFound):
+					message = tr.QuotaSetupNeeded
+				case errors.Is(q.SourceError, quota.ErrCLIOutdated):
+					message = tr.QuotaUpdateNeeded
+				}
 				ui.Row(c.Key("quota-src-err")).
 					FillWidth().
 					Padding(6, 12).
@@ -220,17 +101,17 @@ func (a *App) renderQuotaView(c *ui.Context, pal theme.Palette, now time.Time) {
 					AlignItems(ui.Center).
 					Shrink(0).
 					Children(func() {
-						ui.Textf(c, tr.QuotaErrJSONFallbackFmt, q.SourceError).
+						ui.Text(c, message).
 							FontSize(11).FontWeight(500).TextColor(pal.Amber).SingleLine()
 					})
 			}
 
 			// 2. Two Side-by-Side Hero Pool Cards (Gemini Models & Claude & GPT Models).
 			ui.Grid(c.Key("quota-pools-grid")).Columns(2).Gap(11).Shrink(0).Children(func() {
-				a.renderQuotaPoolCard(c, pal, "pool-gemini", "Gemini Models", q.Calibrated, q.Gemini, pal.Accent, pal.Teal, now, a.quotaSeries == "gemini" || a.quotaSeries == "all", func() {
+				a.renderQuotaPoolCard(c, pal, "pool-gemini", "Gemini Models", available, q.Gemini, pal.Accent, now, a.quotaSeries == "gemini" || a.quotaSeries == "all", func() {
 					a.quotaSeries = "gemini"
 				})
-				a.renderQuotaPoolCard(c, pal, "pool-claude", "Claude & GPT Models", q.Calibrated, q.ClaudeGPT, pal.Indigo, pal.Amber, now, a.quotaSeries == "claude", func() {
+				a.renderQuotaPoolCard(c, pal, "pool-claude", "Claude & GPT Models", available, q.ClaudeGPT, pal.Indigo, now, a.quotaSeries == "claude", func() {
 					a.quotaSeries = "claude"
 				})
 			})
@@ -243,136 +124,66 @@ func (a *App) renderQuotaView(c *ui.Context, pal theme.Palette, now time.Time) {
 func (a *App) renderQuotaPoolCard(
 	c *ui.Context,
 	pal theme.Palette,
-	key string,
-	title string,
-	calibrated bool,
+	key, title string,
+	available bool,
 	pool quota.PoolQuota,
-	primaryCol ui.Color,
-	secondaryCol ui.Color,
+	color ui.Color,
 	now time.Time,
 	selected bool,
 	onClick func(),
 ) {
 	tr := a.tr()
 	card := theme.GlassCard(c.Key(key), pal, theme.CardOptions{
-		Radius:      20,
-		Selected:    selected,
-		Interactive: true,
-	}).Padding(13, 15, 12, 15).Gap(9).Label(title)
-
-	ringCol := primaryCol
-	pctText := "--%"
-	pctRatio := float32(0)
-	resetText := tr.QuotaUncalibratedShort
-	if calibrated {
-		pctText = fmtQuotaPct(pool.RemainingPct)
-		pctRatio = float32(pool.RemainingPct / 100.0)
-		if pool.RemainingPct < 25 {
-			ringCol = pal.Amber
-		}
-		resetText = fmtResetCountdown(tr, pool.ResetAt, now)
-	}
-
-	subs := pool.SubModels
-	if len(subs) == 0 {
-		if strings.Contains(title, "Gemini") {
-			subs = []quota.SubModelQuota{
-				{Name: metrics.SubModelGeminiNeon, RemainingPct: pool.RemainingPct},
-				{Name: metrics.SubModelGeminiFlash, RemainingPct: pool.RemainingPct},
-			}
-		} else {
-			subs = []quota.SubModelQuota{
-				{Name: metrics.SubModelClaude45, RemainingPct: pool.RemainingPct},
-				{Name: metrics.SubModelGPTCodex, RemainingPct: pool.RemainingPct},
-			}
-		}
-	}
-
+		Radius: 20, Selected: selected, Interactive: true,
+	}).Padding(13, 15, 12, 15).Gap(8).Label(title)
 	card.Children(func() {
-		// Top section: pool title + big % + reset countdown on left; Ring Gauge on right.
-		ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Start).Gap(10).Children(func() {
-			ui.Column(c).Grow(1).MinWidth(0).Gap(3).Children(func() {
-				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-					ui.Box(c).Size(7, 7).Radius(3.5).Background(primaryCol).Shrink(0)
-					ui.Text(c, title).FontSize(12.5).FontWeight(600).TextColor(pal.Ink1).SingleLine()
-				})
-				ui.Text(c, pctText).
-					FontSize(26).
-					FontWeight(600).
-					LetterSpacing(-0.5).
-					FontFeatures("tnum").
-					TextColor(pal.Ink1).
-					NoWrap()
-				ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, tr.QuotaRemaining).FontSize(10.5).TextColor(pal.Ink2).NoWrap()
-					ui.Text(c, "·").FontSize(10.5).TextColor(pal.Ink3)
-					ui.Text(c, resetText).FontSize(10.5).FontFeatures("tnum").TextColor(pal.Ink2).SingleLine()
-				})
-			})
-
-			// 54x54 Apple Circular Ring Gauge.
-			ring := ui.Box(c.Key(key + "-ring")).Size(54, 54).Shrink(0).Center()
-			animRing := ring.AnimateTo("ring", pctRatio, ui.Animation{
-				Spring: ui.SpringOptions{Stiffness: 150, Damping: 22},
-			})
-			trackCol := pal.RingBg
-			arcCol := ringCol
-			ring.Draw(func(p *ui.Painter, r ui.Rect) {
-				cx := r.X + r.W/2
-				cy := r.Y + r.H/2
-				rad := min(r.W, r.H)/2 - 4
-				if rad <= 2 {
-					return
-				}
-				bgPath := (&ui.Path{}).Circle(cx, cy, rad)
-				p.StrokePath(bgPath, 4.8, trackCol)
-
-				frac := animRing
-				if frac < 0 {
-					frac = 0
-				}
-				if frac > 1 {
-					frac = 1
-				}
-				if frac > 0.005 {
-					arc := buildArcPath(cx, cy, rad, -math.Pi/2, float64(frac)*2*math.Pi)
-					p.StrokePath(arc, 4.8, arcCol)
-				}
-			})
-			ring.Children(func() {
-				ui.Text(c, pctText).FontSize(10.5).FontWeight(600).FontFeatures("tnum").TextColor(pal.Ink1).NoWrap()
-			})
+		ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+			ui.Box(c).Size(7, 7).Radius(3.5).Background(color).Shrink(0)
+			ui.Text(c, title).FontSize(12.5).FontWeight(600).TextColor(pal.Ink1).SingleLine()
 		})
+		renderQuotaWindow(c, pal, tr, key+"-five-hour", tr.QuotaFiveHour, pool.FiveHour, available, color, now)
+		ui.Box(c).FillWidth().Height(1).Background(pal.Divider).Shrink(0)
+		renderQuotaWindow(c, pal, tr, key+"-weekly", tr.QuotaWeekly, pool.Weekly, available, color, now)
+	})
+	if card.Clicked() {
+		onClick()
+	}
+}
 
-		// Sub-model mini bars.
-		ui.Column(c).FillWidth().Padding(8, 0, 0, 0).BorderWidth(1, 0, 0, 0).BorderColor(pal.Divider).Gap(6).Children(func() {
-			limit := min(2, len(subs))
-			for i := 0; i < limit; i++ {
-				sm := subs[i]
-				barCol := primaryCol
-				if i > 0 {
-					barCol = secondaryCol
-				}
-				valTxt := "--%"
-				ratio := float32(0)
-				if calibrated {
-					valTxt = fmtQuotaPct(sm.RemainingPct)
-					ratio = float32(sm.RemainingPct / 100.0)
-				}
-				ui.Column(c.Key(fmt.Sprintf("%s-sub-%d", key, i))).FillWidth().Gap(3).Children(func() {
-					ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
-						ui.Text(c, sm.Name).FontSize(10.5).TextColor(pal.Ink2).SingleLine()
-						ui.Text(c, valTxt).FontSize(10.5).FontWeight(500).FontFeatures("tnum").TextColor(pal.Ink1).NoWrap()
-					})
-					theme.LiquidProgressBar(c, pal, fmt.Sprintf("%s-sbar-%d", key, i), ratio, barCol, 4.5, 1.0, false)
-				})
+func renderQuotaWindow(c *ui.Context, pal theme.Palette, tr i18n.Strings, key, label string, window quota.WindowQuota, available bool, color ui.Color, now time.Time) {
+	pct, reset, ratio := quotaWindowDisplay(tr, window, available, now)
+	if available && window.RemainingPct < 25 {
+		color = pal.Amber
+	}
+	ui.Row(c.Key(key)).Gap(10).FillWidth().AlignItems(ui.Center).Children(func() {
+		ui.Column(c).Grow(1).MinWidth(0).Gap(3).Children(func() {
+			ui.Text(c, label).FontSize(11.5).FontWeight(500).TextColor(pal.Ink1).SingleLine()
+			ui.Text(c, reset).FontSize(10.5).FontFeatures("tnum").TextColor(pal.Ink2).SingleLine()
+		})
+		ui.Text(c, pct).FontSize(18).FontWeight(600).FontFeatures("tnum").TextColor(pal.Ink1).NoWrap()
+		ring := ui.Box(c.Key(key+"-ring")).Size(34, 34).Shrink(0)
+		progress := ring.AnimateTo("ring", ratio, ui.Animation{Spring: ui.SpringOptions{Stiffness: 150, Damping: 22}})
+		ring.Draw(func(p *ui.Painter, bounds ui.Rect) {
+			cx := bounds.X + bounds.W/2
+			cy := bounds.Y + bounds.H/2
+			radius := min(bounds.W, bounds.H)/2 - 3
+			if radius <= 0 {
+				return
+			}
+			p.StrokePath((&ui.Path{}).Circle(cx, cy, radius), 3.6, pal.RingBg)
+			if progress > 0.005 {
+				arc := buildArcPath(cx, cy, radius, -math.Pi/2, float64(min(progress, 1))*2*math.Pi)
+				p.StrokePath(arc, 3.6, color)
 			}
 		})
 	})
+}
 
-	if card.Clicked() && onClick != nil {
-		onClick()
+func quotaWindowDisplay(tr i18n.Strings, window quota.WindowQuota, available bool, now time.Time) (string, string, float32) {
+	if !available {
+		return "--%", tr.QuotaResetUnknown, 0
 	}
+	return fmtQuotaPct(window.RemainingPct), fmtResetCountdown(tr, window.ResetAt, now), float32(window.RemainingPct / 100)
 }
 
 func (a *App) renderQuotaTrendCard(c *ui.Context, pal theme.Palette, q quota.QuotaSnapshot, now time.Time) {
@@ -381,9 +192,9 @@ func (a *App) renderQuotaTrendCard(c *ui.Context, pal theme.Palette, q quota.Quo
 		Radius: 20,
 	}).Padding(12, 16, 11, 16).Gap(8).Grow(1).MinHeight(162)
 
-	pts := q.Trend24h
+	pts := q.FiveHourTrend.Last24h
 	if a.quotaRange == "7d" {
-		pts = q.Trend7d
+		pts = q.FiveHourTrend.Last7d
 	}
 
 	card.Children(func() {
@@ -699,153 +510,6 @@ func (a *App) renderQuotaTrendCard(c *ui.Context, pal theme.Palette, q quota.Quo
 	})
 }
 
-func (a *App) renderQuotaCalibrationPopover(c *ui.Context, pal theme.Palette, anchor ui.Element, now time.Time) {
-	tr := a.tr()
-	ui.PopoverBase(c.Key("quota-calib-popover"), anchor, &a.quotaCalibOpen, func(panel ui.Element) {
-		panel.AttachTo(anchor, ui.AnchorBottomEnd, ui.AnchorTopEnd)
-		theme.GlassPopover(panel, pal, 336).Margin(6, 0, 0, 0).Padding(14).Gap(10)
-
-		ui.Column(c).Gap(2).Children(func() {
-			ui.Text(c, tr.QuotaCalibTitle).FontSize(12.5).FontWeight(600).TextColor(pal.Ink1)
-			ui.Text(c, tr.QuotaCalibPrivacyNote).FontSize(10).TextColor(pal.Ink3)
-		})
-
-		// Gemini baseline row
-		a.renderCalibPoolRow(c, pal, "cal-gem", "Gemini Models", pal.Accent, &a.calibGemPct, &a.calibGemHours, &a.calibGemMins)
-		// Claude & GPT baseline row
-		a.renderCalibPoolRow(c, pal, "cal-cla", "Claude & GPT Models", pal.Indigo, &a.calibClaPct, &a.calibClaHours, &a.calibClaMins)
-
-		// Optional local JSON source
-		ui.Column(c.Key("cal-json-wrap")).FillWidth().Gap(4).Children(func() {
-			ui.Text(c, tr.QuotaCalibJSONLabel).FontSize(11).FontWeight(500).TextColor(pal.Ink2)
-			ui.TextInput(c.Key("cal-json-input"), &a.calibJSONSource).
-				FillWidth().
-				Height(28).
-				Padding(4, 8).
-				Radius(8).
-				FontSize(11).
-				Label(tr.QuotaCalibJSONLabel)
-			ui.Text(c, tr.QuotaCalibJSONHint).FontSize(9.5).TextColor(pal.Ink3)
-		})
-
-		if a.calibError != "" {
-			ui.Text(c, a.calibError).FontSize(10.5).FontWeight(500).TextColor(pal.Danger)
-		}
-
-		// Action buttons: Clear | Cancel | Save
-		ui.Row(c.Key("cal-actions")).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Padding(4, 0, 0, 0).Children(func() {
-			clearBtn := ui.ButtonBase(c.Key("cal-clear-btn")).
-				Padding(5, 10).Radius(8).Cursor(ui.CursorPointer).Label(tr.QuotaCalibClear)
-			if clearBtn.Hovered() {
-				clearBtn.Background(pal.SegBg)
-			}
-			clearBtn.Children(func() {
-				ui.Text(c, tr.QuotaCalibClear).FontSize(11).TextColor(pal.Ink2).NoWrap()
-			})
-			if clearBtn.Clicked() && a.quotaSvc != nil {
-				_, _ = a.quotaSvc.ClearCalibration(now)
-				a.calibJSONSource = ""
-				a.calibError = ""
-				a.quotaCalibOpen = false
-			}
-
-			ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-				cancelBtn := ui.ButtonBase(c.Key("cal-cancel-btn")).
-					Padding(5, 11).Radius(8).Background(pal.SegBg).Cursor(ui.CursorPointer).Label(tr.QuotaCalibCancel)
-				if cancelBtn.Hovered() {
-					cancelBtn.Background(pal.CardHover)
-				}
-				cancelBtn.Children(func() {
-					ui.Text(c, tr.QuotaCalibCancel).FontSize(11).FontWeight(500).TextColor(pal.Ink1).NoWrap()
-				})
-				if cancelBtn.Clicked() {
-					a.calibError = ""
-					a.quotaCalibOpen = false
-				}
-
-				saveBtn := ui.ButtonBase(c.Key("cal-save-btn")).
-					Padding(5, 13).Radius(8).Background(pal.Accent).Cursor(ui.CursorPointer).Label(tr.QuotaCalibSave)
-				saveBtn.Children(func() {
-					ui.Text(c, tr.QuotaCalibSave).FontSize(11).FontWeight(600).TextColor(ui.RGB(255, 255, 255)).NoWrap()
-				})
-				if saveBtn.Clicked() {
-					a.submitQuotaCalibration(now)
-				}
-			})
-		})
-	})
-}
-
-func (a *App) renderCalibPoolRow(c *ui.Context, pal theme.Palette, key, title string, dotCol ui.Color, pct, hours, mins *string) {
-	tr := a.tr()
-	ui.Column(c.Key(key)).FillWidth().Gap(4).Children(func() {
-		ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-			ui.Box(c).Size(6.5, 6.5).Radius(3.25).Background(dotCol)
-			ui.Text(c, title).FontSize(11.5).FontWeight(600).TextColor(pal.Ink1)
-		})
-		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, tr.QuotaCalibRemPct).FontSize(10.5).TextColor(pal.Ink2).NoWrap()
-			ui.TextInput(c.Key(key+"-pct"), pct).Width(48).Height(26).Padding(3, 6).Radius(7).FontSize(11).Label(title + " %")
-
-			ui.Text(c, tr.QuotaCalibResetLabel).FontSize(10.5).TextColor(pal.Ink2).NoWrap()
-			ui.TextInput(c.Key(key+"-hr"), hours).Width(36).Height(26).Padding(3, 6).Radius(7).FontSize(11).Label(title + " h")
-			ui.Text(c, tr.QuotaCalibHoursUnit).FontSize(10.5).TextColor(pal.Ink3).NoWrap()
-			ui.TextInput(c.Key(key+"-mn"), mins).Width(36).Height(26).Padding(3, 6).Radius(7).FontSize(11).Label(title + " m")
-			ui.Text(c, tr.QuotaCalibMinutesUnit).FontSize(10.5).TextColor(pal.Ink3).NoWrap()
-		})
-	})
-}
-
-func (a *App) submitQuotaCalibration(now time.Time) {
-	tr := a.tr()
-	if a.quotaSvc == nil {
-		a.quotaCalibOpen = false
-		return
-	}
-
-	if src := strings.TrimSpace(a.calibJSONSource); src != "" {
-		if _, err := a.quotaSvc.SetJSONSource(src, now); err != nil {
-			if err == quota.ErrUnsafeJSONSource {
-				a.calibError = tr.QuotaErrUnsafeJSONSource
-			} else {
-				a.calibError = fmt.Sprintf(tr.QuotaErrJSONFallbackFmt, err.Error())
-			}
-			return
-		}
-		a.calibError = ""
-		a.quotaCalibOpen = false
-		return
-	}
-
-	gPct, err1 := strconv.ParseFloat(strings.TrimSpace(a.calibGemPct), 64)
-	cPct, err2 := strconv.ParseFloat(strings.TrimSpace(a.calibClaPct), 64)
-	if err1 != nil || err2 != nil || math.IsNaN(gPct) || math.IsNaN(cPct) || gPct < 0 || gPct > 100 || cPct < 0 || cPct > 100 {
-		a.calibError = tr.QuotaErrInvalidPct
-		return
-	}
-	gH, err3 := strconv.Atoi(strings.TrimSpace(a.calibGemHours))
-	gM, err4 := strconv.Atoi(strings.TrimSpace(a.calibGemMins))
-	cH, err5 := strconv.Atoi(strings.TrimSpace(a.calibClaHours))
-	cM, err6 := strconv.Atoi(strings.TrimSpace(a.calibClaMins))
-	if err3 != nil || err4 != nil || err5 != nil || err6 != nil || gH < 0 || cH < 0 || gM < 0 || gM > 59 || cM < 0 || cM > 59 {
-		a.calibError = tr.QuotaErrInvalidReset
-		return
-	}
-
-	_, err := a.quotaSvc.Calibrate(quota.CalibrationInput{
-		GeminiRemainingPct: gPct,
-		GeminiResetIn:      time.Duration(gH)*time.Hour + time.Duration(gM)*time.Minute,
-		ClaudeRemainingPct: cPct,
-		ClaudeResetIn:      time.Duration(cH)*time.Hour + time.Duration(cM)*time.Minute,
-	}, now)
-	if err != nil {
-		a.calibError = err.Error()
-		return
-	}
-	a.calibError = ""
-	a.quotaCalibOpen = false
-}
-
 func buildArcPath(cx, cy, r float32, startAngle, sweepAngle float64) *ui.Path {
 	steps := int(math.Max(12, math.Ceil(math.Abs(sweepAngle)/(math.Pi/24))))
 	p := &ui.Path{}
@@ -884,10 +548,18 @@ func fmtSignedPctDelta(delta float64) string {
 }
 
 func fmtResetCountdown(tr i18n.Strings, resetAt, now time.Time) string {
-	if resetAt.IsZero() || !resetAt.After(now) {
+	if resetAt.IsZero() {
+		return tr.QuotaResetUnknown
+	}
+	if !resetAt.After(now) {
 		return tr.QuotaResetSoon
 	}
 	d := resetAt.Sub(now)
+	if d >= 24*time.Hour {
+		days := int(d / (24 * time.Hour))
+		hours := int(d/time.Hour) % 24
+		return fmt.Sprintf(tr.QuotaResetInFmt, fmt.Sprintf(tr.QuotaResetDaysHoursFmt, days, hours))
+	}
 	h := int(d / time.Hour)
 	m := int((d % time.Hour) / time.Minute)
 	if h == 0 && m == 0 {
@@ -898,14 +570,4 @@ func fmtResetCountdown(tr i18n.Strings, resetAt, now time.Time) string {
 		durStr = fmt.Sprintf("%dm", m)
 	}
 	return fmt.Sprintf(tr.QuotaResetInFmt, durStr)
-}
-
-func splitResetHM(resetAt, now time.Time) (int, int) {
-	if resetAt.IsZero() || !resetAt.After(now) {
-		return 0, 0
-	}
-	d := resetAt.Sub(now)
-	h := int(d / time.Hour)
-	m := int((d % time.Hour) / time.Minute)
-	return h, m
 }

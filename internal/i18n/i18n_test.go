@@ -119,7 +119,7 @@ func TestNewStringsR1ToR4(t *testing.T) {
 		formatted := []string{
 			fmt.Sprintf(tr.QuotaResetInFmt, "3h 42m"),
 			fmt.Sprintf(tr.QuotaInspDeltaFmt, "-4%", "-8%"),
-			fmt.Sprintf(tr.QuotaErrJSONFallbackFmt, "timeout"),
+			fmt.Sprintf(tr.QuotaResetDaysHoursFmt, 6, 3),
 			fmt.Sprintf(tr.HistorySubOutFmt, "2.9M"),
 			fmt.Sprintf(tr.HistorySubDailyAvgFmt, "$6.12"),
 			fmt.Sprintf(tr.HistorySubHourlyAvgFmt, "$1.36/h"),

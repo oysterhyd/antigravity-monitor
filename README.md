@@ -10,6 +10,7 @@
 - **零代理本地高精度读取**：只读增量解析 `conversation_summaries.db`、`conversations/<id>.db`（`gen_metadata` Protobuf）与 `transcript.jsonl`
 - **全维度实时指标**：上下文窗口水位、本轮/会话费用、缓存命中率、纳秒级首字时长（TTFT）、**纯吐字速度（Pure Decode TPS）**——每项均支持单次请求回看与加权汇总
 - **父子 Agent 可视化拓扑**：同时清晰区分「整棵会话树汇总」「主 Agent 独立」与「各 Subagent 节点」，支持多对话并行自动跟随与手动锁定
+- **账号额度**：通过已登录的 Antigravity CLI（`agy` 1.1.11 或更高版本）自动读取 Gemini 和 Claude & GPT 的五小时及周额度。应用启动时读取一次，此后每 30 秒刷新，也可在额度页手动刷新。趋势图每五分钟保留一个采样点，覆盖最近七天。升级前的手动校准与估算趋势不会导入新历史。
 
 ## 快速运行与构建
 

@@ -323,8 +323,10 @@ func TestContextBreakdownAndEnglishToggle(t *testing.T) {
 
 type mockHistoryAgg struct{}
 
-func (m *mockHistoryAgg) Refresh(_ context.Context) error                { return nil }
-func (m *mockHistoryAgg) ConsumptionSince(_ time.Time) history.PoolConsumption { return history.PoolConsumption{} }
+func (m *mockHistoryAgg) Refresh(_ context.Context) error { return nil }
+func (m *mockHistoryAgg) ConsumptionSince(_ time.Time) history.PoolConsumption {
+	return history.PoolConsumption{}
+}
 func (m *mockHistoryAgg) Query(r history.Range, now time.Time) history.QueryResult {
 	return history.QueryResult{
 		Range:           r,
@@ -364,12 +366,28 @@ func TestQuotaAndHistoryVisualPreviews(t *testing.T) {
 	p := mock.New(0)
 	defer p.Close()
 
-	qSvc := quota.NewService(filepath.Join(t.TempDir(), "quota_history.json"))
 	now := time.Now()
-	_, _ = qSvc.Calibrate(quota.CalibrationInput{GeminiRemainingPct: 92, GeminiResetIn: 1 * time.Hour, ClaudeRemainingPct: 76, ClaudeResetIn: 4 * time.Hour}, now.Add(-6*time.Hour))
-	qSvc.SampleNow(now.Add(-5*time.Hour+10*time.Minute), history.PoolConsumption{GeminiCostUSD: 2.2, ClaudeCostUSD: 1.5})
-	qSvc.SampleNow(now.Add(-3*time.Hour), history.PoolConsumption{GeminiCostUSD: 1.8, ClaudeCostUSD: 1.2})
-	_, _ = qSvc.Calibrate(quota.CalibrationInput{GeminiRemainingPct: 74, GeminiResetIn: 3*time.Hour + 42*time.Minute, ClaudeRemainingPct: 41, ClaudeResetIn: 2*time.Hour + 15*time.Minute}, now.Add(-5*time.Minute))
+	reading := quota.Reading{
+		Gemini: quota.PoolQuota{
+			FiveHour: quota.WindowQuota{RemainingPct: 92, ResetAt: now.Add(3*time.Hour + 42*time.Minute)},
+			Weekly:   quota.WindowQuota{RemainingPct: 60, ResetAt: now.Add(6*24*time.Hour + 3*time.Hour)},
+		},
+		ClaudeGPT: quota.PoolQuota{
+			FiveHour: quota.WindowQuota{RemainingPct: 76, ResetAt: now.Add(2*time.Hour + 15*time.Minute)},
+			Weekly:   quota.WindowQuota{RemainingPct: 85},
+		},
+	}
+	qSvc := quota.NewService(filepath.Join(t.TempDir(), "quota_history.json"), func(context.Context) (quota.Reading, error) {
+		return reading, nil
+	})
+	if err := qSvc.Refresh(context.Background(), now.Add(-6*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	reading.Gemini.FiveHour.RemainingPct = 74
+	reading.ClaudeGPT.FiveHour.RemainingPct = 41
+	if err := qSvc.Refresh(context.Background(), now.Add(-5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 
 	app := desktop.New(p, desktop.Options{
 		ThemeMode: theme.ModeLight,
@@ -389,22 +407,19 @@ func TestQuotaAndHistoryVisualPreviews(t *testing.T) {
 	mustHaveText(t, tt, "Gemini Models")
 	mustHaveText(t, tt, "Claude & GPT Models")
 	mustHaveText(t, tt, "额度变化趋势")
+	mustHaveText(t, tt, "5 小时额度")
+	mustHaveText(t, tt, "周额度")
+	mustHaveText(t, tt, "60%")
 	savePreview(t, tt, "10_quota_light_zh.png")
 
-	// 2. Account Quota Dark EN + Calibration Popover
+	// 2. Account Quota Dark EN.
 	app.SetThemeMode(theme.ModeDark)
 	app.SetLanguage("en")
 	tt.Frame()
 	tt.Advance(250 * time.Millisecond)
-	if err := tt.Click("Calibrate"); err != nil {
-		t.Fatalf("click Calibrate: %v", err)
-	}
-	tt.Advance(200 * time.Millisecond)
-	mustHaveText(t, tt, "Calibrate Quota Baseline")
-	savePreview(t, tt, "11_quota_dark_en_calib.png")
-	if err := tt.Click("Cancel"); err != nil {
-		t.Fatalf("click Cancel: %v", err)
-	}
+	mustHaveText(t, tt, "5-hour limit")
+	mustHaveText(t, tt, "Weekly limit")
+	savePreview(t, tt, "11_quota_dark_en.png")
 
 	// 3. Usage History Light ZH
 	app.SetThemeMode(theme.ModeLight)

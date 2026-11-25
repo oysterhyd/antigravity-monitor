@@ -4,10 +4,6 @@ package e2e_test
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -28,6 +24,7 @@ type e2eEnv struct {
 	Provider    *source.Provider
 	History     *history.Service
 	Quota       *quota.Service
+	quotaSource *atomic.Pointer[quotaResult]
 	HistoryPath string
 	CachePath   string
 	App         *desktop.App
@@ -101,7 +98,7 @@ func seedRealisticHistoryRoot(t *testing.T) *antigravityFixture {
 	return fx
 }
 
-func newE2EDesktopApp(t *testing.T, fx *antigravityFixture, themeMode, lang string, preCalibrate *quota.CalibrationInput) *e2eEnv {
+func newE2EDesktopApp(t *testing.T, fx *antigravityFixture, themeMode, lang string, initialQuota *quota.Reading) *e2eEnv {
 	t.Helper()
 	var prov *source.Provider
 	var err error
@@ -136,10 +133,17 @@ func newE2EDesktopApp(t *testing.T, fx *antigravityFixture, themeMode, lang stri
 		t.Fatalf("histSvc.Refresh: %v", err)
 	}
 
-	quotaSvc := quota.NewService(histPath)
-	if preCalibrate != nil {
-		if _, err := quotaSvc.Calibrate(*preCalibrate, anchorNow); err != nil {
-			t.Fatalf("preCalibrate: %v", err)
+	var quotaFeed atomic.Pointer[quotaResult]
+	quotaSvc := quota.NewService(histPath, func(context.Context) (quota.Reading, error) {
+		if result := quotaFeed.Load(); result != nil {
+			return result.reading, result.err
+		}
+		return quota.Reading{}, quota.ErrCLIUsage
+	})
+	if initialQuota != nil {
+		quotaFeed.Store(&quotaResult{reading: *initialQuota})
+		if err := quotaSvc.Refresh(context.Background(), anchorNow); err != nil {
+			t.Fatalf("seed quota: %v", err)
 		}
 	}
 
@@ -170,6 +174,7 @@ func newE2EDesktopApp(t *testing.T, fx *antigravityFixture, themeMode, lang stri
 		Provider:    prov,
 		History:     histSvc,
 		Quota:       quotaSvc,
+		quotaSource: &quotaFeed,
 		HistoryPath: histPath,
 		CachePath:   cachePath,
 		App:         app,
@@ -177,121 +182,31 @@ func newE2EDesktopApp(t *testing.T, fx *antigravityFixture, themeMode, lang stri
 	}
 }
 
-type quotaJSONPayload struct {
-	Account   string        `json:"account"`
-	Plan      string        `json:"plan"`
-	UpdatedAt string        `json:"updated_at"`
-	Gemini    quotaJSONPool `json:"gemini"`
-	ClaudeGPT quotaJSONPool `json:"claude_gpt"`
+type quotaResult struct {
+	reading quota.Reading
+	err     error
 }
 
-type quotaJSONPool struct {
-	RemainingPct float64          `json:"remaining_pct"`
-	ResetsInSec  int64            `json:"resets_in_sec"`
-	ResetsAt     string           `json:"resets_at"`
-	Models       []quotaJSONModel `json:"models,omitempty"`
-}
-
-type quotaJSONModel struct {
-	Name         string  `json:"name"`
-	RemainingPct float64 `json:"remaining_pct"`
-}
-
-func defaultQuotaJSONPayload(geminiPct, claudePct float64) quotaJSONPayload {
-	return quotaJSONPayload{
-		Account:   "oyster@gmail.com",
-		Plan:      "Google AI Pro",
-		UpdatedAt: anchorNow.Format(time.RFC3339),
-		Gemini: quotaJSONPool{
-			RemainingPct: geminiPct,
-			ResetsInSec:  13320,
-			ResetsAt:     anchorNow.Add(13320 * time.Second).Format(time.RFC3339),
-			Models: []quotaJSONModel{
-				{Name: "Gemini 4 Neon (High)", RemainingPct: geminiPct - 3},
-				{Name: "Gemini 4 Flash", RemainingPct: 89},
-			},
+func quotaReading(now time.Time, gemini, claude float64) quota.Reading {
+	return quota.Reading{
+		Gemini: quota.PoolQuota{
+			FiveHour: quota.WindowQuota{RemainingPct: gemini, ResetAt: now.Add(3*time.Hour + 42*time.Minute)},
+			Weekly:   quota.WindowQuota{RemainingPct: 60, ResetAt: now.Add(6*24*time.Hour + 3*time.Hour)},
 		},
-		ClaudeGPT: quotaJSONPool{
-			RemainingPct: claudePct,
-			ResetsInSec:  8100,
-			ResetsAt:     anchorNow.Add(8100 * time.Second).Format(time.RFC3339),
-			Models: []quotaJSONModel{
-				{Name: "Claude 4.5 Sonnet / Opus", RemainingPct: claudePct - 3},
-				{Name: "GPT-5.2 / Codex", RemainingPct: 54},
-			},
+		ClaudeGPT: quota.PoolQuota{
+			FiveHour: quota.WindowQuota{RemainingPct: claude, ResetAt: now.Add(2*time.Hour + 15*time.Minute)},
+			Weekly:   quota.WindowQuota{RemainingPct: 85},
 		},
 	}
 }
 
-func writeQuotaJSONFile(t *testing.T, payload quotaJSONPayload) string {
+func (env *e2eEnv) sampleQuota(t *testing.T, now time.Time, reading quota.Reading) quota.QuotaSnapshot {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "quota_source.json")
-	raw, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal quota JSON: %v", err)
+	env.quotaSource.Store(&quotaResult{reading: reading})
+	if err := env.Quota.Refresh(context.Background(), now); err != nil {
+		t.Fatalf("refresh quota: %v", err)
 	}
-	if err := os.WriteFile(p, raw, 0o644); err != nil {
-		t.Fatalf("write quota JSON %s: %v", p, err)
-	}
-	return p
-}
-
-func startLocalQuotaJSONServer(t *testing.T, initial quotaJSONPayload) (*httptest.Server, *atomic.Int32, *atomic.Value) {
-	t.Helper()
-	var statusCode atomic.Int32
-	statusCode.Store(http.StatusOK)
-
-	var bodyVal atomic.Value
-	raw, err := json.Marshal(initial)
-	if err != nil {
-		t.Fatalf("marshal initial quota JSON: %v", err)
-	}
-	bodyVal.Store(string(raw))
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		code := int(statusCode.Load())
-		if code != http.StatusOK {
-			http.Error(w, "simulated source error", code)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(bodyVal.Load().(string)))
-	}))
-	t.Cleanup(srv.Close)
-	return srv, &statusCode, &bodyVal
-}
-
-func writeQuotaHistoryFixture(t *testing.T, historyPath string, now time.Time, geminiPct, claudePct float64, withReset bool) *quota.Service {
-	t.Helper()
-	svc := quota.NewService(historyPath)
-	_, err := svc.Calibrate(quota.CalibrationInput{
-		GeminiRemainingPct: 92,
-		GeminiResetIn:      5 * time.Hour,
-		ClaudeRemainingPct: 78,
-		ClaudeResetIn:      4 * time.Hour,
-	}, now.Add(-6*time.Hour))
-	if err != nil {
-		t.Fatalf("seed initial calibrate: %v", err)
-	}
-	svc.SampleNow(now.Add(-4*time.Hour), history.PoolConsumption{
-		GeminiTokens:  120000,
-		GeminiCostUSD: 1.5,
-		ClaudeTokens:  80000,
-		ClaudeCostUSD: 2.0,
-	})
-	if withReset {
-		// Advance past reset window to generate a reset marker, then calibrate to target levels.
-		svc.SampleNow(now.Add(-30*time.Minute), history.PoolConsumption{})
-	}
-	if _, err := svc.Calibrate(quota.CalibrationInput{
-		GeminiRemainingPct: geminiPct,
-		GeminiResetIn:      3*time.Hour + 42*time.Minute,
-		ClaudeRemainingPct: claudePct,
-		ClaudeResetIn:      2*time.Hour + 15*time.Minute,
-	}, now); err != nil {
-		t.Fatalf("seed target calibrate: %v", err)
-	}
-	return svc
+	return env.Quota.State(now)
 }
 
 func clickMust(t *testing.T, tt *ui.Tester, label string) {

@@ -4,7 +4,6 @@ package e2e_test
 
 import (
 	"context"
-	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
@@ -41,59 +40,41 @@ func TestTier3_QuotaToHistoryToTop3JumpToLiveMonitor(t *testing.T) {
 	mustHaveText(t, env.Tester, "SQL 慢查询排查")
 }
 
-// Tier 3-2: Calibration -> Burn Deduction -> Trend -> Low-Quota Amber Dot -> Auto-Reset
-func TestTier3_CalibrationBurnResetTrendAndAmberDot(t *testing.T) {
+func TestTier3_QuotaRefreshResetTrendAndAmberDot(t *testing.T) {
 	fx := seedRealisticHistoryRoot(t)
 	env := newE2EDesktopApp(t, fx, theme.ModeLight, "en", nil)
 
-	if env.Quota.State(anchorNow).Calibrated {
-		t.Fatalf("expected uncalibrated initial state")
-	}
-
-	_, err := env.Quota.Calibrate(quota.CalibrationInput{
-		GeminiRemainingPct: 28,
-		GeminiResetIn:      1 * time.Hour,
-		ClaudeRemainingPct: 60,
-		ClaudeResetIn:      3 * time.Hour,
-	}, anchorNow)
-	if err != nil {
-		t.Fatalf("Calibrate: %v", err)
-	}
-
-	// Burn Gemini past < 25% threshold.
-	afterBurn := env.Quota.SampleNow(anchorNow.Add(15*time.Minute), history.PoolConsumption{
-		GeminiTokens:  450000,
-		GeminiCostUSD: 3.80,
-	})
-	if afterBurn.Gemini.RemainingPct >= 25 || !afterBurn.HasLowQuota {
-		t.Fatalf("expected Gemini < 25%% and HasLowQuota=true, got %+v", afterBurn)
+	reading := quotaReading(anchorNow, 19, 60)
+	reading.Gemini.FiveHour.ResetAt = anchorNow.Add(time.Hour)
+	if got := env.sampleQuota(t, anchorNow, reading); !got.HasLowQuota {
+		t.Fatalf("expected low quota, got %+v", got)
 	}
 	clickMust(t, env.Tester, "Account Quota")
 	mustHaveText(t, env.Tester, "Quota Usage Trend")
 	verifyPNGFrame(t, env.Tester, "tier3_low_quota_amber.png")
 
-	// Advance past 1h reset -> auto-reset to 100%, amber dot clears, ResetEvent recorded.
-	afterReset := env.Quota.SampleNow(anchorNow.Add(65*time.Minute), history.PoolConsumption{})
-	if afterReset.Gemini.RemainingPct != 100 || afterReset.HasLowQuota {
-		t.Fatalf("expected auto-reset to 100%% and HasLowQuota=false, got %+v", afterReset)
+	reading.Gemini.FiveHour = quota.WindowQuota{RemainingPct: 100}
+	afterReset := env.sampleQuota(t, anchorNow.Add(65*time.Minute), reading)
+	if afterReset.Gemini.FiveHour.RemainingPct != 100 || afterReset.HasLowQuota {
+		t.Fatalf("expected reported reset to restore Gemini quota, got %+v", afterReset)
 	}
 	hasReset := false
-	for _, pt := range afterReset.Trend24h {
+	for _, pt := range afterReset.FiveHourTrend.Last24h {
 		if pt.ResetEvent {
 			hasReset = true
 			break
 		}
 	}
 	if !hasReset {
-		t.Fatalf("expected ResetEvent marker in Trend24h")
+		t.Fatalf("expected reset marker in the five-hour trend")
 	}
 }
 
-// Tier 3-3: Theme & Locale Matrix across Live, Quota (Calibrate Popover), and History
+// Tier 3-3: Theme & Locale Matrix across Live, Quota, and History
 func TestTier3_ThemeAndLocaleMatrixAcrossAllThreeViews(t *testing.T) {
 	fx := seedRealisticHistoryRoot(t)
-	cal := quota.CalibrationInput{GeminiRemainingPct: 74, GeminiResetIn: 3 * time.Hour, ClaudeRemainingPct: 41, ClaudeResetIn: 2 * time.Hour}
-	env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &cal)
+	reading := quotaReading(anchorNow, 74, 41)
+	env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &reading)
 
 	combos := []struct {
 		mode string
@@ -155,44 +136,9 @@ func TestTier3_HistoryRangeKPIAndMetricBidirectionalSync(t *testing.T) {
 	mustHaveText(t, env.Tester, "Token Breakdown")
 }
 
-// Tier 3-5: JSON Source Override, HTTP 500 Fallback, and Restart Persistence
-func TestTier3_JSONSourceOverrideAndPersistenceRestart(t *testing.T) {
-	histPath := filepath.Join(t.TempDir(), "quota_history.json")
-	srv, code, _ := startLocalQuotaJSONServer(t, defaultQuotaJSONPayload(72, 48))
-
-	svc1 := quota.NewService(histPath)
-	snap1, err := svc1.SetJSONSource(srv.URL, anchorNow)
-	if err != nil || snap1.Gemini.RemainingPct != 72 {
-		t.Fatalf("SetJSONSource: snap=%+v err=%v", snap1, err)
-	}
-
-	// Simulate HTTP 500 -> retains last valid estimate with SourceError populated.
-	code.Store(http.StatusInternalServerError)
-	snapErr, _ := svc1.Refresh(anchorNow.Add(5*time.Minute), history.PoolConsumption{})
-	if snapErr.SourceError == "" || snapErr.Gemini.RemainingPct != 72 {
-		t.Fatalf("expected fallback estimate + SourceError on 500, got %+v", snapErr)
-	}
-
-	// Manual calibration clears source override and persists across restart.
-	if _, err := svc1.Calibrate(quota.CalibrationInput{
-		GeminiRemainingPct: 88, GeminiResetIn: 4 * time.Hour,
-		ClaudeRemainingPct: 62, ClaudeResetIn: 3 * time.Hour,
-	}, anchorNow.Add(10*time.Minute)); err != nil {
-		t.Fatalf("Calibrate: %v", err)
-	}
-
-	svc2 := quota.NewService(histPath)
-	reloaded := svc2.State(anchorNow.Add(10 * time.Minute))
-	if !reloaded.Calibrated || reloaded.Gemini.RemainingPct != 88 || len(reloaded.Trend24h) < 2 {
-		t.Fatalf("expected calibration & trend persisted across restart, got %+v", reloaded)
-	}
-}
-
-// Tier 3-6: Incremental SQLite Cache + Live Quota Consumption Deduction Alignment
-func TestTier3_IncrementalSQLiteCachePlusLiveQuotaDeduction(t *testing.T) {
+func TestTier3_IncrementalSQLiteCacheAndIndependentQuota(t *testing.T) {
 	fx := seedRealisticHistoryRoot(t)
 	cachePath := filepath.Join(t.TempDir(), "usage_cache.json")
-	histPath := filepath.Join(t.TempDir(), "quota_history.json")
 	calc, _ := metrics.NewDefaultCalculator()
 
 	histSvc := history.NewAggregator(fx.RootDir, cachePath, calc)
@@ -201,15 +147,10 @@ func TestTier3_IncrementalSQLiteCachePlusLiveQuotaDeduction(t *testing.T) {
 	}
 	beforeAll := histSvc.Query(history.RangeAll, anchorNow)
 
-	quotaSvc := quota.NewService(histPath)
-	if _, err := quotaSvc.Calibrate(quota.CalibrationInput{
-		GeminiRemainingPct: 80, GeminiResetIn: 4 * time.Hour,
-		ClaudeRemainingPct: 80, ClaudeResetIn: 4 * time.Hour,
-	}, anchorNow); err != nil {
-		t.Fatalf("Calibrate: %v", err)
-	}
+	reading := quotaReading(anchorNow, 80, 80)
+	env := newE2EDesktopApp(t, fx, theme.ModeLight, "en", &reading)
 
-	// Append new Gemini + Claude WAL rows after calibration timestamp.
+	// Append new Gemini and Claude WAL rows after the quota sample.
 	tPlus := anchorNow.Add(10 * time.Minute)
 	fx.AppendWALGenRow(t, "conv-today-active", genSpec{
 		GenIndex: 20, StepIndices: []int{30}, ModelSlug: "gemini-4-neon",
@@ -236,9 +177,8 @@ func TestTier3_IncrementalSQLiteCachePlusLiveQuotaDeduction(t *testing.T) {
 	if delta.GeminiTokens <= 0 || delta.ClaudeTokens <= 0 {
 		t.Fatalf("expected positive Gemini & Claude deltas, got %+v", delta)
 	}
-	qSnap := quotaSvc.SampleNow(tPlus, delta)
-	if qSnap.Gemini.RemainingPct >= 80 || qSnap.ClaudeGPT.RemainingPct >= 80 {
-		t.Fatalf("expected both quota pools to deduct from live consumption, got %+v", qSnap)
+	if got := env.Quota.State(tPlus); got.Reading != reading {
+		t.Fatalf("local usage changed reported quota: %+v", got)
 	}
 }
 

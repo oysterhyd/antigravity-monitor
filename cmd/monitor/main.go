@@ -42,12 +42,10 @@ func main() {
 	provider := buildProvider(*useMock, *mockInterval, *dataDir, settings)
 	defer func() { _ = provider.Close() }()
 
-	// Initialize read-only Usage History aggregator & compliant Account Quota tracker.
+	// Initialize the Usage History and Account Quota readers.
 	var histSvc history.Aggregator
 	var quotaSvc quota.Tracker
-	if *useMock {
-		quotaSvc = quota.NewService("")
-	} else {
+	if !*useMock {
 		calc, calcErr := metrics.NewCalculator(settings.PricingOverridePath)
 		if calcErr != nil {
 			calc, _ = metrics.NewDefaultCalculator()
@@ -57,7 +55,7 @@ func main() {
 		quotaHistPath := filepath.Join(cfgDir, "quota_history.json")
 		hist := history.NewAggregator(*dataDir, histCachePath, calc)
 		histSvc = hist
-		quotaSvc = quota.NewService(quotaHistPath)
+		quotaSvc = quota.NewService(quotaHistPath, quota.ReadCLI)
 
 		// Warm up history index asynchronously so startup stays instant, then refresh periodically.
 		go func() {
@@ -196,9 +194,10 @@ func newDesktopHost(provider model.SnapshotProvider, histSvc history.Aggregator,
 	}
 
 	h.app = desktop.New(provider, desktop.Options{
-		Settings: &s,
-		History:  histSvc,
-		Quota:    quotaSvc,
+		Settings:      &s,
+		History:       histSvc,
+		Quota:         quotaSvc,
+		QuotaInterval: 30 * time.Second,
 		OnSettingsChange: func(next model.Settings) {
 			prevLaunch := h.settings.LaunchAtLogin
 			next = config.Normalize(next)

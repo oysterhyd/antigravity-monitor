@@ -7,9 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oysterhyd/antigravity-monitor/internal/history"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
-	"github.com/oysterhyd/antigravity-monitor/internal/quota"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/desktop"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/theme"
 )
@@ -199,13 +197,8 @@ func TestR1SidebarFooterBoundaries(t *testing.T) {
 func TestR1GaugeAmberDot(t *testing.T) {
 	t.Run("HealthyQuotaHidesDot", func(t *testing.T) {
 		fx := seedRealisticHistoryRoot(t)
-		cal := quota.CalibrationInput{
-			GeminiRemainingPct: 80,
-			GeminiResetIn:      4 * time.Hour,
-			ClaudeRemainingPct: 60,
-			ClaudeResetIn:      3 * time.Hour,
-		}
-		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &cal)
+		reading := quotaReading(anchorNow, 80, 60)
+		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &reading)
 		snap := env.Quota.State(anchorNow)
 		if snap.HasLowQuota {
 			t.Fatalf("expected HasLowQuota=false for 80%%/60%%, got true")
@@ -214,13 +207,8 @@ func TestR1GaugeAmberDot(t *testing.T) {
 
 	t.Run("GeminiBelow25TriggersDot", func(t *testing.T) {
 		fx := seedRealisticHistoryRoot(t)
-		cal := quota.CalibrationInput{
-			GeminiRemainingPct: 18,
-			GeminiResetIn:      2 * time.Hour,
-			ClaudeRemainingPct: 70,
-			ClaudeResetIn:      3 * time.Hour,
-		}
-		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &cal)
+		reading := quotaReading(anchorNow, 18, 70)
+		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &reading)
 		if !env.Quota.State(anchorNow).HasLowQuota {
 			t.Fatalf("expected HasLowQuota=true when Gemini=18%%")
 		}
@@ -229,13 +217,8 @@ func TestR1GaugeAmberDot(t *testing.T) {
 
 	t.Run("ClaudeBelow25TriggersDot", func(t *testing.T) {
 		fx := seedRealisticHistoryRoot(t)
-		cal := quota.CalibrationInput{
-			GeminiRemainingPct: 85,
-			GeminiResetIn:      4 * time.Hour,
-			ClaudeRemainingPct: 12,
-			ClaudeResetIn:      1 * time.Hour,
-		}
-		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &cal)
+		reading := quotaReading(anchorNow, 85, 12)
+		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &reading)
 		if !env.Quota.State(anchorNow).HasLowQuota {
 			t.Fatalf("expected HasLowQuota=true when Claude=12%%")
 		}
@@ -243,39 +226,24 @@ func TestR1GaugeAmberDot(t *testing.T) {
 
 	t.Run("BothBelow25TriggersDot", func(t *testing.T) {
 		fx := seedRealisticHistoryRoot(t)
-		cal := quota.CalibrationInput{
-			GeminiRemainingPct: 10,
-			GeminiResetIn:      1 * time.Hour,
-			ClaudeRemainingPct: 5,
-			ClaudeResetIn:      1 * time.Hour,
-		}
-		env := newE2EDesktopApp(t, fx, theme.ModeDark, "en", &cal)
+		reading := quotaReading(anchorNow, 10, 5)
+		env := newE2EDesktopApp(t, fx, theme.ModeDark, "en", &reading)
 		if !env.Quota.State(anchorNow).HasLowQuota {
 			t.Fatalf("expected HasLowQuota=true when both pools < 25%%")
 		}
 	})
 
-	t.Run("BurnCrossesThresholdUpdatesDot", func(t *testing.T) {
+	t.Run("WeeklyRefreshCrossesThresholdAndUpdatesDot", func(t *testing.T) {
 		fx := seedRealisticHistoryRoot(t)
-		cal := quota.CalibrationInput{
-			GeminiRemainingPct: 26,
-			GeminiResetIn:      3 * time.Hour,
-			ClaudeRemainingPct: 70,
-			ClaudeResetIn:      3 * time.Hour,
-		}
-		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &cal)
+		reading := quotaReading(anchorNow, 26, 70)
+		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &reading)
 		if env.Quota.State(anchorNow).HasLowQuota {
 			t.Fatalf("expected HasLowQuota=false at 26%%")
 		}
-		after := env.Quota.SampleNow(anchorNow.Add(10*time.Minute), history.PoolConsumption{
-			GeminiTokens:  600000,
-			GeminiCostUSD: 4.5,
-		})
-		if after.Gemini.RemainingPct >= 25 {
-			t.Fatalf("expected significant Gemini burn to cross <25%%, got %.2f%%", after.Gemini.RemainingPct)
-		}
+		reading.Gemini.Weekly.RemainingPct = 24
+		after := env.sampleQuota(t, anchorNow.Add(10*time.Minute), reading)
 		if !after.HasLowQuota {
-			t.Fatalf("expected HasLowQuota=true after burn crossed below 25%%")
+			t.Fatalf("expected weekly quota below 25%% to trigger HasLowQuota")
 		}
 	})
 }
@@ -284,8 +252,8 @@ func TestR1GaugeAmberDot(t *testing.T) {
 func TestR1AmberDotBoundaries(t *testing.T) {
 	t.Run("Exact24PctShowsDot", func(t *testing.T) {
 		fx := seedRealisticHistoryRoot(t)
-		cal := quota.CalibrationInput{GeminiRemainingPct: 24, GeminiResetIn: time.Hour, ClaudeRemainingPct: 80, ClaudeResetIn: time.Hour}
-		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &cal)
+		reading := quotaReading(anchorNow, 24, 80)
+		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &reading)
 		if !env.Quota.State(anchorNow).HasLowQuota {
 			t.Fatalf("24%% < 25%% must trigger HasLowQuota=true")
 		}
@@ -293,8 +261,8 @@ func TestR1AmberDotBoundaries(t *testing.T) {
 
 	t.Run("Exact25PctHidesDot", func(t *testing.T) {
 		fx := seedRealisticHistoryRoot(t)
-		cal := quota.CalibrationInput{GeminiRemainingPct: 25, GeminiResetIn: time.Hour, ClaudeRemainingPct: 25, ClaudeResetIn: time.Hour}
-		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &cal)
+		reading := quotaReading(anchorNow, 25, 25)
+		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &reading)
 		if env.Quota.State(anchorNow).HasLowQuota {
 			t.Fatalf("exact 25%% must NOT trigger HasLowQuota (strict < 25%%)")
 		}
@@ -302,38 +270,32 @@ func TestR1AmberDotBoundaries(t *testing.T) {
 
 	t.Run("Fractional24Point9PctShowsDot", func(t *testing.T) {
 		fx := seedRealisticHistoryRoot(t)
-		cal := quota.CalibrationInput{GeminiRemainingPct: 24.9, GeminiResetIn: time.Hour, ClaudeRemainingPct: 50, ClaudeResetIn: time.Hour}
-		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &cal)
+		reading := quotaReading(anchorNow, 24.9, 50)
+		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &reading)
 		if !env.Quota.State(anchorNow).HasLowQuota {
 			t.Fatalf("24.9%% < 25.0%% must trigger HasLowQuota=true")
 		}
 	})
 
-	t.Run("UncalibratedZeroPctHidesDot", func(t *testing.T) {
+	t.Run("MissingQuotaHidesDot", func(t *testing.T) {
 		fx := seedRealisticHistoryRoot(t)
 		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", nil)
 		st := env.Quota.State(anchorNow)
-		if st.Calibrated {
-			t.Fatalf("expected Calibrated=false initially")
+		if !st.UpdatedAt.IsZero() {
+			t.Fatalf("expected no initial quota sample")
 		}
 		if st.HasLowQuota {
-			t.Fatalf("uncalibrated state must never trigger HasLowQuota false alarm")
+			t.Fatalf("missing quota must not trigger HasLowQuota")
 		}
 	})
 
-	t.Run("ZeroPctBoundaryCalibrated", func(t *testing.T) {
+	t.Run("ReportedZeroPctTriggersDot", func(t *testing.T) {
 		fx := seedRealisticHistoryRoot(t)
-		cal := quota.CalibrationInput{GeminiRemainingPct: 0, GeminiResetIn: time.Hour, ClaudeRemainingPct: 50, ClaudeResetIn: time.Hour}
-		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &cal)
-		st := env.Quota.SampleNow(anchorNow.Add(5*time.Minute), history.PoolConsumption{
-			GeminiTokens:  1000000,
-			GeminiCostUSD: 10.0,
-		})
-		if st.Gemini.RemainingPct != 0 {
-			t.Fatalf("expected RemainingPct clamped to 0, got %v", st.Gemini.RemainingPct)
-		}
+		reading := quotaReading(anchorNow, 0, 50)
+		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", &reading)
+		st := env.Quota.State(anchorNow)
 		if !st.HasLowQuota {
-			t.Fatalf("calibrated 0%% must trigger HasLowQuota=true")
+			t.Fatalf("reported 0%% must trigger HasLowQuota=true")
 		}
 	})
 }
@@ -556,16 +518,15 @@ func TestR1ViewSwitchBoundaries(t *testing.T) {
 		}
 	})
 
-	t.Run("ClosePopoversOnQuotaToLive", func(t *testing.T) {
+	t.Run("BackToLiveFromQuota", func(t *testing.T) {
 		fx := seedRealisticHistoryRoot(t)
 		env := newE2EDesktopApp(t, fx, theme.ModeLight, "zh", nil)
 		clickMust(t, env.Tester, "账号实时额度")
-		clickMust(t, env.Tester, "校准")
 		clickMust(t, env.Tester, "← 返回监控")
 		if env.App.ActiveView() != desktop.ViewLive {
 			t.Fatalf("expected ViewLive")
 		}
-		mustNotHaveText(t, env.Tester, "本地 JSON 源")
+		mustNotHaveText(t, env.Tester, "周额度")
 	})
 
 	t.Run("InvalidActiveViewFallback", func(t *testing.T) {

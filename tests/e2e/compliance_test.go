@@ -17,7 +17,7 @@ import (
 
 // TestCompliance_NoUndocumentedProbingOrOAuthAccess enforces R2 security &
 // compliance across all non-test production Go files:
-//   - Rule A: No process execution or process/DLL token scraping.
+//   - Rule A: Only the documented quota CLI runner may execute a process. No process/DLL token scraping.
 //   - Rule B: No private OAuth / IDE credential store access.
 //   - Rule C: No raw sockets/probing, restricted net/http, no undocumented local ports.
 //   - Rule D: Strict read-only Antigravity SQLite guarantees (no immutable=1, no mutations).
@@ -135,8 +135,7 @@ func TestCompliance_NoUndocumentedProbingOrOAuthAccess(t *testing.T) {
 			}
 			importAliases[localName] = impPath
 
-			// Rule A: No os/exec anywhere in production code.
-			if impPath == "os/exec" {
+			if impPath == "os/exec" && relSlash != "internal/quota/cli.go" {
 				pos := fset.Position(imp.Pos())
 				violations = append(violations, formatViolation(pos, "Rule A: forbidden import os/exec"))
 			}
