@@ -66,6 +66,9 @@ func TestDesktopTreeAndSingleNodeSemantics(t *testing.T) {
 	if tt.HasText("最高水位") {
 		t.Fatalf("single-node view should not show 最高水位; texts=%q", tt.Texts())
 	}
+	if tt.HasText("合计") {
+		t.Fatalf("single-node view should not show tree-wide 合计 cost split; texts=%q", tt.Texts())
+	}
 	mustHaveText(t, tt, "本轮费用")
 	mustHaveText(t, tt, "缓存命中")
 	mustHaveText(t, tt, "首字时长")
@@ -124,8 +127,13 @@ func TestDesktopTreeAndSingleNodeSemantics(t *testing.T) {
 	if tt.HasText("整棵会话树") {
 		t.Fatalf("single-agent conversation should hide 整棵会话树; texts=%q", tt.Texts())
 	}
+	if tt.HasText("自动跟随活跃对话") || tt.HasText("已锁定当前对话") || tt.HasText("合并统计") {
+		t.Fatalf("sidebar top cards should omit noisy subtitles; texts=%q", tt.Texts())
+	}
 	mustHaveText(t, tt, "仅主 Agent")
-	mustHaveText(t, tt, "已锁定当前对话")
+	if app.Settings().AutoFollowActive {
+		t.Fatalf("manual conversation selection should disable AutoFollowActive")
+	}
 }
 
 func TestDesktopBurstAndThemeSwitch(t *testing.T) {
@@ -443,8 +451,43 @@ func TestQuotaAndHistoryVisualPreviews(t *testing.T) {
 	}
 	tt.Advance(250 * time.Millisecond)
 	mustHaveText(t, tt, "Usage History")
-	mustHaveText(t, tt, "Cost by Model Family")
+	mustHaveText(t, tt, "Cost Trend")
 	savePreview(t, tt, "13_history_dark_en_cost.png")
+}
+
+func TestDesktopMaximized1920x1080Proportions(t *testing.T) {
+	p := mock.New(0)
+	defer p.Close()
+
+	app := desktop.New(p, desktop.Options{
+		ThemeMode: theme.ModeLight,
+		History:   &mockHistoryAgg{},
+	})
+	defer app.Close()
+
+	// Single-agent maximized view (matches user's 1920x1080 screenshot scenario).
+	app.FocusAgent(model.RootAgentID)
+	tt := ui.NewTester(app.View, 1920, 1080)
+	tt.Advance(300 * time.Millisecond)
+	mustHaveText(t, tt, "上下文窗口")
+
+	// Verify right canvas is centered within editorial max-width instead of stretching edge-to-edge.
+	ctxRect, ok := tt.Find("上下文窗口")
+	if !ok {
+		t.Fatalf("expected 上下文窗口 in maximized view")
+	}
+	if ctxRect.X < 420 {
+		t.Fatalf("expected centered right canvas on 1920px wide window (X >= 420), got %+v", ctxRect)
+	}
+	savePreview(t, tt, "14_max_1920x1080_live_zh.png")
+
+	// Also verify History view at 1920x1080.
+	if err := tt.Click("历史消耗统计"); err != nil {
+		t.Fatalf("click history nav: %v", err)
+	}
+	tt.Advance(250 * time.Millisecond)
+	mustHaveText(t, tt, "历史消耗统计")
+	savePreview(t, tt, "15_max_1920x1080_history_zh.png")
 }
 
 func savePreview(t *testing.T, tt *ui.Tester, filename string) {

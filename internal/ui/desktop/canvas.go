@@ -10,11 +10,12 @@ import (
 )
 
 func (a *App) renderMainCanvas(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot, vm scopeView, now time.Time) {
+	lm := a.layout
 	ui.Column(c.Key("main-canvas")).
 		Grow(1).
 		MinWidth(0).
 		Padding(4, 6, 2, 6).
-		Gap(12).
+		Gap(lm.sectionGap).
 		Children(func() {
 			a.renderMainHeader(c, pal, conv, vm)
 			a.renderHeroContextCard(c, pal, conv, vm, now)
@@ -38,17 +39,16 @@ func (a *App) renderMainHeader(c *ui.Context, pal theme.Palette, conv model.Conv
 
 	recentHint := tr.NoRequests
 	if vm.hasLatestReq {
-		src := tr.AgentName(vm.latestReq.AgentID, vm.latestSource)
-		recentHint = fmt.Sprintf(tr.RecentFmt, vm.latestReq.Seq, src)
+		if vm.isTreeView {
+			src := tr.AgentName(vm.latestReq.AgentID, vm.latestSource)
+			recentHint = fmt.Sprintf(tr.RecentFmt, vm.latestReq.Seq, src)
+		} else {
+			recentHint = fmt.Sprintf(tr.RecentNodeFmt, vm.latestReq.Seq)
+		}
 	}
 
-	// On Windows/Linux TitleBarHidden, add subtle top clearance on the right column
-	// so the activity indicator never overlaps the native minimize/maximize/close buttons.
-	bar := c.TitleBar()
-	rightTopPad := float32(0)
-	if bar.Right > 0 && bar.Height > 0 {
-		rightTopPad = max(float32(18), bar.Height-10)
-	}
+	lm := a.layout
+	rightTopPad := lm.headerRightPadT
 
 	ui.Row(c.Key("main-header")).
 		Padding(2, 4, 0, 4).
@@ -57,21 +57,23 @@ func (a *App) renderMainHeader(c *ui.Context, pal theme.Palette, conv model.Conv
 		Gap(12).
 		DragWindow().
 		Children(func() {
-			// Left: current scope title + monochrome 3-way cost split.
+			// Left: current scope title (+ monochrome 3-way cost split only in whole-tree view).
 			ui.Column(c).Gap(6).MinWidth(0).Children(func() {
 				ui.Row(c).Gap(8).AlignItems(ui.Baseline).Children(func() {
-					ui.Text(c, title).FontSize(20).FontWeight(600).LetterSpacing(-0.3).TextColor(pal.Ink1).NoWrap()
+					ui.Text(c, title).FontSize(lm.headerTitleSize).FontWeight(600).LetterSpacing(-0.3).TextColor(pal.Ink1).NoWrap()
 					ui.Text(c, subtitle).FontSize(12).TextColor(pal.Ink2).SingleLine()
 				})
 
-				// Quiet monochrome 3-way ratio: Total / Main / Sub.
-				ui.Row(c.Key("hdr-split")).Gap(8).AlignItems(ui.Center).Children(func() {
-					costRatioPair(c, pal, tr.CostTotal, hdrAll)
-					ui.Text(c, "/").FontSize(11.5).TextColor(pal.Ink3)
-					costRatioPair(c, pal, tr.CostRoot, hdrRoot)
-					ui.Text(c, "/").FontSize(11.5).TextColor(pal.Ink3)
-					costRatioPair(c, pal, tr.CostSub, hdrSub)
-				})
+				if vm.isTreeView {
+					// Quiet monochrome 3-way ratio: Total / Main / Sub.
+					ui.Row(c.Key("hdr-split")).Gap(8).AlignItems(ui.Center).Children(func() {
+						costRatioPair(c, pal, tr.CostTotal, hdrAll)
+						ui.Text(c, "/").FontSize(11.5).TextColor(pal.Ink3)
+						costRatioPair(c, pal, tr.CostRoot, hdrRoot)
+						ui.Text(c, "/").FontSize(11.5).TextColor(pal.Ink3)
+						costRatioPair(c, pal, tr.CostSub, hdrSub)
+					})
+				}
 			})
 
 			// Right: quiet activity hint + optional dev harness controls.
@@ -187,10 +189,11 @@ func costRatioPair(c *ui.Context, pal theme.Palette, label, val string) {
 
 func (a *App) renderHeroContextCard(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot, vm scopeView, now time.Time) {
 	tr := a.tr()
+	lm := a.layout
 	card := theme.GlassCard(c.Key("hero-context-card"), pal, theme.CardOptions{
 		Radius:    20,
 		PingAlpha: a.heroPulse.Alpha(now),
-	}).Padding(13, 16, 12, 16).Gap(9).Shrink(0)
+	}).Padding(lm.cardPadY+1, lm.cardPadX, lm.cardPadY, lm.cardPadX).Gap(9 + 2*lm.scale).Shrink(0)
 
 	pctVal := a.springs.Value("heroCtxPct", vm.activeAgent.ContextRatio*100)
 	peakRatio := vm.activeAgent.ContextRatio
@@ -254,7 +257,7 @@ func (a *App) renderHeroContextCard(c *ui.Context, pal theme.Palette, conv model
 				if vm.isTreeView {
 					ui.Text(c, tr.PeakWatermark).FontSize(11).TextColor(pal.Ink3).NoWrap()
 					ui.Text(c, fmtPct(pctVal)).
-						FontSize(20).
+						FontSize(lm.heroPctSize).
 						FontWeight(600).
 						LetterSpacing(-0.3).
 						FontFeatures("tnum").
@@ -264,7 +267,7 @@ func (a *App) renderHeroContextCard(c *ui.Context, pal theme.Palette, conv model
 						FontSize(12).TextColor(pal.Ink2).NoWrap()
 				} else {
 					ui.Text(c, fmtPct(pctVal)).
-						FontSize(20).
+						FontSize(lm.heroPctSize).
 						FontWeight(600).
 						LetterSpacing(-0.3).
 						FontFeatures("tnum").
@@ -353,7 +356,7 @@ func (a *App) renderHeroContextCard(c *ui.Context, pal theme.Palette, conv model
 			_, hov := theme.SegmentedContextBar(
 				c, pal, "bar-single-"+vm.activeAgent.ID,
 				float32(ratio), vm.activeAgent.ContextSegments,
-				10, 1.0,
+				lm.heroBarH, 1.0,
 				conv.Running && conv.ActiveAgentID == vm.activeAgent.ID,
 				agWarn, a.hoverCtxSegIdx,
 			)
@@ -458,14 +461,15 @@ func (a *App) renderKPIGrid(c *ui.Context, pal theme.Palette, vm scopeView) {
 		},
 	}
 
-	ui.Grid(c.Key("kpi-grid")).Columns(4).Gap(12).Children(func() {
+	lm := a.layout
+	ui.Grid(c.Key("kpi-grid")).Columns(4).Gap(lm.sectionGap).Children(func() {
 		for _, sp := range specs {
 			selected := a.metric == sp.kind
 			tile := theme.GlassCard(c.Key("kpi-"+string(sp.kind)), pal, theme.CardOptions{
 				Radius:      20,
 				Selected:    selected,
 				Interactive: true,
-			}).Padding(15, 15, 14, 15).Gap(10).Label(sp.title)
+			}).Padding(lm.kpiPadY, lm.kpiPadX, lm.kpiPadY-1, lm.kpiPadX).Gap(10 + 2*lm.scale).Label(sp.title)
 
 			tile.Children(func() {
 				ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
@@ -475,7 +479,7 @@ func (a *App) renderKPIGrid(c *ui.Context, pal theme.Palette, vm scopeView) {
 
 				ui.Column(c).Gap(3).MinWidth(0).Children(func() {
 					ui.Text(c, sp.mainVal).
-						FontSize(23).
+						FontSize(lm.kpiValueSize).
 						FontWeight(600).
 						LetterSpacing(-0.4).
 						FontFeatures("tnum").

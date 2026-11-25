@@ -251,7 +251,7 @@ func (ctl *Controller) renderHeader(c *ui.Context, pal palette, conv model.Conve
 					ui.Column(c).FillWidth().Gap(6).Children(func() {
 						// Auto-follow toggle header
 						autoFollow := st.Settings.AutoFollowActive
-						ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Padding(2, 6, 6, 6).Children(func() {
+						ui.Row(c).FillWidth().AlignItems(ui.Center).Justify(ui.SpaceBetween).Padding(2, 6, 6, 6).Children(func() {
 							ui.Text(c, tr.AutoFollowShort).FontSize(11).FontWeight(500).TextColor(pal.Ink2)
 							sw := ui.Switch(c.Key("pop-autofollow"), &autoFollow).Label(tr.AutoFollowShort)
 							if sw.Changed() {
@@ -260,7 +260,7 @@ func (ctl *Controller) renderHeader(c *ui.Context, pal palette, conv model.Conve
 								})
 							}
 						})
-						ui.Box(c).AlignSelf(ui.Stretch).Height(1).Background(pal.Divider)
+						ui.Box(c).FillWidth().Height(1).Background(pal.Divider)
 
 						if len(st.Snapshot.Conversations) == 0 {
 							ui.Text(c, tr.NoLocalSessions).FontSize(11).TextColor(pal.Ink3).Padding(8, 6)
@@ -273,7 +273,7 @@ func (ctl *Controller) renderHeader(c *ui.Context, pal palette, conv model.Conve
 									item := item
 									selected := item.ID == st.SelectedConvID
 									row := ui.ButtonBase(c.Key("conv-item-" + item.ID)).
-										AlignSelf(ui.Stretch).Padding(7, 9).Radius(10).Cursor(ui.CursorPointer)
+										FillWidth().Padding(7, 9).Radius(10).Cursor(ui.CursorPointer)
 									if selected {
 										row.Background(pal.AccentSoft).Border(1, pal.Accent.Alpha(0.24))
 									} else if row.Hovered() {
@@ -297,16 +297,16 @@ func (ctl *Controller) renderHeader(c *ui.Context, pal palette, conv model.Conve
 									}
 
 									row.Children(func() {
-										ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
+										ui.Row(c).FillWidth().AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
 											ui.Row(c).Grow(1).MinWidth(0).AlignItems(ui.Center).Gap(7).Children(func() {
 												ui.Box(c).Size(6, 6).Radius(3).Shrink(0).Background(statusCol)
 												ui.Column(c).Grow(1).MinWidth(0).Gap(1).Children(func() {
-													ui.Text(c, TruncateRunes(item.Title, 22)).FontSize(12).FontWeight(titleWeight).TextColor(pal.Ink1).SingleLine()
+													ui.Text(c, item.Title).FontSize(12).FontWeight(titleWeight).TextColor(pal.Ink1).SingleLine()
 													ui.Text(c, subInfo).FontSize(10).TextColor(pal.Ink3).FontFeatures("tnum").SingleLine()
 												})
 											})
 											ui.Text(c, FormatUSD(item.TreeMetrics.SessionCostUSD)).
-												FontSize(11).FontWeight(titleWeight).TextColor(costCol).FontFeatures("tnum").SingleLine()
+												FontSize(11).FontWeight(titleWeight).TextColor(costCol).FontFeatures("tnum").Shrink(0).NoWrap()
 										})
 									})
 									if row.Clicked() {
@@ -365,9 +365,17 @@ func (ctl *Controller) renderHeroPair(c *ui.Context, pal palette, conv model.Con
 		rootCost := conv.Root.Metrics.SessionCostUSD
 		subCost := conv.SubagentsCostUSD
 		totalCost := conv.TreeMetrics.SessionCostUSD
-		rootShare := 0.0
+		rootShare, subShare := 0.0, 0.0
 		if totalCost > 0 {
-			rootShare = (rootCost / totalCost) * 100
+			switch {
+			case subCost <= 0:
+				rootShare = 100
+			case rootCost <= 0:
+				subShare = 100
+			default:
+				rootShare = math.Round((rootCost / totalCost) * 100)
+				subShare = 100 - rootShare
+			}
 		}
 
 		lbl1 = tr.MainAgent
@@ -378,7 +386,7 @@ func (ctl *Controller) renderHeroPair(c *ui.Context, pal palette, conv model.Con
 		lbl2 = tr.TrayHeroSubCost
 		target2 = subCost
 		fmt2 = FormatUSD
-		sub2 = fmt.Sprintf(tr.TrayTotalShort, FormatUSD(totalCost))
+		sub2 = fmt.Sprintf("%.0f%%", subShare)
 
 	default:
 		lbl1 = tr.TrayHeroTurnCost
@@ -492,12 +500,14 @@ func (ctl *Controller) renderMiddleSection(c *ui.Context, pal palette, conv mode
 				leftW := r.W * clamped
 				rightW := r.W - leftW
 				rad := r.H / 2
-				if leftW > 0.5 {
-					p.FillRadii(ui.Rect{X: r.X, Y: r.Y, W: leftW, H: r.H}, [4]float32{rad, 0, 0, rad}, pal.Accent)
-				}
-				if rightW > 0.5 {
-					p.FillRadii(ui.Rect{X: r.X + leftW, Y: r.Y, W: rightW, H: r.H}, [4]float32{0, rad, rad, 0}, pal.Amber)
-				}
+				p.Clip(r, rad, func() {
+					if leftW > 0.5 {
+						p.Fill(ui.Rect{X: r.X, Y: r.Y, W: leftW, H: r.H}, pal.Accent, 0)
+					}
+					if rightW > 0.5 {
+						p.Fill(ui.Rect{X: r.X + leftW, Y: r.Y, W: rightW, H: r.H}, pal.Amber, 0)
+					}
+				})
 			})
 
 		default:
@@ -640,40 +650,50 @@ func (ctl *Controller) renderBottomSection(c *ui.Context, pal palette, conv mode
 				return
 			}
 			agents := conv.AllAgents()
-			for idx, ag := range agents {
-				ag := ag
-				row := ui.ButtonBase(c.Key("agent-row-" + ag.ID)).
-					AlignSelf(ui.Stretch).Padding(5, 8).Radius(10).Cursor(ui.CursorPointer)
-				if row.Hovered() {
-					row.Background(pal.CardHover)
-				}
-				nameCol := pal.Ink1
-				weight := 500
-				prefix := ""
-				leftPad := float32(0)
-				if idx > 0 {
-					nameCol = pal.Ink2
-					weight = 400
-					prefix = "└ "
-					leftPad = 10
-				}
-				dispName := tr.AgentName(ag.ID, ag.Name)
-				row.Children(func() {
-					ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
-						ui.Text(c, prefix+TruncateRunes(dispName, 18)).
-							Padding(0, 0, 0, leftPad).
-							FontSize(12).FontWeight(weight).TextColor(nameCol).SingleLine()
-						ui.Row(c).AlignItems(ui.Center).Gap(4).Children(func() {
-							ui.Text(c, FormatUSD(ag.Metrics.SessionCostUSD)).
-								FontSize(12).TextColor(pal.Ink1).FontFeatures("tnum").SingleLine()
-							ui.Textf(c, "· %.0f", ag.Metrics.WeightedDecodeTPS).
-								FontSize(11).TextColor(pal.Ink3).FontFeatures("tnum").SingleLine()
+			renderRows := func() {
+				ui.Column(c.Key("tray-agents-list")).FillWidth().Gap(3).Children(func() {
+					for idx, ag := range agents {
+						ag := ag
+						row := ui.ButtonBase(c.Key("agent-row-" + ag.ID)).
+							FillWidth().Padding(5, 8).Radius(10).Cursor(ui.CursorPointer)
+						if row.Hovered() {
+							row.Background(pal.CardHover)
+						}
+						nameCol := pal.Ink1
+						weight := 500
+						prefix := ""
+						leftPad := float32(0)
+						if idx > 0 {
+							nameCol = pal.Ink2
+							weight = 400
+							prefix = "└ "
+							leftPad = 10
+						}
+						dispName := tr.AgentName(ag.ID, ag.Name)
+						row.Children(func() {
+							ui.Row(c).FillWidth().AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
+								ui.Text(c, prefix+dispName).
+									Grow(1).MinWidth(0).
+									Padding(0, 0, 0, leftPad).
+									FontSize(12).FontWeight(weight).TextColor(nameCol).SingleLine()
+								ui.Row(c).AlignItems(ui.Center).Gap(4).Shrink(0).Children(func() {
+									ui.Text(c, FormatUSD(ag.Metrics.SessionCostUSD)).
+										FontSize(12).TextColor(pal.Ink1).FontFeatures("tnum").NoWrap()
+									ui.Textf(c, "· %.0f t/s", ag.Metrics.WeightedDecodeTPS).
+										FontSize(11).TextColor(pal.Ink3).FontFeatures("tnum").NoWrap()
+								})
+							})
 						})
-					})
+						if row.Clicked() {
+							ctl.focusAgent(conv.ID, ag.ID)
+						}
+					}
 				})
-				if row.Clicked() {
-					ctl.focusAgent(conv.ID, ag.ID)
-				}
+			}
+			if len(agents) > 5 {
+				ui.Scroll(c.Key("tray-agents-scroll")).FillWidth().Height(148).Children(renderRows)
+			} else {
+				renderRows()
 			}
 
 		default:
@@ -754,8 +774,8 @@ func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 				InsetShadow(0, 1, 0, 0, pal.RimTop).
 				Shadow(0, 14, 34, 0, pal.Shadow).
 				Children(func() {
-					ui.Column(c).Gap(9).Children(func() {
-						ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+					ui.Column(c).FillWidth().Gap(9).Children(func() {
+						ui.Row(c).FillWidth().AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
 							ui.Text(c, tr.Settings).FontSize(12).FontWeight(600).TextColor(pal.Ink1)
 							done := ui.ButtonBase(c.Key("settings-done")).Padding(2, 4).Radius(6).Cursor(ui.CursorPointer).
 								Children(func() {
@@ -885,7 +905,7 @@ func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 
 func (ctl *Controller) renderSettingSwitch(c *ui.Context, pal palette, key, label string, current bool, onChange func(bool)) {
 	val := current
-	ui.Row(c).AlignSelf(ui.Stretch).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(10).Children(func() {
+	ui.Row(c).FillWidth().AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(10).Children(func() {
 		ui.Text(c, label).FontSize(12).TextColor(pal.Ink2).SingleLine()
 		sw := ui.Switch(c.Key(key), &val).Label(label)
 		if sw.Changed() && onChange != nil {

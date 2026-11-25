@@ -138,6 +138,15 @@ func ComputeDotSeries(conv model.ConversationSnapshot, tab Tab) (targetsA, targe
 	recent := conv.Requests[start:]
 	off := DotCols - len(recent)
 
+	var maxCost float64
+	if tab == TabAgents {
+		for _, r := range recent {
+			if r.CostUSD > maxCost {
+				maxCost = r.CostUSD
+			}
+		}
+	}
+
 	for c := 0; c < DotCols; c++ {
 		if c < off {
 			continue
@@ -154,11 +163,11 @@ func ComputeDotSeries(conv model.ConversationSnapshot, tab Tab) (targetsA, targe
 			targetsA[c] = clampFloat32(float32((r.DecodeTPS/170.0)*DotRows), 0, DotRows)
 			targetsB[c] = clampFloat32(float32((r.TTFT.Seconds()/3.2)*6.0), 0, DotRows-1)
 		case TabAgents:
-			hit := r.CacheHitRate
-			if hit <= 0 && (r.InputTokens+r.CacheReadTokens+r.CacheWriteTokens) > 0 {
-				hit = model.ComputeCacheHitRate(r.InputTokens, r.CacheReadTokens, r.CacheWriteTokens)
+			bar := float32(2)
+			if maxCost > 0 && r.CostUSD > 0 {
+				norm := math.Sqrt(r.CostUSD / maxCost)
+				bar = clampFloat32(float32(1.0+norm*float64(DotRows-1)), 1, DotRows)
 			}
-			bar := clampFloat32(float32(hit*DotRows), 2, DotRows)
 			if r.AgentID == model.RootAgentID || r.AgentID == conv.Root.ID {
 				targetsA[c] = bar
 			} else {

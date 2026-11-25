@@ -125,6 +125,9 @@ type App struct {
 	histCachedRng history.Range
 	histHasCache  bool
 
+	// Responsive layout metrics for the current frame.
+	layout layoutMetrics
+
 	// 60fps spring & morphing state.
 	springs     *anim.SpringBank
 	morpher     *anim.CurveMorpher
@@ -543,8 +546,12 @@ func (a *App) View(c *ui.Context) {
 		})
 	}
 
-	// Keep the floating glass sidebar cleanly aligned at 12px from the top edge
-	// (matching prototype.html); only add top-right clearance inside the main header.
+	// Keep the floating glass sidebar cleanly aligned from the top edge
+	// while scaling proportions gracefully when the window is enlarged or maximized.
+	winW, winH := c.Size()
+	a.layout = computeLayout(winW, winH, bar)
+	lm := a.layout
+
 	shell.Children(func() {
 		// Full-width invisible top drag handle when titlebar is hidden.
 		if bar.Height > 0 {
@@ -555,8 +562,8 @@ func (a *App) View(c *ui.Context) {
 
 		ui.Row(c.Key("desktop-layout")).
 			Fill().
-			Padding(12, 12, 12, 12).
-			Gap(12).
+			Padding(lm.outerPad).
+			Gap(lm.layoutGap).
 			AlignItems(ui.Stretch).
 			Children(func() {
 				wallNow := now
@@ -564,18 +571,36 @@ func (a *App) View(c *ui.Context) {
 					wallNow = a.opts.Now()
 				}
 				a.renderSidebar(c, pal, snap, conv, hasConv, wallNow)
-				switch a.activeView {
-				case ViewQuota:
-					a.renderQuotaView(c, pal, wallNow)
-				case ViewHistory:
-					a.renderHistoryView(c, pal, wallNow)
-				default:
-					if !hasConv {
-						a.renderEmptyState(c, pal)
-					} else {
-						a.renderMainCanvas(c, pal, conv, vm, now)
-					}
+
+				// Right-hand stage centers the active view within an editorial max-width/height
+				// on large or maximized displays so cards and charts never stretch out of proportion.
+				stage := ui.Box(c.Key("canvas-stage")).Grow(1).MinWidth(0).FillHeight()
+				if lm.stageCenter {
+					stage.Center()
 				}
+				stage.Children(func() {
+					frame := ui.Column(c.Key("canvas-frame")).FillWidth().FillHeight()
+					if lm.canvasMaxW > 0 {
+						frame.MaxWidth(lm.canvasMaxW)
+					}
+					if lm.canvasMaxH > 0 {
+						frame.MaxHeight(lm.canvasMaxH)
+					}
+					frame.Children(func() {
+						switch a.activeView {
+						case ViewQuota:
+							a.renderQuotaView(c, pal, wallNow)
+						case ViewHistory:
+							a.renderHistoryView(c, pal, wallNow)
+						default:
+							if !hasConv {
+								a.renderEmptyState(c, pal)
+							} else {
+								a.renderMainCanvas(c, pal, conv, vm, now)
+							}
+						}
+					})
+				})
 			})
 	})
 }
