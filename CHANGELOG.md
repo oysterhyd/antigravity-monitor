@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.0
+
+- **支持 T3 Code（Antigravity ACP）多数据源自动发现与无感合并**：
+  - 自动发现并同时监控原生 Antigravity（`~/.gemini/antigravity`）、Antigravity CLI（`~/.gemini/antigravity-cli`）与 T3 Code 隔离的 ACP 目录（`~/.t3/userdata/providers/antigravity/*/antigravity-acp`），运行期间新增的 T3 Provider 目录也可自动接管。
+  - 实时监控（Live）与历史消耗统计（Usage History）全面支持多源无感合并：跨目录同 ID 云端同步摘要自动优先路由至包含本地 SQLite 数据的目录，避免历史指标缺失或重复计费。
+  - Live 视图默认过滤 T3 Code 内部临时文本生成会话（`t3-antigravity-text-*`），同时在历史消耗统计中照常计入其真实 Token 与费用。
+- **稳定性与兼容性修复**：
+  - 兼容 T3 Code ACP 数据库不含 `conversation_parents` 表的新 Schema，修复 L1 摘要轮询时 `PRAGMA data_version` 缓存失效问题。
+  - 加固额度读取 CLI（`agy /usage`）的运行环境变量隔离，防止从 T3 Code 终端启动时继承 ACP 隔离变量导致配额读取受影响。
+
 ## 1.0.0
 
 首个正式版发布：
