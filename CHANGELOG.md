@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.4
+
+- **下线「账号实时额度」板块，回归 100% 纯本地只读架构**：
+  - 彻底移除 `internal/quota` 包以及桌面主窗、系统托盘中的「账号实时额度」视图、导航按钮与所有 `agy` CLI 子进程调用/自动下载逻辑，消除无头调用与账号风控隐患。
+  - 应用现仅以本地只读方式解析 `~/.gemini/antigravity`、`~/.gemini/antigravity-cli` 及 T3 Code 中由 Antigravity 提供的会话数据，专注于实时监控（上下文拆解、父子 Agent 拓扑、速率/缓存/费用遥测）与本地历史消耗统计。
+- **旧版遗留缓存清理**：
+  - 升级后首次启动将自动静默清理旧版按需下载的 `%LOCALAPPDATA%\antigravity-monitor\quota-reader` 目录（若此前手动留存，亦可安全删除该目录及 `%APPDATA%\antigravity-monitor\quota_history.json`）。
+
 ## 1.1.3
 
 - **账号额度读取改为纯按需低频模式**：
