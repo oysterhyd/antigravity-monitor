@@ -63,8 +63,12 @@ type Options struct {
 	History history.Aggregator
 	// Quota provides account quota snapshots.
 	Quota quota.Tracker
-	// QuotaInterval enables an initial refresh and periodic sampling when positive.
+	// QuotaInterval enables an initial refresh and periodic sampling when positive
+	// (active polling rate when the Quota view is visible).
 	QuotaInterval time.Duration
+	// QuotaIdleInterval optionally slows background quota polling when neither Desktop
+	// nor Tray is viewing Account Quota (0 uses QuotaInterval).
+	QuotaIdleInterval time.Duration
 	// Now optionally overrides the wall-clock timestamp used for quota countdowns and history windows.
 	Now func() time.Time
 	// ShowDevToolbar shows subtle top-right dev harness controls (theme, live toggle, burst).
@@ -77,6 +81,10 @@ type Options struct {
 	OnToggleLive func() bool
 	// OnSettingsChange notifies Track 3 (config persistence / window flags) when settings change.
 	OnSettingsChange func(model.Settings)
+	// OnQuotaUpdated is invoked after a background quota refresh completes (e.g. to invalidate tray flyout).
+	OnQuotaUpdated func()
+	// OnHistoryViewOpen is invoked when the user enters the Usage History view.
+	OnHistoryViewOpen func()
 }
 
 // App owns the desktop UI state, snapshot subscription, and 60fps animation engines.
@@ -86,14 +94,18 @@ type App struct {
 	quotaSvc   quota.Tracker
 	opts       Options
 
-	mu        sync.RWMutex
-	snap      model.AppSnapshot
-	snapRev   uint64
-	seenRev   uint64
-	win       *mygo.Window
-	stopSub   func()
-	stopQuota context.CancelFunc
-	closeOnce sync.Once
+	mu               sync.RWMutex
+	snap             model.AppSnapshot
+	snapRev          uint64
+	seenRev          uint64
+	win              *mygo.Window
+	winVisible       bool
+	deskQuotaActive  bool
+	trayQuotaActive  bool
+	lastQuotaRefresh time.Time
+	stopSub          func()
+	stopQuota        context.CancelFunc
+	closeOnce        sync.Once
 
 	// Interactive UI state (accessed on UI thread inside View / tests).
 	settings            model.Settings
@@ -111,10 +123,17 @@ type App struct {
 	liveRunning         bool
 
 	// Account Quota view interactive state.
-	quotaSeries   string // "all" | "gemini" | "claude"
-	quotaRange    string // "24h" | "7d"
-	quotaHoverIdx int
-	quotaRefresh  chan struct{}
+	quotaSeries     string // "all" | "gemini" | "claude"
+	quotaRange      string // "24h" | "7d"
+	quotaHoverIdx   int
+	quotaRefresh    chan struct{}
+	quotaModeCh     chan struct{}
+	quotaTrendKey   quotaTrendCacheKey
+	quotaTrendCache []quotaTrendSample
+
+	// Reusable per-frame curve chart buffers (UI thread only).
+	chartXs [chartWindowLen]float32
+	chartYs [chartWindowLen]float32
 
 	// Usage History view interactive state.
 	histRange     history.Range
@@ -204,6 +223,7 @@ func New(provider model.SnapshotProvider, opts Options) *App {
 		ctx, cancel := context.WithCancel(context.Background())
 		a.stopQuota = cancel
 		a.quotaRefresh = make(chan struct{}, 1)
+		a.quotaModeCh = make(chan struct{}, 1)
 		go a.watchQuota(ctx)
 	}
 
@@ -215,6 +235,77 @@ func (a *App) SetWindow(w *mygo.Window) {
 	a.mu.Lock()
 	a.win = w
 	a.mu.Unlock()
+}
+
+// SetWindowVisible reports whether the desktop window is currently open and visible,
+// allowing adaptive quota polling to slow down while resident in the system tray.
+func (a *App) SetWindowVisible(visible bool) {
+	a.mu.Lock()
+	prev := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
+	a.winVisible = visible
+	next := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
+	stale := a.lastQuotaRefresh.IsZero() || (a.opts.QuotaInterval > 0 && time.Since(a.lastQuotaRefresh) >= a.opts.QuotaInterval)
+	a.mu.Unlock()
+
+	if prev != next {
+		a.notifyQuotaModeChange()
+		if next && stale {
+			a.requestQuotaRefresh()
+		}
+	}
+}
+
+// SetTrayQuotaActive reports whether the tray flyout is currently open on its Account Quota view.
+func (a *App) SetTrayQuotaActive(active bool) {
+	a.mu.Lock()
+	prev := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
+	a.trayQuotaActive = active
+	next := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
+	stale := a.lastQuotaRefresh.IsZero() || (a.opts.QuotaInterval > 0 && time.Since(a.lastQuotaRefresh) >= a.opts.QuotaInterval)
+	a.mu.Unlock()
+
+	if prev != next {
+		a.notifyQuotaModeChange()
+		if next && stale {
+			a.requestQuotaRefresh()
+		}
+	}
+}
+
+func (a *App) setDeskQuotaActive(active bool) {
+	a.mu.Lock()
+	prev := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
+	a.deskQuotaActive = active
+	next := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
+	stale := a.lastQuotaRefresh.IsZero() || (a.opts.QuotaInterval > 0 && time.Since(a.lastQuotaRefresh) >= a.opts.QuotaInterval)
+	a.mu.Unlock()
+
+	if prev != next {
+		a.notifyQuotaModeChange()
+		if next && stale {
+			a.requestQuotaRefresh()
+		}
+	}
+}
+
+func (a *App) notifyQuotaModeChange() {
+	if a.quotaModeCh == nil {
+		return
+	}
+	select {
+	case a.quotaModeCh <- struct{}{}:
+	default:
+	}
+}
+
+func (a *App) currentQuotaInterval() time.Duration {
+	a.mu.RLock()
+	active := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
+	a.mu.RUnlock()
+	if active || a.opts.QuotaIdleInterval <= 0 {
+		return a.opts.QuotaInterval
+	}
+	return a.opts.QuotaIdleInterval
 }
 
 // Close unsubscribes from the SnapshotProvider.
@@ -230,17 +321,64 @@ func (a *App) Close() {
 }
 
 func (a *App) watchQuota(ctx context.Context) {
+	var timer *time.Timer
 	var tick <-chan time.Time
-	if a.opts.QuotaInterval > 0 {
-		timer := time.NewTicker(a.opts.QuotaInterval)
-		defer timer.Stop()
-		tick = timer.C
-		a.requestQuotaRefresh()
+	resetTimer := func(d time.Duration) {
+		if d <= 0 {
+			return
+		}
+		if timer == nil {
+			timer = time.NewTimer(d)
+			tick = timer.C
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(d)
 	}
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+
+	if a.opts.QuotaInterval > 0 {
+		if a.opts.QuotaIdleInterval > 0 {
+			// Defer initial background CLI launch slightly so cold startup stays instant
+			// unless the user opens the Quota view immediately.
+			resetTimer(2 * time.Second)
+		} else {
+			resetTimer(a.opts.QuotaInterval)
+			a.requestQuotaRefresh()
+		}
+	}
+
 	for ctx.Err() == nil {
 		select {
 		case <-ctx.Done():
 			return
+		case <-a.quotaModeCh:
+			if a.opts.QuotaInterval <= 0 {
+				continue
+			}
+			interval := a.currentQuotaInterval()
+			a.mu.RLock()
+			last := a.lastQuotaRefresh
+			a.mu.RUnlock()
+			if last.IsZero() {
+				resetTimer(2 * time.Second)
+				continue
+			}
+			rem := interval - time.Since(last)
+			if rem < 250*time.Millisecond {
+				rem = 250 * time.Millisecond
+			}
+			resetTimer(rem)
+			continue
 		case <-tick:
 		case <-a.quotaRefresh:
 		}
@@ -249,16 +387,26 @@ func (a *App) watchQuota(ctx context.Context) {
 			now = a.opts.Now()
 		}
 		_ = a.quotaSvc.Refresh(ctx, now)
-		a.mu.RLock()
+		a.mu.Lock()
+		a.lastQuotaRefresh = time.Now()
 		win := a.win
-		a.mu.RUnlock()
+		a.mu.Unlock()
 		if win != nil && ctx.Err() == nil {
 			win.Invalidate()
+		}
+		if a.opts.OnQuotaUpdated != nil && ctx.Err() == nil {
+			a.opts.OnQuotaUpdated()
+		}
+		if a.opts.QuotaInterval > 0 {
+			resetTimer(a.currentQuotaInterval())
 		}
 	}
 }
 
 func (a *App) requestQuotaRefresh() {
+	if a.quotaRefresh == nil {
+		return
+	}
 	select {
 	case a.quotaRefresh <- struct{}{}:
 	default:
@@ -311,8 +459,12 @@ func (a *App) SetActiveView(v ActiveView) {
 	a.settingsPopoverOpen = false
 	a.quotaHoverIdx = -1
 	a.histHoverIdx = -1
+	a.setDeskQuotaActive(v == ViewQuota)
 	if v == ViewHistory {
 		a.histHasCache = false
+		if a.opts.OnHistoryViewOpen != nil {
+			a.opts.OnHistoryViewOpen()
+		}
 	}
 }
 
@@ -341,6 +493,7 @@ func (a *App) FocusConversation(convID string, manual bool) {
 		return
 	}
 	a.activeView = ViewLive
+	a.setDeskQuotaActive(false)
 	a.convID = convID
 	if manual && a.settings.AutoFollowActive {
 		a.settings.AutoFollowActive = false
@@ -360,6 +513,7 @@ func (a *App) FocusAgent(agentID string) {
 		agentID = scopeAll
 	}
 	a.activeView = ViewLive
+	a.setDeskQuotaActive(false)
 	if a.scope == agentID {
 		return
 	}
@@ -389,8 +543,8 @@ func (a *App) SetLanguage(lang string) {
 	a.emitSettings()
 }
 
-func (a *App) tr() i18n.Strings {
-	return i18n.Get(a.settings.Language)
+func (a *App) tr() *i18n.Strings {
+	return i18n.GetPtr(a.settings.Language)
 }
 
 // SelectMetric switches the active KPI metric driving the morphing chart.
@@ -896,7 +1050,7 @@ func robustChartScale(vals []float64) ([]float64, float64) {
 	return out, ceiling
 }
 
-func metricTitle(tr i18n.Strings, m MetricKind) string {
+func metricTitle(tr *i18n.Strings, m MetricKind) string {
 	switch m {
 	case MetricTTFT:
 		return tr.MetricTTFT

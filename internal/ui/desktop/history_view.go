@@ -315,13 +315,12 @@ func (a *App) renderHistoryChartCard(c *ui.Context, pal theme.Palette, res histo
 			maxVal = 1
 		}
 
-		drawBuckets := append([]history.BucketSummary(nil), buckets...)
 		mode := a.histMetric
 		hovered := a.histHoverIdx
 		maxBarW := 34 + 20*a.layout.scale
 
 		plotBox.Draw(func(p *ui.Painter, r ui.Rect) {
-			n := len(drawBuckets)
+			n := len(buckets)
 			if n == 0 || r.W <= 8 || r.H <= 16 {
 				return
 			}
@@ -341,7 +340,7 @@ func (a *App) renderHistoryChartCard(c *ui.Context, pal theme.Palette, res histo
 				barW = max(2, slotW-2)
 			}
 
-			for i, bk := range drawBuckets {
+			for i, bk := range buckets {
 				alpha := float32(1.0)
 				if hovered >= 0 && i != hovered {
 					alpha = 0.42

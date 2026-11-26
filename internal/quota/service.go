@@ -81,6 +81,15 @@ type Service struct {
 	read        func(context.Context) (Reading, error)
 	state       persistedState
 	sourceError error
+	dirty       bool
+	rev         uint64
+
+	snapCacheMu     sync.Mutex
+	snapCacheRev    uint64
+	snapCacheSec    int64
+	snapCacheOffset int
+	snapCacheValid  bool
+	snapCacheVal    QuotaSnapshot
 }
 
 func NewService(historyPath string, read func(context.Context) (Reading, error)) *Service {
@@ -96,10 +105,21 @@ func NewService(historyPath string, read func(context.Context) (Reading, error))
 }
 
 func (s *Service) State(now time.Time) QuotaSnapshot {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	nowSec := now.Unix()
+	_, tzOffset := now.Zone()
 
-	return QuotaSnapshot{
+	s.mu.RLock()
+	rev := s.rev
+	s.snapCacheMu.Lock()
+	if s.snapCacheValid && s.snapCacheRev == rev && s.snapCacheSec == nowSec && s.snapCacheOffset == tzOffset {
+		cached := s.snapCacheVal
+		s.snapCacheMu.Unlock()
+		s.mu.RUnlock()
+		return cached
+	}
+	s.snapCacheMu.Unlock()
+
+	snap := QuotaSnapshot{
 		Reading:       s.state.Reading,
 		UpdatedAt:     s.state.UpdatedAt,
 		SourceError:   s.sourceError,
@@ -107,6 +127,16 @@ func (s *Service) State(now time.Time) QuotaSnapshot {
 		FiveHourTrend: summarizeTrend(s.state.FiveHour, now),
 		WeeklyTrend:   summarizeTrend(s.state.Weekly, now),
 	}
+	s.mu.RUnlock()
+
+	s.snapCacheMu.Lock()
+	s.snapCacheRev = rev
+	s.snapCacheSec = nowSec
+	s.snapCacheOffset = tzOffset
+	s.snapCacheValid = true
+	s.snapCacheVal = snap
+	s.snapCacheMu.Unlock()
+	return snap
 }
 
 func (s *Service) HasLowQuota() bool {
@@ -134,12 +164,19 @@ func (s *Service) Refresh(ctx context.Context, now time.Time) error {
 
 	if err != nil {
 		s.sourceError = err
+		s.rev++
 		return err
 	}
 	s.sourceError = nil
 	if now.Before(s.state.UpdatedAt) {
+		s.rev++
 		return nil
 	}
+
+	prev := s.state
+	firstSample := prev.UpdatedAt.IsZero()
+	readingChanged := prev.Reading != reading
+	newBucket := firstSample || !prev.UpdatedAt.Truncate(trendSampleInterval).Equal(now.Truncate(trendSampleInterval))
 
 	fiveHourPoint := TrendPoint{
 		Timestamp: now, GeminiPct: reading.Gemini.FiveHour.RemainingPct, ClaudePct: reading.ClaudeGPT.FiveHour.RemainingPct,
@@ -156,7 +193,18 @@ func (s *Service) Refresh(ctx context.Context, now time.Time) error {
 		FiveHour: appendPoint(s.state.FiveHour, fiveHourPoint),
 		Weekly:   appendPoint(s.state.Weekly, weeklyPoint),
 	}
-	return s.saveLocked()
+	s.rev++
+
+	shouldSave := s.dirty || firstSample || readingChanged || newBucket || fiveHourPoint.ResetEvent || weeklyPoint.ResetEvent
+	if !shouldSave {
+		return nil
+	}
+	if err := s.saveLocked(); err != nil {
+		s.dirty = true
+		return err
+	}
+	s.dirty = false
+	return nil
 }
 
 func observedReset(previous, next WindowQuota, now time.Time) bool {
@@ -179,7 +227,12 @@ func appendPoint(points []TrendPoint, point TrendPoint) []TrendPoint {
 	for first < len(points) && points[first].Timestamp.Before(cutoff) {
 		first++
 	}
-	return points[first:]
+	if first > 0 {
+		n := copy(points, points[first:])
+		clear(points[n:])
+		points = points[:n]
+	}
+	return points
 }
 
 func summarizeTrend(points []TrendPoint, now time.Time) Trend {
@@ -224,7 +277,7 @@ func (s *Service) saveLocked() error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	payload, err := json.MarshalIndent(s.state, "", "  ")
+	payload, err := json.Marshal(s.state)
 	if err != nil {
 		return err
 	}

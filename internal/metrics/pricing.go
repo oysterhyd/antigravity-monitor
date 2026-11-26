@@ -6,16 +6,35 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/oysterhyd/antigravity-monitor/assets"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
 )
 
+const maxPricingMatchCacheEntries = 256
+
 // Calculator resolves model pricing rules (including long-context tiers) and enriches
 // RequestRecord instances with Pure Decode TPS, cache hit rate, cost, and cache savings.
 // Calculator is immutable after creation and safe for concurrent use.
 type Calculator struct {
-	cfg model.PricingConfig
+	cfg      model.PricingConfig
+	normPats []string
+
+	cacheMu    sync.RWMutex
+	matchCache map[string]model.PricingRule
+}
+
+func newCalculator(cfg model.PricingConfig) *Calculator {
+	pats := make([]string, len(cfg.Rules))
+	for i, r := range cfg.Rules {
+		pats[i] = normalizeModelKey(r.ModelPattern)
+	}
+	return &Calculator{
+		cfg:        cfg,
+		normPats:   pats,
+		matchCache: make(map[string]model.PricingRule, 32),
+	}
 }
 
 // DefaultPricingConfig parses and returns the embedded default pricing configuration.
@@ -33,7 +52,7 @@ func NewDefaultCalculator() (*Calculator, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Calculator{cfg: cfg}, nil
+	return newCalculator(cfg), nil
 }
 
 // NewCalculator constructs a Calculator starting from embedded defaults and optionally
@@ -44,7 +63,7 @@ func NewCalculator(overridePath string) (*Calculator, error) {
 		return nil, err
 	}
 	if strings.TrimSpace(overridePath) == "" {
-		return &Calculator{cfg: base}, nil
+		return newCalculator(base), nil
 	}
 	raw, err := os.ReadFile(overridePath)
 	if err != nil {
@@ -55,12 +74,12 @@ func NewCalculator(overridePath string) (*Calculator, error) {
 		return nil, fmt.Errorf("parse pricing override %q: %w", overridePath, err)
 	}
 	merged := mergePricingConfig(base, override)
-	return &Calculator{cfg: merged}, nil
+	return newCalculator(merged), nil
 }
 
 // NewCalculatorFromConfig constructs a Calculator from an explicit PricingConfig.
 func NewCalculatorFromConfig(cfg model.PricingConfig) *Calculator {
-	return &Calculator{cfg: cfg}
+	return newCalculator(cfg)
 }
 
 // Config returns a copy of the active PricingConfig.
@@ -73,13 +92,21 @@ func (c *Calculator) Config() model.PricingConfig {
 // MatchRule selects the most specific PricingRule matching modelSlug or modelDisplay.
 // Specificity prioritizes exact > prefix/wildcard > substring, with longer patterns winning ties.
 func (c *Calculator) MatchRule(modelSlug, modelDisplay string) model.PricingRule {
+	cacheKey := modelSlug + "\x00" + modelDisplay
+	c.cacheMu.RLock()
+	if cached, ok := c.matchCache[cacheKey]; ok {
+		c.cacheMu.RUnlock()
+		return cached
+	}
+	c.cacheMu.RUnlock()
+
 	slug := normalizeModelKey(modelSlug)
 	disp := normalizeModelKey(modelDisplay)
 
 	bestScore := -1
 	bestIdx := -1
-	for i, rule := range c.cfg.Rules {
-		pat := normalizeModelKey(rule.ModelPattern)
+	for i := range c.cfg.Rules {
+		pat := c.normPats[i]
 		if pat == "" || pat == "*" {
 			continue
 		}
@@ -89,10 +116,19 @@ func (c *Calculator) MatchRule(modelSlug, modelDisplay string) model.PricingRule
 			bestIdx = i
 		}
 	}
+	var matched model.PricingRule
 	if bestIdx >= 0 {
-		return c.cfg.Rules[bestIdx]
+		matched = c.cfg.Rules[bestIdx]
+	} else {
+		matched = c.cfg.DefaultRule
 	}
-	return c.cfg.DefaultRule
+
+	c.cacheMu.Lock()
+	if len(c.matchCache) < maxPricingMatchCacheEntries {
+		c.matchCache[cacheKey] = matched
+	}
+	c.cacheMu.Unlock()
+	return matched
 }
 
 // EstimateCost calculates total USD cost and USD saved from prompt cache reads,

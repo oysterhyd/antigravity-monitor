@@ -35,6 +35,8 @@ type dirWatcher struct {
 
 	dirsMu      sync.Mutex
 	watchedDirs map[string]bool
+	lastConvIDs map[string]bool
+	pendingDirs []string
 
 	mu     sync.Mutex
 	closed bool
@@ -70,17 +72,41 @@ func newDirWatcher(rootDir string, debounce time.Duration, onEvent func(watchEve
 	return w, nil
 }
 
-func (w *dirWatcher) addDirIfExists(dir string) {
+func (w *dirWatcher) addDirIfExists(dir string) bool {
 	clean := filepath.Clean(dir)
 	if w.watchedDirs[clean] {
-		return
+		return true
 	}
 	if fi, err := os.Stat(clean); err != nil || !fi.IsDir() {
-		return
+		return false
 	}
 	if err := w.fsw.Add(clean); err == nil {
 		w.watchedDirs[clean] = true
+		return true
 	}
+	return false
+}
+
+// retryPendingDirs retries registering any transcript/root directories that did not
+// exist when WatchTranscriptDirs was last called.
+func (w *dirWatcher) retryPendingDirs() {
+	w.dirsMu.Lock()
+	defer w.dirsMu.Unlock()
+	w.retryPendingDirsLocked()
+}
+
+func (w *dirWatcher) retryPendingDirsLocked() {
+	if len(w.pendingDirs) == 0 {
+		return
+	}
+	rem := w.pendingDirs[:0]
+	for _, dir := range w.pendingDirs {
+		if !w.addDirIfExists(dir) {
+			rem = append(rem, dir)
+		}
+	}
+	clear(w.pendingDirs[len(rem):])
+	w.pendingDirs = rem
 }
 
 // WatchTranscriptDirs ensures transcript log directories for the given conversation IDs
@@ -89,6 +115,21 @@ func (w *dirWatcher) WatchTranscriptDirs(convIDs map[string]bool) {
 	w.dirsMu.Lock()
 	defer w.dirsMu.Unlock()
 
+	if len(convIDs) == len(w.lastConvIDs) && w.lastConvIDs != nil {
+		same := true
+		for id := range convIDs {
+			if !w.lastConvIDs[id] {
+				same = false
+				break
+			}
+		}
+		if same {
+			w.retryPendingDirsLocked()
+			return
+		}
+	}
+
+	nextIDs := make(map[string]bool, len(convIDs))
 	dirs := make(map[string]bool, len(convIDs)+2)
 	dirs[filepath.Clean(w.rootDir)] = true
 	dirs[filepath.Clean(w.convDir)] = true
@@ -96,6 +137,7 @@ func (w *dirWatcher) WatchTranscriptDirs(convIDs map[string]bool) {
 		if id == "" {
 			continue
 		}
+		nextIDs[id] = true
 		dir := filepath.Dir(TranscriptPath(w.rootDir, id))
 		dirs[dir] = true
 	}
@@ -105,9 +147,14 @@ func (w *dirWatcher) WatchTranscriptDirs(convIDs map[string]bool) {
 			delete(w.watchedDirs, dir)
 		}
 	}
+	pending := w.pendingDirs[:0]
 	for dir := range dirs {
-		w.addDirIfExists(dir)
+		if !w.addDirIfExists(dir) {
+			pending = append(pending, dir)
+		}
 	}
+	w.pendingDirs = pending
+	w.lastConvIDs = nextIDs
 }
 
 func (w *dirWatcher) Close() error {

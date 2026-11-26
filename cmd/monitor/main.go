@@ -4,7 +4,9 @@ import (
 	"context"
 	"flag"
 	"log"
+	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -24,7 +26,17 @@ import (
 
 const githubRepo = "oysterhyd/antigravity-monitor"
 
+func tuneRuntimeMemory() {
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(65)
+	}
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(96 << 20)
+	}
+}
+
 func main() {
+	tuneRuntimeMemory()
 	appupdater.Register(githubRepo)
 	useMock := flag.Bool("mock", false, "use simulated SnapshotProvider instead of reading local Antigravity records")
 	mockInterval := flag.Duration("mock-interval", 2800*time.Millisecond, "mock stream interval when -mock is enabled")
@@ -52,6 +64,13 @@ func main() {
 	var histSvc history.Aggregator
 	var quotaSvc quota.Tracker
 	var provider model.SnapshotProvider
+	wakeHistoryCh := make(chan struct{}, 1)
+	wakeHistory := func() {
+		select {
+		case wakeHistoryCh <- struct{}{}:
+		default:
+		}
+	}
 	if *useMock {
 		provider = mock.New(*mockInterval)
 	} else {
@@ -61,13 +80,15 @@ func main() {
 		histCachePath := filepath.Join(cfgDir, "usage_cache.json")
 		quotaHistPath := filepath.Join(cfgDir, "quota_history.json")
 		hist := history.NewAggregator(*dataDir, histCachePath, calc)
+		defer func() { _ = hist.Close() }()
 		histSvc = hist
 		quotaSvc = quota.NewService(quotaHistPath, quota.ReadCLI)
 
-		// Warm up history index asynchronously so startup stays instant, then refresh periodically.
+		// Defer initial history warm-up briefly so cold startup stays instant;
+		// wakes immediately if the user opens Usage History.
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		go refreshHistory(ctx, hist)
+		go refreshHistory(ctx, hist, wakeHistoryCh)
 	}
 	defer func() { _ = provider.Close() }()
 
@@ -110,6 +131,12 @@ func main() {
 					deskHost.ApplySettings(s)
 				}
 			},
+			OnQuotaViewActive: func(active bool) {
+				if deskHost != nil {
+					deskHost.SetTrayQuotaActive(active)
+				}
+			},
+			OnHistoryViewOpen: wakeHistory,
 			OnQuit: func() {
 				if deskHost != nil {
 					deskHost.SetQuitting(true)
@@ -131,16 +158,21 @@ func main() {
 		}
 	})
 
-	mygo.App.OnWindowAllClosed(func() {
-		if deskHost != nil && deskHost.win != nil && !store.Get().KeepInTrayOnClose {
-			mygo.App.Quit()
-		}
-	})
+	// Keep the process alive in the system tray when windows close; exiting on
+	// desktop window close (when KeepInTrayOnClose is false) is handled directly
+	// in desktopHost's window OnClosed callback so closing the tray flyout never quits.
+	mygo.App.OnWindowAllClosed(func() {})
 
 	mygo.App.WhenReady(func() {
-		deskHost = newDesktopHost(provider, histSvc, quotaSvc, store, func(s model.Settings) {
-			trayCtl.ApplySettings(s)
-		})
+		deskHost = newDesktopHost(
+			provider,
+			histSvc,
+			quotaSvc,
+			store,
+			func(s model.Settings) { trayCtl.ApplySettings(s) },
+			trayCtl.InvalidateFlyout,
+			wakeHistory,
+		)
 
 		if err := trayCtl.Start(); err != nil {
 			log.Fatalf("[monitor] start tray: %v", err)
@@ -167,28 +199,58 @@ func buildProvider(dataDir string, settings model.Settings) (*source.Provider, *
 	if err != nil {
 		log.Fatalf("[monitor] initialize local Antigravity data engine: %v", err)
 	}
-	provider, err := source.NewProvider(source.Options{RootDir: dataDir, Calculator: calc})
+	provider, err := source.NewProvider(source.Options{
+		RootDir:    dataDir,
+		Calculator: calc,
+		AsyncInit:  true,
+	})
 	if err != nil {
 		log.Fatalf("[monitor] initialize local Antigravity data engine: %v", err)
 	}
 	return provider, calc
 }
 
-func refreshHistory(ctx context.Context, hist history.Aggregator) {
-	initial, cancel := context.WithTimeout(ctx, 20*time.Second)
-	_ = hist.Refresh(initial)
-	cancel()
+func refreshHistory(ctx context.Context, hist history.Aggregator, wakeCh <-chan struct{}) {
+	// Wait briefly after startup so cold launch stays responsive, unless History is opened first.
+	initDelay := time.NewTimer(3500 * time.Millisecond)
+	select {
+	case <-ctx.Done():
+		initDelay.Stop()
+		return
+	case <-initDelay.C:
+	case <-wakeCh:
+		if !initDelay.Stop() {
+			select {
+			case <-initDelay.C:
+			default:
+			}
+		}
+	}
 
-	ticker := time.NewTicker(45 * time.Second)
+	run := func(timeout time.Duration) {
+		refresh, cancel := context.WithTimeout(ctx, timeout)
+		_ = hist.Refresh(refresh)
+		cancel()
+	}
+
+	run(20 * time.Second)
+	lastRun := time.Now()
+
+	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-wakeCh:
+			if time.Since(lastRun) < 15*time.Second {
+				continue
+			}
+			run(15 * time.Second)
+			lastRun = time.Now()
 		case <-ticker.C:
-			refresh, cancel := context.WithTimeout(ctx, 15*time.Second)
-			_ = hist.Refresh(refresh)
-			cancel()
+			run(15 * time.Second)
+			lastRun = time.Now()
 		}
 	}
 }
@@ -206,7 +268,15 @@ type desktopHost struct {
 	quitting bool
 }
 
-func newDesktopHost(provider model.SnapshotProvider, histSvc history.Aggregator, quotaSvc quota.Tracker, store *config.Store, onSettings func(model.Settings)) *desktopHost {
+func newDesktopHost(
+	provider model.SnapshotProvider,
+	histSvc history.Aggregator,
+	quotaSvc quota.Tracker,
+	store *config.Store,
+	onSettings func(model.Settings),
+	onQuotaUpdated func(),
+	onHistoryOpen func(),
+) *desktopHost {
 	s := store.Get()
 	h := &desktopHost{
 		store:      store,
@@ -215,10 +285,13 @@ func newDesktopHost(provider model.SnapshotProvider, histSvc history.Aggregator,
 	}
 
 	h.app = desktop.New(provider, desktop.Options{
-		Settings:      &s,
-		History:       histSvc,
-		Quota:         quotaSvc,
-		QuotaInterval: 30 * time.Second,
+		Settings:          &s,
+		History:           histSvc,
+		Quota:             quotaSvc,
+		QuotaInterval:     30 * time.Second,
+		QuotaIdleInterval: 3 * time.Minute,
+		OnQuotaUpdated:    onQuotaUpdated,
+		OnHistoryViewOpen: onHistoryOpen,
 		OnSettingsChange: func(next model.Settings) {
 			next = config.Normalize(next)
 			if err := h.store.Save(next); err != nil {
@@ -251,6 +324,7 @@ func (h *desktopHost) show() {
 	}
 	h.win.Show()
 	h.win.Focus()
+	h.app.SetWindowVisible(true)
 	h.win.Invalidate()
 }
 
@@ -258,8 +332,9 @@ func (h *desktopHost) createWindow() {
 	h.mu.Lock()
 	s := h.settings
 	h.mu.Unlock()
-	h.win = mygo.NewWindow(mygo.WindowOptions{
+	win := mygo.NewWindow(mygo.WindowOptions{
 		Title:          "Antigravity Monitor",
+		StateKey:       "main",
 		Width:          900,
 		Height:         590,
 		MinWidth:       760,
@@ -271,18 +346,36 @@ func (h *desktopHost) createWindow() {
 		Vibrancy:       mygo.VibrancyGlass,
 		Content:        ui.View(h.app.View),
 	})
-	h.app.SetWindow(h.win)
+	h.win = win
+	h.app.SetWindow(win)
 
-	h.win.OnClose(func(e *mygo.CloseEvent) {
-		h.mu.Lock()
-		keep := !h.quitting && h.settings.KeepInTrayOnClose
-		h.mu.Unlock()
-		if keep {
-			e.PreventDefault()
-			h.win.Hide()
+	// Allow the native window to actually close so mygo releases its D3D11
+	// renderer and shared GPU device while resident in the system tray.
+	win.OnClosed(func() {
+		if h.win == win {
+			h.win = nil
+			h.app.SetWindow(nil)
 		}
-	})
+		h.app.SetWindowVisible(false)
 
+		h.mu.Lock()
+		shouldQuit := !h.quitting && !h.settings.KeepInTrayOnClose
+		h.mu.Unlock()
+
+		if shouldQuit {
+			mygo.App.Quit()
+			return
+		}
+		time.AfterFunc(250*time.Millisecond, func() {
+			debug.FreeOSMemory()
+		})
+	})
+}
+
+func (h *desktopHost) SetTrayQuotaActive(active bool) {
+	if h.app != nil {
+		h.app.SetTrayQuotaActive(active)
+	}
 }
 
 func (h *desktopHost) Show() {

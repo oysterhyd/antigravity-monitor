@@ -96,6 +96,7 @@ type SummariesReader struct {
 	db           *sql.DB
 	version      int64
 	versionKnown bool
+	missingKnown bool
 }
 
 // NewSummariesReader creates a read-only L1 reader for conversation_summaries.db.
@@ -149,17 +150,29 @@ func (r *SummariesReader) ReadAll(ctx context.Context) ([]SummaryRow, error) {
 	return rows, err
 }
 
+// ReadChanges incrementally reads conversation summaries only when SQLite's
+// PRAGMA data_version changes since the last successful read.
+func (r *SummariesReader) ReadChanges(ctx context.Context) ([]SummaryRow, bool, error) {
+	return r.readChanges(ctx)
+}
+
 func (r *SummariesReader) readChanges(ctx context.Context) ([]SummaryRow, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	db, err := r.ensureOpenLocked()
 	if errors.Is(err, os.ErrNotExist) {
+		if r.missingKnown {
+			return nil, false, nil
+		}
+		r.missingKnown = true
+		r.versionKnown = false
 		return nil, true, nil
 	}
 	if err != nil {
 		return nil, false, err
 	}
+	r.missingKnown = false
 
 	var version int64
 	err = db.QueryRowContext(ctx, `PRAGMA data_version`).Scan(&version)
@@ -415,8 +428,9 @@ func buildReadOnlyDSN(absPath string) string {
 	slashed := filepath.ToSlash(absPath)
 	replacer := strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23")
 	escaped := replacer.Replace(slashed)
-	// mode=ro enforces OS/SQLite read-only open; _pragma applies query_only & busy_timeout on modernc.org/sqlite.
-	return fmt.Sprintf("file:%s?mode=ro&_query_only=1&_busy_timeout=150&_pragma=query_only(1)&_pragma=busy_timeout(150)", escaped)
+	// mode=ro enforces OS/SQLite read-only open; _cache_size=-512 caps per-handle SQLite page cache to 512KB
+	// (default is 2MB per handle); _pragma applies the same settings on modernc.org/sqlite.
+	return fmt.Sprintf("file:%s?mode=ro&_query_only=1&_busy_timeout=150&_cache_size=-512&_pragma=query_only(1)&_pragma=busy_timeout(150)&_pragma=cache_size(-512)", escaped)
 }
 
 func parseSQLiteTime(raw string) time.Time {

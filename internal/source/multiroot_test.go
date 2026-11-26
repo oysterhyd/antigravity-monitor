@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -230,5 +231,157 @@ func TestProviderDynamicRootDiscovery(t *testing.T) {
 	snap := p.Snapshot()
 	if len(snap.Conversations) != 1 || snap.Conversations[0].ID != "conv-new-acp" {
 		t.Fatalf("expected newly discovered conv-new-acp, got %+v", snap.Conversations)
+	}
+}
+
+func TestMultiRootResolvesLateCreatedConvDBInOtherRoot(t *testing.T) {
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Summary appears in rootA before any conversation DB exists in rootA or rootB.
+	sumA := createACPTestSummariesDB(t, rootA)
+	if _, err := sumA.Exec(`
+		INSERT INTO conversation_summaries (conversation_id, title, step_count, last_modified_time, status, not_fully_idle)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, "conv-late", "Late DB Session", 1, now.Format(time.RFC3339Nano), "CASCADE_RUN_STATUS_RUNNING", 1); err != nil {
+		t.Fatalf("insert rootA summary: %v", err)
+	}
+	_ = sumA.Close()
+
+	p, err := NewProvider(Options{
+		RootDirs:       []string{rootA, rootB},
+		DisableWatcher: true,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer p.Close()
+
+	if c, ok := p.Snapshot().FindConversation("conv-late"); !ok || c.TreeMetrics.RequestCount != 0 {
+		t.Fatalf("expected 0 requests initially, ok=%v reqs=%d", ok, c.TreeMetrics.RequestCount)
+	}
+
+	// Conversation DB is later created in rootB with 1 request.
+	convB := createTestConvDB(t, rootB, "conv-late")
+	insertGenRow(t, convB, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 1000, 4000, 0, 200, 5200, 512000, 400*time.Millisecond, 1500*time.Millisecond, now, "")
+	_ = convB.Close()
+
+	if err := p.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh after rootB conv DB created: %v", err)
+	}
+
+	c, ok := p.Snapshot().FindConversation("conv-late")
+	if !ok || c.TreeMetrics.RequestCount != 1 {
+		t.Fatalf("expected 1 request from rootB after Refresh, ok=%v reqs=%d", ok, c.TreeMetrics.RequestCount)
+	}
+}
+
+func TestContinuousEventsDoNotStarveRootDiscovery(t *testing.T) {
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	var rootsMu sync.Mutex
+	roots := []string{rootA}
+
+	p, err := NewProvider(Options{
+		DiscoverRoots: func() []string {
+			rootsMu.Lock()
+			defer rootsMu.Unlock()
+			cp := make([]string, len(roots))
+			copy(cp, roots)
+			return cp
+		},
+		PollInterval: 5 * time.Second,
+		Debounce:     20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer p.Close()
+
+	p.syncMu.Lock()
+	p.rootDiscoverInterval = 60 * time.Millisecond
+	p.syncMu.Unlock()
+
+	// Create rootB after Provider started.
+	sumB := createACPTestSummariesDB(t, rootB)
+	if _, err := sumB.Exec(`
+		INSERT INTO conversation_summaries (conversation_id, title, step_count, last_modified_time, status, not_fully_idle)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, "conv-root-b", "Discovered Under Load", 2, now.Format(time.RFC3339Nano), "CASCADE_RUN_STATUS_RUNNING", 1); err != nil {
+		t.Fatalf("insert rootB summary: %v", err)
+	}
+	_ = sumB.Close()
+
+	rootsMu.Lock()
+	roots = []string{rootA, rootB}
+	rootsMu.Unlock()
+
+	// Continuously fire triggerCh events much faster than PollInterval (5s),
+	// verifying root discovery still runs once rootDiscoverInterval elapses.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		p.enqueueEvent(watchEvent{ConvID: "busy-conv"})
+		if _, ok := p.Snapshot().FindConversation("conv-root-b"); ok {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("rootB was starved by continuous trigger events; conversations=%+v", p.Snapshot().Conversations)
+}
+
+func TestMultiRootRelocatesAfterCachedRootDataRemoved(t *testing.T) {
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	sumA := createACPTestSummariesDB(t, rootA)
+	if _, err := sumA.Exec(`
+		INSERT INTO conversation_summaries (conversation_id, title, step_count, last_modified_time, status, not_fully_idle)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, "conv-moved", "Migrated Session", 1, now.Format(time.RFC3339Nano), "CASCADE_RUN_STATUS_IDLE", 0); err != nil {
+		t.Fatalf("insert rootA summary: %v", err)
+	}
+	_ = sumA.Close()
+
+	// Initially, conv-moved has a transcript (with no planner requests yet) in rootA,
+	// so rootA is legitimately cached as the storage root.
+	trA := TranscriptPath(rootA, "conv-moved")
+	if err := os.MkdirAll(filepath.Dir(trA), 0o755); err != nil {
+		t.Fatalf("mkdir transcript A: %v", err)
+	}
+	if err := os.WriteFile(trA, []byte(`{"step_index":0,"type":"USER_INPUT","created_at":"2026-11-25T10:00:00Z"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write transcript A: %v", err)
+	}
+
+	p, err := NewProvider(Options{
+		RootDirs:       []string{rootA, rootB},
+		DisableWatcher: true,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer p.Close()
+
+	if c, ok := p.Snapshot().FindConversation("conv-moved"); !ok || c.TreeMetrics.RequestCount != 0 {
+		t.Fatalf("expected 0 requests initially, ok=%v reqs=%d", ok, c.TreeMetrics.RequestCount)
+	}
+
+	// Remove old file from rootA and create the real conversation DB in rootB.
+	if err := os.Remove(trA); err != nil {
+		t.Fatalf("remove transcript A: %v", err)
+	}
+	convB := createTestConvDB(t, rootB, "conv-moved")
+	insertGenRow(t, convB, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 1000, 4000, 0, 200, 5200, 512000, 400*time.Millisecond, 1500*time.Millisecond, now, "")
+	_ = convB.Close()
+
+	if err := p.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh after migration to rootB: %v", err)
+	}
+	c, ok := p.Snapshot().FindConversation("conv-moved")
+	if !ok || c.TreeMetrics.RequestCount != 1 {
+		t.Fatalf("expected 1 request after migrating from rootA to rootB, ok=%v reqs=%d", ok, c.TreeMetrics.RequestCount)
 	}
 }

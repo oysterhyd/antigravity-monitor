@@ -46,7 +46,7 @@ func ReadCLI(ctx context.Context) (Reading, error) {
 func findCLI(ctx context.Context) (string, error) {
 	candidates := cliCandidates()
 	if binary, err := exec.LookPath("agy"); err == nil {
-		candidates = append([]string{binary}, candidates...)
+		candidates = prependOrAppendCLI(candidates, binary)
 	}
 	for _, candidate := range candidates {
 		if ctx.Err() != nil {
@@ -107,7 +107,7 @@ func runCLI(ctx context.Context, binary string, args ...string) ([]byte, error) 
 	command.Env = cleanCLIEnv(os.Environ())
 	command.WaitDelay = time.Second
 	command.SysProcAttr = cliProcessAttributes()
-	return command.Output()
+	return execCLICommand(command)
 }
 
 // cleanCLIEnv strips ACP-scoped isolation variables (e.g. when Monitor is launched

@@ -144,7 +144,7 @@ func (a *App) renderQuotaPoolCard(
 	}
 }
 
-func renderQuotaWindow(c *ui.Context, pal theme.Palette, tr i18n.Strings, key, label string, window quota.WindowQuota, available bool, color ui.Color, now time.Time) {
+func renderQuotaWindow(c *ui.Context, pal theme.Palette, tr *i18n.Strings, key, label string, window quota.WindowQuota, available bool, color ui.Color, now time.Time) {
 	pct, reset, ratio := quotaWindowDisplay(tr, window, available, now)
 	if available && window.RemainingPct < 25 {
 		color = pal.Amber
@@ -173,11 +173,45 @@ func renderQuotaWindow(c *ui.Context, pal theme.Palette, tr i18n.Strings, key, l
 	})
 }
 
-func quotaWindowDisplay(tr i18n.Strings, window quota.WindowQuota, available bool, now time.Time) (string, string, float32) {
+func quotaWindowDisplay(tr *i18n.Strings, window quota.WindowQuota, available bool, now time.Time) (string, string, float32) {
 	if !available {
 		return "--%", tr.QuotaResetUnknown, 0
 	}
 	return fmtQuotaPct(window.RemainingPct), fmtResetCountdown(tr, window.ResetAt, now), float32(window.RemainingPct / 100)
+}
+
+type quotaTrendCacheKey struct {
+	updatedAt    time.Time
+	rng          string
+	fiveHourLen  int
+	weeklyLen    int
+	fiveHourLast time.Time
+	weeklyLast   time.Time
+}
+
+func (a *App) cachedQuotaTrends(q quota.QuotaSnapshot, rng string, fiveHour, weekly []quota.TrendPoint) []quotaTrendSample {
+	var fhLast, wkLast time.Time
+	if len(fiveHour) > 0 {
+		fhLast = fiveHour[len(fiveHour)-1].Timestamp
+	}
+	if len(weekly) > 0 {
+		wkLast = weekly[len(weekly)-1].Timestamp
+	}
+	key := quotaTrendCacheKey{
+		updatedAt:    q.UpdatedAt,
+		rng:          rng,
+		fiveHourLen:  len(fiveHour),
+		weeklyLen:    len(weekly),
+		fiveHourLast: fhLast,
+		weeklyLast:   wkLast,
+	}
+	if a.quotaTrendKey == key && a.quotaTrendCache != nil {
+		return a.quotaTrendCache
+	}
+	merged := mergeQuotaTrends(fiveHour, weekly)
+	a.quotaTrendKey = key
+	a.quotaTrendCache = merged
+	return merged
 }
 
 type quotaTrendSample struct {
@@ -237,7 +271,7 @@ func (a *App) renderQuotaTrendCard(c *ui.Context, pal theme.Palette, q quota.Quo
 	if a.quotaRange == "7d" {
 		fiveHour, weekly = q.FiveHourTrend.Last7d, q.WeeklyTrend.Last7d
 	}
-	pts := mergeQuotaTrends(fiveHour, weekly)
+	pts := a.cachedQuotaTrends(q, a.quotaRange, fiveHour, weekly)
 
 	card.Children(func() {
 		// Header: Title + Series filter pill + 24h/7d range pill.
@@ -628,7 +662,7 @@ func fmtSignedPctDelta(delta float64) string {
 	return fmt.Sprintf("%+.0f%%", rounded)
 }
 
-func fmtResetCountdown(tr i18n.Strings, resetAt, now time.Time) string {
+func fmtResetCountdown(tr *i18n.Strings, resetAt, now time.Time) string {
 	if resetAt.IsZero() {
 		return tr.QuotaResetUnknown
 	}

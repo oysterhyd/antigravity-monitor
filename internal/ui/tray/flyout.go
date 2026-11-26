@@ -6,7 +6,6 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
 	"github.com/oysterhyd/antigravity-monitor/internal/i18n"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
@@ -65,11 +64,7 @@ func (ctl *Controller) buildView(c *ui.Context) {
 	case runtime.GOOS == "windows":
 		shell.Background(pal.FlyoutOpaque)
 	default:
-		shell.Radius(flyoutRadius).Material(glass.Glass{
-			Style:   glass.Regular,
-			Tint:    pal.FlyoutGlass,
-			Clarity: 0.35,
-		}).Border(1, pal.RimEdge)
+		shell.Radius(flyoutRadius).Background(pal.FlyoutOpaque).Border(1, pal.RimEdge)
 	}
 
 	// Top 1px specular rim gleam across the glass top edge.
@@ -100,7 +95,7 @@ func (ctl *Controller) buildView(c *ui.Context) {
 
 func (ctl *Controller) renderSegmentedTabs(c *ui.Context, pal palette) {
 	st := ctl.state
-	tr := i18n.Get(st.Settings.Language)
+	tr := i18n.GetPtr(st.Settings.Language)
 	seg := ui.Box(c.Key("tray-seg")).AlignSelf(ui.Stretch).Height(32).Radius(16).
 		Background(pal.SegBg).Padding(3)
 
@@ -146,7 +141,7 @@ func (ctl *Controller) renderSegmentedTabs(c *ui.Context, pal palette) {
 
 func (ctl *Controller) renderHeader(c *ui.Context, pal palette, conv model.ConversationSnapshot, hasConv bool) {
 	st := ctl.state
-	tr := i18n.Get(st.Settings.Language)
+	tr := i18n.GetPtr(st.Settings.Language)
 
 	var title string
 	var ic *ui.SVG
@@ -336,7 +331,7 @@ func (ctl *Controller) renderHeader(c *ui.Context, pal palette, conv model.Conve
 
 func (ctl *Controller) renderHeroPair(c *ui.Context, pal palette, conv model.ConversationSnapshot, hasConv bool) {
 	st := ctl.state
-	tr := i18n.Get(st.Settings.Language)
+	tr := i18n.GetPtr(st.Settings.Language)
 
 	var (
 		lbl1, sub1 string
@@ -469,7 +464,7 @@ func (ctl *Controller) renderDotMatrixBlock(c *ui.Context, pal palette) {
 
 func (ctl *Controller) renderMiddleSection(c *ui.Context, pal palette, conv model.ConversationSnapshot, hasConv bool) {
 	st := ctl.state
-	tr := i18n.Get(st.Settings.Language)
+	tr := i18n.GetPtr(st.Settings.Language)
 	themePal := theme.LightPalette()
 	if pal.Dark {
 		themePal = theme.DarkPalette()
@@ -614,7 +609,7 @@ func renderLabeledBar(c *ui.Context, key string, pal palette, left, right string
 
 func (ctl *Controller) renderBottomSection(c *ui.Context, pal palette, conv model.ConversationSnapshot, hasConv bool) {
 	st := ctl.state
-	tr := i18n.Get(st.Settings.Language)
+	tr := i18n.GetPtr(st.Settings.Language)
 	ui.Column(c.Key("tray-bot")).AlignSelf(ui.Stretch).Gap(5).Children(func() {
 		switch st.Tab {
 		case TabPerf:
@@ -732,7 +727,7 @@ func renderMetricPairRow(c *ui.Context, key string, pal palette, label, primary,
 
 func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 	st := ctl.state
-	tr := i18n.Get(st.Settings.Language)
+	tr := i18n.GetPtr(st.Settings.Language)
 
 	ui.Box(c).AlignSelf(ui.Stretch).Height(1).Background(pal.Divider)
 
@@ -777,6 +772,7 @@ func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 			})
 			if quotaBtn.Clicked() {
 				st.ToggleView(ViewQuota)
+				ctl.notifyViewActivity()
 			}
 
 			histActive := st.View == ViewHistory
@@ -799,6 +795,7 @@ func (ctl *Controller) renderFooter(c *ui.Context, pal palette) {
 				if st.View == ViewHistory {
 					ctl.histHasCache = false
 				}
+				ctl.notifyViewActivity()
 			}
 
 			gearAnchor = ui.ButtonBase(c.Key("settings-gear-btn")).

@@ -9,7 +9,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -207,8 +206,11 @@ type transcriptLine struct {
 	InputTokens     int64                `json:"input_tokens"`
 	CacheReadTokens int64                `json:"cache_read_tokens"`
 	OutputTokens    int64                `json:"output_tokens"`
-	Content         string               `json:"content"`
 	ToolCalls       []transcriptToolCall `json:"tool_calls"`
+}
+
+type transcriptContentOnly struct {
+	Content string `json:"content"`
 }
 
 type transcriptToolCall struct {
@@ -216,7 +218,36 @@ type transcriptToolCall struct {
 	Args map[string]string `json:"args"`
 }
 
-var reSubagentConvID = regexp.MustCompile(`"conversationId"\s*:\s*"([^"]+)"`)
+var convIDMarker = []byte("conversationId")
+
+func extractSubagentConvID(content string) (string, bool) {
+	const needle = `"conversationId"`
+	pos := strings.Index(content, needle)
+	if pos < 0 {
+		return "", false
+	}
+	rest := content[pos+len(needle):]
+	i := 0
+	for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t' || rest[i] == '\r' || rest[i] == '\n') {
+		i++
+	}
+	if i >= len(rest) || rest[i] != ':' {
+		return "", false
+	}
+	i++
+	for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t' || rest[i] == '\r' || rest[i] == '\n') {
+		i++
+	}
+	if i >= len(rest) || rest[i] != '"' {
+		return "", false
+	}
+	start := i + 1
+	end := strings.IndexByte(rest[start:], '"')
+	if end <= 0 {
+		return "", false
+	}
+	return rest[start : start+end], true
+}
 
 func (t *TranscriptTailer) parseLine(line []byte) {
 	var entry transcriptLine
@@ -287,20 +318,23 @@ func (t *TranscriptTailer) parseLine(line []byte) {
 
 	default:
 		// Look for subagent creation response containing "conversationId".
-		if entry.Content != "" && strings.Contains(entry.Content, "conversationId") {
-			if m := reSubagentConvID.FindStringSubmatch(entry.Content); len(m) == 2 {
-				childID := m[1]
-				role := ""
-				if r, ok := t.pendingSubagentByStep[entry.StepIndex]; ok {
-					role = r
-					delete(t.pendingSubagentByStep, entry.StepIndex)
-					t.removeFromQueue(r)
-				} else if len(t.pendingSubagentQueue) > 0 {
-					role = t.pendingSubagentQueue[0]
-					t.pendingSubagentQueue = t.pendingSubagentQueue[1:]
-				}
-				if role != "" {
-					t.subagentRoles[childID] = role
+		// Defer decoding the potentially large "content" field until we confirm the marker exists.
+		if bytes.Contains(line, convIDMarker) {
+			var contentEntry transcriptContentOnly
+			if err := json.Unmarshal(line, &contentEntry); err == nil && contentEntry.Content != "" {
+				if childID, ok := extractSubagentConvID(contentEntry.Content); ok {
+					role := ""
+					if r, ok := t.pendingSubagentByStep[entry.StepIndex]; ok {
+						role = r
+						delete(t.pendingSubagentByStep, entry.StepIndex)
+						t.removeFromQueue(r)
+					} else if len(t.pendingSubagentQueue) > 0 {
+						role = t.pendingSubagentQueue[0]
+						t.pendingSubagentQueue = t.pendingSubagentQueue[1:]
+					}
+					if role != "" {
+						t.subagentRoles[childID] = role
+					}
 				}
 			}
 		}

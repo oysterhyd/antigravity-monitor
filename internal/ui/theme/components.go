@@ -4,7 +4,6 @@ import (
 	"math"
 	"time"
 
-	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
 )
@@ -14,8 +13,6 @@ type CardOptions struct {
 	Radius      float32
 	Selected    bool
 	Interactive bool
-	UseShader   bool    // Use plugins/glass shader material when layering over rich content.
-	Clarity     float32 // 0..1 clarity passed to glass.Glass when UseShader is true.
 	PingAlpha   float32 // 0..1 subtle accent ripple ring when new telemetry arrives.
 }
 
@@ -36,31 +33,16 @@ func GlassCard(c *ui.Context, pal Palette, opts CardOptions) ui.Element {
 		el.Cursor(ui.CursorPointer)
 	}
 
-	if opts.UseShader {
-		tint := pal.CardBg
-		if opts.Selected {
-			tint = pal.CardActive
-		} else if hovered {
-			tint = pal.CardHover
-		}
-		el.Material(glass.Glass{
-			Style:       glass.Regular,
-			Tint:        tint,
-			Clarity:     opts.Clarity,
-			Interactive: opts.Interactive,
-		})
-	} else {
-		bg := pal.CardBg
-		if opts.Selected {
-			bg = pal.CardActive
-		} else if hovered && opts.Interactive {
-			bg = pal.CardHover
-		}
-		el.Background(el.AnimateColor("card-bg", bg, ui.Animation{
-			Duration:  180 * time.Millisecond,
-			NonMotion: true,
-		}))
+	bg := pal.CardBg
+	if opts.Selected {
+		bg = pal.CardActive
+	} else if hovered && opts.Interactive {
+		bg = pal.CardHover
 	}
+	el.Background(el.AnimateColor("card-bg", bg, ui.Animation{
+		Duration:  180 * time.Millisecond,
+		NonMotion: true,
+	}))
 
 	borderColor := pal.RimEdge
 	if opts.Selected {
@@ -459,7 +441,13 @@ func SegmentedContextBar(
 	})
 
 	// Compute normalized segment fractions once for both hit-testing and drawing.
-	fracs := make([]float32, len(segments))
+	var fracsArr [8]float32
+	var fracs []float32
+	if len(segments) <= len(fracsArr) {
+		fracs = fracsArr[:len(segments)]
+	} else {
+		fracs = make([]float32, len(segments))
+	}
 	for i, s := range segments {
 		if s.Tokens > 0 {
 			fracs[i] = float32(s.Tokens) / float32(segSum)
@@ -491,7 +479,13 @@ func SegmentedContextBar(
 		activeHighlight = hoveredIdx
 	}
 
-	colors := make([]ui.Color, len(segments))
+	var colorsArr [8]ui.Color
+	var colors []ui.Color
+	if len(segments) <= len(colorsArr) {
+		colors = colorsArr[:len(segments)]
+	} else {
+		colors = make([]ui.Color, len(segments))
+	}
 	for i, s := range segments {
 		colors[i] = SegmentColor(pal, s.Key)
 	}
@@ -512,7 +506,13 @@ func SegmentedContextBar(
 
 		p.Clip(fillRect, rad, func() {
 			// Ensure very small non-zero segments remain visible (>= 2.5px) while fitting fillW.
-			widths := make([]float32, len(fracs))
+			var widthsArr [8]float32
+			var widths []float32
+			if len(fracs) <= len(widthsArr) {
+				widths = widthsArr[:len(fracs)]
+			} else {
+				widths = make([]float32, len(fracs))
+			}
 			var sumW float32
 			for i, fr := range fracs {
 				if fr <= 0 {
@@ -531,7 +531,8 @@ func SegmentedContextBar(
 			}
 
 			x := r.X
-			var dividers []float32
+			var divArr [8]float32
+			dividers := divArr[:0]
 			for i, w := range widths {
 				if w <= 0 {
 					continue

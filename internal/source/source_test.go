@@ -555,3 +555,222 @@ func TestLocalAntigravityRealDataAlignment(t *testing.T) {
 	t.Logf("Verified %d real local requests across %d conversations with 0 token mismatches (open L2 handles=%d)",
 		matched, len(snap.Conversations), prov.OpenConvDBHandles())
 }
+
+func TestProviderZeroBroadcastWhenIdle(t *testing.T) {
+	root := t.TempDir()
+	summaries := createTestSummariesDB(t, root)
+	defer summaries.Close()
+	now := time.Now().UTC()
+	if _, err := summaries.Exec(`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time) VALUES ('idle-1', 'Idle Chat', ?)`, now.Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	db := createTestConvDB(t, root, "idle-1")
+	defer db.Close()
+	insertGenRow(t, db, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 100, 900, 0, 20, 1020, 512000, time.Second, 2*time.Second, now, "")
+
+	prov, err := NewProvider(Options{RootDir: root, DisableWatcher: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+
+	ch, cancel := prov.Subscribe()
+	defer cancel()
+	<-ch // drain initial snapshot
+
+	if err := prov.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case snap := <-ch:
+		t.Fatalf("expected no broadcast on unchanged Refresh, got snapshot generated at %v", snap.GeneratedAt)
+	default:
+	}
+
+	// Mutating WAL must trigger a broadcast on the next Refresh.
+	insertGenRow(t, db, 1, 2, "gemini-4-neon", "Gemini 4 Neon (High)", 150, 900, 0, 30, 1080, 512000, time.Second, 2*time.Second, now.Add(time.Second), "")
+	if err := prov.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case snap := <-ch:
+		c, ok := snap.FindConversation("idle-1")
+		if !ok || c.TreeMetrics.RequestCount != 2 {
+			t.Fatalf("expected updated conversation with 2 requests, got %+v", c)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected broadcast after WAL mutation")
+	}
+}
+
+func TestProviderAsyncInitHydratesTopOneThenBackground(t *testing.T) {
+	root := t.TempDir()
+	summaries := createTestSummariesDB(t, root)
+	defer summaries.Close()
+	now := time.Now().UTC()
+	for i, id := range []string{"c1", "c2", "c3"} {
+		ts := now.Add(-time.Duration(i) * time.Minute).Format(time.RFC3339)
+		if _, err := summaries.Exec(`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time) VALUES (?, ?, ?)`, id, "Chat "+id, ts); err != nil {
+			t.Fatal(err)
+		}
+		db := createTestConvDB(t, root, id)
+		insertGenRow(t, db, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 100, 900, 0, 20, 1020, 512000, time.Second, 2*time.Second, now.Add(-time.Duration(i)*time.Minute), "")
+		_ = db.Close()
+	}
+
+	prov, err := NewProvider(Options{
+		RootDir:          root,
+		MaxHydratedTrees: 3,
+		AsyncInit:        true,
+		PollInterval:     time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+
+	// Top conversation must be hydrated immediately on first frame.
+	initSnap := prov.Snapshot()
+	if len(initSnap.Conversations) != 3 {
+		t.Fatalf("expected 3 conversations, got %d", len(initSnap.Conversations))
+	}
+	if initSnap.Conversations[0].TreeMetrics.RequestCount != 1 {
+		t.Fatalf("expected top conversation hydrated synchronously, got reqs=%d", initSnap.Conversations[0].TreeMetrics.RequestCount)
+	}
+
+	// Remaining conversations finish hydrating asynchronously in runLoop.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := prov.Snapshot()
+		allHydrated := true
+		for _, c := range snap.Conversations {
+			if c.TreeMetrics.RequestCount != 1 {
+				allHydrated = false
+				break
+			}
+		}
+		if allHydrated {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("background AsyncInit hydration did not complete in time: %+v", prov.Snapshot().Conversations)
+}
+
+func TestWatcherAttachesLateCreatedTranscriptDir(t *testing.T) {
+	root := t.TempDir()
+	events := make(chan watchEvent, 8)
+	w, err := newDirWatcher(root, 20*time.Millisecond, func(ev watchEvent) {
+		events <- ev
+	})
+	if err != nil {
+		t.Fatalf("newDirWatcher: %v", err)
+	}
+	defer w.Close()
+
+	convID := "conv-late-tr"
+	ids := map[string]bool{convID: true}
+
+	// Register before brain/<convID>/.system_generated/logs exists.
+	w.WatchTranscriptDirs(ids)
+
+	// Create the transcript log directory and re-register with the exact same ID set.
+	trPath := TranscriptPath(root, convID)
+	if err := os.MkdirAll(filepath.Dir(trPath), 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	w.WatchTranscriptDirs(ids)
+
+	// Appending transcript.jsonl must trigger a real-time fsnotify watchEvent.
+	if err := os.WriteFile(trPath, []byte(`{"step_index":0,"type":"USER_INPUT","created_at":"2026-11-25T10:00:00Z"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-events:
+			if ev.ConvID == convID {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for fsnotify event on late-created transcript dir")
+		}
+	}
+}
+
+func TestAsyncInitEnforcesHardLimitWithMultipleRunningTrees(t *testing.T) {
+	root := t.TempDir()
+	summaries := createTestSummariesDB(t, root)
+	defer summaries.Close()
+	now := time.Now().UTC()
+
+	for i, id := range []string{"run-1", "run-2", "run-3"} {
+		ts := now.Add(-time.Duration(i) * time.Minute).Format(time.RFC3339)
+		if _, err := summaries.Exec(
+			`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time, status, not_fully_idle) VALUES (?, ?, ?, 'CASCADE_RUN_STATUS_RUNNING', 1)`,
+			id, "Running "+id, ts,
+		); err != nil {
+			t.Fatal(err)
+		}
+		db := createTestConvDB(t, root, id)
+		insertGenRow(t, db, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 100, 900, 0, 20, 1020, 512000, time.Second, 2*time.Second, now.Add(-time.Duration(i)*time.Minute), "")
+		_ = db.Close()
+	}
+
+	// Build Provider with DisableWatcher=true so we can inspect refreshInternal(..., maxHydratedOverride=1)
+	// deterministically without racing runLoop.
+	prov, err := NewProvider(Options{
+		RootDir:          root,
+		MaxHydratedTrees: 8,
+		DisableWatcher:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+
+	// Reset cached state and perform a strict budget-1 initial sync (matching AsyncInit first frame).
+	prov.syncMu.Lock()
+	prov.trees = nil
+	prov.hasSnapshot = false
+	prov.fullHydrated = false
+	for _, rs := range prov.roots {
+		rs.summaries.versionKnown = false
+		rs.convPool.PruneCache(nil)
+	}
+	prov.syncMu.Unlock()
+
+	if err := prov.refreshInternal(context.Background(), false, 1); err != nil {
+		t.Fatalf("refreshInternal(budget=1): %v", err)
+	}
+
+	snap := prov.Snapshot()
+	if snap.RunningCount != 3 {
+		t.Fatalf("RunningCount = %d, want 3", snap.RunningCount)
+	}
+	hydrated := 0
+	for _, c := range snap.Conversations {
+		if c.TreeMetrics.RequestCount > 0 {
+			hydrated++
+		}
+	}
+	if hydrated != 1 {
+		t.Fatalf("synchronously hydrated %d running trees on first frame, want hard cap 1", hydrated)
+	}
+
+	// Full background refresh must hydrate all 3 running trees.
+	if err := prov.refreshInternal(context.Background(), false, 0); err != nil {
+		t.Fatalf("refreshInternal(full): %v", err)
+	}
+	fullSnap := prov.Snapshot()
+	fullHydrated := 0
+	for _, c := range fullSnap.Conversations {
+		if c.TreeMetrics.RequestCount == 1 {
+			fullHydrated++
+		}
+	}
+	if fullHydrated != 3 {
+		t.Fatalf("hydrated %d running trees after full refresh, want 3", fullHydrated)
+	}
+}

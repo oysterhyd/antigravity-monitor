@@ -32,6 +32,13 @@ func (d *dotMatrixRenderer) markDirty() {
 	d.dirty = true
 }
 
+func (d *dotMatrixRenderer) release() {
+	d.canvas = nil
+	d.canvasW = 0
+	d.canvasH = 0
+	d.dirty = true
+}
+
 func (d *dotMatrixRenderer) paint(c *ui.Context, p *ui.Painter, r ui.Rect, st *State, pal palette) {
 	if r.W <= 0 || r.H <= 0 {
 		return

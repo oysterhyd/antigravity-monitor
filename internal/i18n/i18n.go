@@ -571,10 +571,16 @@ var enStrings = Strings{
 
 // Get returns the localized string table for lang ("zh" or "en").
 func Get(lang string) Strings {
+	return *GetPtr(lang)
+}
+
+// GetPtr returns a read-only pointer to the localized string table for lang ("zh" or "en"),
+// avoiding ~2.5 KB struct-value copies in UI render loops.
+func GetPtr(lang string) *Strings {
 	if Normalize(lang) == LangEN {
-		return enStrings
+		return &enStrings
 	}
-	return zhStrings
+	return &zhStrings
 }
 
 // AgentName localizes the canonical root agent label ("主 Agent" <-> "Main Agent")

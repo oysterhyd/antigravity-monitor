@@ -1,22 +1,90 @@
 package quota
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 func cliProcessAttributes() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+	return &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: windows.CREATE_NO_WINDOW,
+	}
+}
+
+// prependOrAppendCLI prefers native .exe binaries over .cmd/.bat/.ps1 shims on Windows
+// so background quota polls never flash a console host window via cmd.exe wrappers.
+func prependOrAppendCLI(candidates []string, lookedUp string) []string {
+	ext := strings.ToLower(filepath.Ext(lookedUp))
+	if ext == ".cmd" || ext == ".bat" || ext == ".ps1" {
+		return append(candidates, lookedUp)
+	}
+	return append([]string{lookedUp}, candidates...)
+}
+
+// execCLICommand runs command completely hidden and binds it to a Windows Job Object
+// configured with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE so any grandchild processes spawned
+// by agy.exe are terminated cleanly when the command finishes or times out.
+func execCLICommand(command *exec.Cmd) ([]byte, error) {
+	var stdout bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = nil
+
+	if err := command.Start(); err != nil {
+		return nil, err
+	}
+
+	var job windows.Handle
+	if h, err := windows.CreateJobObject(nil, nil); err == nil && h != 0 {
+		info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
+			BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{
+				LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+			},
+		}
+		_, setErr := windows.SetInformationJobObject(
+			h,
+			windows.JobObjectExtendedLimitInformation,
+			uintptr(unsafe.Pointer(&info)),
+			uint32(unsafe.Sizeof(info)),
+		)
+		if setErr == nil && command.Process != nil {
+			if proc, openErr := windows.OpenProcess(
+				windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE,
+				false,
+				uint32(command.Process.Pid),
+			); openErr == nil {
+				if windows.AssignProcessToJobObject(h, proc) == nil {
+					job = h
+				}
+				_ = windows.CloseHandle(proc)
+			}
+		}
+		if job == 0 {
+			_ = windows.CloseHandle(h)
+		}
+	}
+	if job != 0 {
+		defer windows.CloseHandle(job)
+	}
+
+	if err := command.Wait(); err != nil {
+		return nil, err
+	}
+	return stdout.Bytes(), nil
 }
 
 func cliCandidates() []string {

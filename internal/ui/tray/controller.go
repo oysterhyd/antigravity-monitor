@@ -22,11 +22,13 @@ import (
 // Callbacks connects tray actions to the host application shell (e.g. Track 2's
 // desktop window once merged in cmd/monitor).
 type Callbacks struct {
-	OnOpenDesktop    func()
-	OnOpenView       func(ViewMode)
-	OnFocusAgent     func(convID, agentID string)
-	OnSettingsChange func(model.Settings)
-	OnQuit           func()
+	OnOpenDesktop     func()
+	OnOpenView        func(ViewMode)
+	OnFocusAgent      func(convID, agentID string)
+	OnSettingsChange  func(model.Settings)
+	OnQuotaViewActive func(active bool)
+	OnHistoryViewOpen func()
+	OnQuit            func()
 }
 
 // Options configures a tray Controller.
@@ -181,11 +183,33 @@ func (ctl *Controller) ShowFlyout() {
 	})
 	ctl.flyout.OnClosed(func() {
 		ctl.flyout = nil
+		ctl.dotMatrix.release()
 		ctl.state.SessionMenuOpen = false
 		ctl.state.SettingsOpen = false
 		ctl.state.HoverDotCol = -1
 		ctl.state.HoverHistIdx = -1
+		ctl.notifyViewActivity()
 	})
+	ctl.notifyViewActivity()
+}
+
+// InvalidateFlyout requests a repaint of the tray flyout if it is currently open.
+func (ctl *Controller) InvalidateFlyout() {
+	mygo.RunOnMain(func() {
+		if ctl.flyout != nil {
+			ctl.flyout.Invalidate()
+		}
+	})
+}
+
+func (ctl *Controller) notifyViewActivity() {
+	quotaActive := ctl.flyout != nil && ctl.state.View == ViewQuota
+	if ctl.opts.Callbacks.OnQuotaViewActive != nil {
+		ctl.opts.Callbacks.OnQuotaViewActive(quotaActive)
+	}
+	if ctl.flyout != nil && ctl.state.View == ViewHistory && ctl.opts.Callbacks.OnHistoryViewOpen != nil {
+		ctl.opts.Callbacks.OnHistoryViewOpen()
+	}
 }
 
 // HideFlyout closes the active flyout window if open.
@@ -208,11 +232,11 @@ func (ctl *Controller) ApplySettings(s model.Settings) {
 			ctl.rebuildMenu()
 			ctl.tray.SetMenu(ctl.menu)
 		}
-		ctl.dotMatrix.markDirty()
-		ctl.syncTrayMetadata()
 		if ctl.flyout != nil {
+			ctl.dotMatrix.markDirty()
 			ctl.flyout.Invalidate()
 		}
+		ctl.syncTrayMetadata()
 	})
 }
 
@@ -251,9 +275,9 @@ func (ctl *Controller) startSubscription() {
 				}
 				mygo.RunOnMain(func() {
 					ctl.state.ApplySnapshot(snap)
-					ctl.dotMatrix.markDirty()
 					ctl.syncTrayMetadata()
 					if ctl.flyout != nil {
+						ctl.dotMatrix.markDirty()
 						ctl.flyout.Invalidate()
 					}
 				})
@@ -380,7 +404,7 @@ func (ctl *Controller) focusAgent(convID, agentID string) {
 }
 
 func (ctl *Controller) rebuildMenu() {
-	tr := i18n.Get(ctl.state.Settings.Language)
+	tr := i18n.GetPtr(ctl.state.Settings.Language)
 	ctl.followItem = &mygo.MenuItem{
 		ID:      "auto-follow",
 		Label:   tr.MenuAutoFollow,

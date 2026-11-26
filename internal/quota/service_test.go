@@ -89,3 +89,81 @@ func TestFrequentRefreshPreservesSevenDaysOfTrend(t *testing.T) {
 		}
 	}
 }
+
+func TestRefreshDeduplicatesUnchangedDiskWrites(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 24, 20, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "quota_history.json")
+	reading := Reading{
+		Gemini:    PoolQuota{FiveHour: WindowQuota{RemainingPct: 80}, Weekly: WindowQuota{RemainingPct: 90}},
+		ClaudeGPT: PoolQuota{FiveHour: WindowQuota{RemainingPct: 75}, Weekly: WindowQuota{RemainingPct: 85}},
+	}
+	service := NewService(path, func(context.Context) (Reading, error) { return reading, nil })
+
+	if err := service.Refresh(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	// Backdate file mtime so any unexpected disk rewrite is unambiguously detectable.
+	sentinel := now.Add(-time.Hour)
+	if err := os.Chtimes(path, sentinel, sentinel); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same reading within the same 5-minute bucket must NOT rewrite disk.
+	if err := service.Refresh(ctx, now.Add(30*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	info1, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info1.ModTime().Equal(sentinel) {
+		t.Fatalf("expected unchanged in-bucket refresh to skip disk write, mtime=%v want=%v", info1.ModTime(), sentinel)
+	}
+
+	// Changing reading must persist immediately.
+	reading.Gemini.FiveHour.RemainingPct = 78
+	if err := service.Refresh(ctx, now.Add(60*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	info2, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info2.ModTime().Equal(sentinel) {
+		t.Fatal("expected changed reading to persist to disk")
+	}
+}
+
+func TestRefreshRetriesDiskSaveAfterFailureInSameBucket(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 24, 20, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "quota_history.json")
+	reading := Reading{
+		Gemini:    PoolQuota{FiveHour: WindowQuota{RemainingPct: 80}, Weekly: WindowQuota{RemainingPct: 90}},
+		ClaudeGPT: PoolQuota{FiveHour: WindowQuota{RemainingPct: 75}, Weekly: WindowQuota{RemainingPct: 85}},
+	}
+	service := NewService(path, func(context.Context) (Reading, error) { return reading, nil })
+
+	// Block path with a non-empty directory so the initial save fails.
+	if err := os.MkdirAll(filepath.Join(path, "blocker"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Refresh(ctx, now); err == nil {
+		t.Fatal("expected first Refresh to fail when historyPath is blocked by a directory")
+	}
+
+	// Remove blocker and retry within the exact same 5-minute bucket with unchanged reading.
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Refresh(ctx, now.Add(30*time.Second)); err != nil {
+		t.Fatalf("retry Refresh failed: %v", err)
+	}
+
+	// File must now exist on disk and reload cleanly.
+	reloaded := NewService(path, nil).State(now.Add(30 * time.Second))
+	if reloaded.UpdatedAt.IsZero() || reloaded.Reading != reading {
+		t.Fatalf("expected persisted sample after retry, got %+v", reloaded)
+	}
+}

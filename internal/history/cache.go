@@ -77,6 +77,10 @@ func statConvDB(dbPath string) (convFileStat, error) {
 	if err != nil {
 		return convFileStat{}, err
 	}
+	return statConvDBWithInfo(dbPath, dbInfo), nil
+}
+
+func statConvDBWithInfo(dbPath string, dbInfo os.FileInfo) convFileStat {
 	st := convFileStat{
 		dbMtimeNs: dbInfo.ModTime().UnixNano(),
 		dbSize:    dbInfo.Size(),
@@ -92,7 +96,7 @@ func statConvDB(dbPath string) (convFileStat, error) {
 		}
 		st.effectiveSize += st.walSize
 	}
-	return st, nil
+	return st
 }
 
 func (c *cachedConv) matches(st convFileStat) bool {
@@ -162,6 +166,23 @@ func loadCache(cachePath, pricingHash string) (cacheFile, bool) {
 	}
 	if cf.Conversations == nil {
 		cf.Conversations = make(map[string]*cachedConv)
+	}
+	intern := make(map[string]string, 16)
+	for _, conv := range cf.Conversations {
+		if conv == nil {
+			continue
+		}
+		for i := range conv.Requests {
+			m := conv.Requests[i].SubModel
+			if m == "" {
+				continue
+			}
+			if cached, ok := intern[m]; ok {
+				conv.Requests[i].SubModel = cached
+			} else {
+				intern[m] = m
+			}
+		}
 	}
 	return cf, false
 }

@@ -16,6 +16,31 @@ import (
 	"github.com/oysterhyd/antigravity-monitor/internal/source"
 )
 
+type historySummary struct {
+	Title                string
+	Preview              string // kept only when Title is empty
+	AgentName            string
+	Workspace            string
+	ParentConversationID string
+	LastModifiedTime     time.Time
+}
+
+func slimHistorySummary(row source.SummaryRow) historySummary {
+	title := strings.TrimSpace(row.Title)
+	preview := ""
+	if title == "" {
+		preview = strings.TrimSpace(row.Preview)
+	}
+	return historySummary{
+		Title:                title,
+		Preview:              preview,
+		AgentName:            strings.TrimSpace(row.AgentName),
+		Workspace:            row.Workspace,
+		ParentConversationID: row.ParentConversationID,
+		LastModifiedTime:     row.LastModifiedTime,
+	}
+}
+
 // Service implements Aggregator over local Antigravity SQLite databases with
 // WAL-safe incremental (conv_id, mtime, size) caching across one or more data roots.
 type Service struct {
@@ -26,13 +51,16 @@ type Service struct {
 	calc         *metrics.Calculator
 	pricingHash  string
 
-	loadOnce sync.Once
-	syncMu   sync.Mutex
+	loadOnce    sync.Once
+	syncMu      sync.Mutex
+	sumStats    map[string]convFileStat
+	sumByRoot   map[string]map[string]historySummary
+	modelIntern map[string]string
 
 	mu         sync.RWMutex
 	cache      cacheFile
 	cacheDirty bool
-	summaries  map[string]source.SummaryRow
+	summaries  map[string]historySummary
 	parents    map[string]string
 	lastStats  RefreshStats
 }
@@ -88,9 +116,28 @@ func newService(roots []string, autoDiscover bool, discoverFn func() []string, c
 		cachePath:    cachePath,
 		calc:         calc,
 		pricingHash:  pricingHash,
-		summaries:    make(map[string]source.SummaryRow),
+		sumStats:     make(map[string]convFileStat),
+		sumByRoot:    make(map[string]map[string]historySummary),
+		modelIntern:  make(map[string]string, 16),
+		summaries:    make(map[string]historySummary),
 		parents:      make(map[string]string),
 	}
+}
+
+// Close satisfies io.Closer for callers managing aggregator lifecycle cleanly.
+func (s *Service) Close() error {
+	return nil
+}
+
+func (s *Service) internSubModelLocked(name string) string {
+	if name == "" {
+		return ""
+	}
+	if existing, ok := s.modelIntern[name]; ok {
+		return existing
+	}
+	s.modelIntern[name] = name
+	return name
 }
 
 func (s *Service) resolveRoots() []string {
@@ -139,24 +186,27 @@ func (s *Service) Refresh(ctx context.Context) error {
 
 	roots := s.resolveRoots()
 
-	nextSummaries, nextParents, sumErr := s.readSummaries(ctx, roots)
+	stagedSum, sumErr := s.readSummariesLocked(ctx, roots, prevSummaries, prevParents)
 	if sumErr != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		// Keep previous summaries if all L1 DBs had transient errors.
 		if len(prevSummaries) > 0 {
-			nextSummaries = prevSummaries
-			nextParents = prevParents
+			stagedSum = stagedSummaries{
+				summaries: prevSummaries,
+				parents:   prevParents,
+			}
 		}
 	}
+	nextSummaries := stagedSum.summaries
 
 	type convCandidate struct {
 		root   string
 		dbPath string
 		stat   convFileStat
 	}
-	candidates := make(map[string]convCandidate)
+	candidates := make(map[string]convCandidate, len(prevConvs))
 	var firstDirErr error
 	readAnyDir := false
 
@@ -185,10 +235,11 @@ func (s *Service) Refresh(ctx context.Context) error {
 				continue
 			}
 			dbPath := filepath.Join(convDir, name)
-			st, err := statConvDB(dbPath)
+			info, err := de.Info()
 			if err != nil {
 				continue
 			}
+			st := statConvDBWithInfo(dbPath, info)
 			if existing, ok := candidates[convID]; ok {
 				if existing.stat.effectiveMtimeNs > st.effectiveMtimeNs ||
 					(existing.stat.effectiveMtimeNs == st.effectiveMtimeNs && existing.stat.effectiveSize >= st.effectiveSize) {
@@ -206,29 +257,52 @@ func (s *Service) Refresh(ctx context.Context) error {
 		return firstDirErr
 	}
 
-	convIDs := make([]string, 0, len(candidates))
-	for id := range candidates {
-		convIDs = append(convIDs, id)
-	}
-	sort.Strings(convIDs)
-
-	nextConvs := make(map[string]*cachedConv, len(convIDs))
-	seenIDs := make(map[string]bool, len(convIDs))
 	var stats RefreshStats
+	var missIDs []string
+	for convID, cand := range candidates {
+		if prev, ok := prevConvs[convID]; ok && prev.matches(cand.stat) {
+			stats.Hits++
+			continue
+		}
+		missIDs = append(missIDs, convID)
+	}
+	for id := range prevConvs {
+		if _, ok := candidates[id]; !ok {
+			stats.Pruned++
+		}
+	}
 
-	for _, convID := range convIDs {
+	// Fast path: nothing in conversations/*.db changed, nothing pruned, and cache isn't dirty.
+	if len(missIDs) == 0 && stats.Pruned == 0 && !dirty {
+		if stagedSum.changed {
+			s.sumByRoot = stagedSum.sumByRoot
+			s.sumStats = stagedSum.sumStats
+		}
+		s.mu.Lock()
+		if stagedSum.changed {
+			s.summaries = stagedSum.summaries
+			s.parents = stagedSum.parents
+		}
+		s.lastStats = stats
+		s.mu.Unlock()
+		return nil
+	}
+
+	sort.Strings(missIDs)
+	nextConvs := make(map[string]*cachedConv, len(candidates))
+	for convID, cand := range candidates {
+		if prev, ok := prevConvs[convID]; ok && prev.matches(cand.stat) {
+			nextConvs[convID] = prev
+		}
+	}
+	if stats.Pruned > 0 {
+		dirty = true
+	}
+	for _, convID := range missIDs {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		cand := candidates[convID]
-		seenIDs[convID] = true
-
-		if prev, ok := prevConvs[convID]; ok && prev.matches(cand.stat) {
-			stats.Hits++
-			nextConvs[convID] = prev
-			continue
-		}
-
 		stats.Misses++
 		dirty = true
 		entry, err := s.scanConvDB(ctx, cand.root, convID, cand.dbPath, cand.stat, nextSummaries[convID])
@@ -240,13 +314,6 @@ func (s *Service) Refresh(ctx context.Context) error {
 			continue
 		}
 		nextConvs[convID] = entry
-	}
-
-	for id := range prevConvs {
-		if !seenIDs[id] {
-			stats.Pruned++
-			dirty = true
-		}
 	}
 
 	nextCache := cacheFile{
@@ -262,71 +329,169 @@ func (s *Service) Refresh(ctx context.Context) error {
 		dirty = false
 	}
 
+	if stagedSum.changed {
+		s.sumByRoot = stagedSum.sumByRoot
+		s.sumStats = stagedSum.sumStats
+	}
 	s.mu.Lock()
 	s.cache = nextCache
 	s.cacheDirty = dirty
-	s.summaries = nextSummaries
-	s.parents = nextParents
+	if stagedSum.changed {
+		s.summaries = stagedSum.summaries
+		s.parents = stagedSum.parents
+	}
 	s.lastStats = stats
 	s.mu.Unlock()
 
 	return nil
 }
 
-func (s *Service) readSummaries(ctx context.Context, roots []string) (map[string]source.SummaryRow, map[string]string, error) {
-	summaries := make(map[string]source.SummaryRow)
-	parents := make(map[string]string)
+type stagedSummaries struct {
+	summaries map[string]historySummary
+	parents   map[string]string
+	sumByRoot map[string]map[string]historySummary
+	sumStats  map[string]convFileStat
+	changed   bool
+}
+
+func (s *Service) readSummariesLocked(
+	ctx context.Context,
+	roots []string,
+	prevSummaries map[string]historySummary,
+	prevParents map[string]string,
+) (stagedSummaries, error) {
+	activeRoots := make(map[string]bool, len(roots))
+	nextByRoot := make(map[string]map[string]historySummary, len(roots))
+	nextStats := make(map[string]convFileStat, len(roots))
+	anyChanged := false
 	var firstErr error
 	succeeded := 0
 
 	for _, root := range roots {
+		activeRoots[root] = true
 		sumPath := filepath.Join(root, "conversation_summaries.db")
+		st, statErr := statConvDB(sumPath)
+		if statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				succeeded++
+				if _, had := s.sumByRoot[root]; had {
+					anyChanged = true
+				}
+				continue
+			}
+			if prevMap, ok := s.sumByRoot[root]; ok {
+				nextByRoot[root] = prevMap
+				if prevSt, ok := s.sumStats[root]; ok {
+					nextStats[root] = prevSt
+				}
+			}
+			if firstErr == nil {
+				firstErr = statErr
+			}
+			continue
+		}
+		if prevSt, ok := s.sumStats[root]; ok && prevSt == st {
+			if prevMap, hasMap := s.sumByRoot[root]; hasMap {
+				nextByRoot[root] = prevMap
+				nextStats[root] = prevSt
+				succeeded++
+				continue
+			}
+		}
+
 		reader := source.NewSummariesReader(sumPath)
 		rows, err := reader.ReadAll(ctx)
 		_ = reader.Close()
 		if err != nil {
+			if prevMap, ok := s.sumByRoot[root]; ok {
+				nextByRoot[root] = prevMap
+				if prevSt, ok := s.sumStats[root]; ok {
+					nextStats[root] = prevSt
+				}
+			}
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
 		succeeded++
+		anyChanged = true
+		rootMap := make(map[string]historySummary, len(rows))
 		for _, row := range rows {
-			if existing, ok := summaries[row.ConversationID]; ok {
-				summaries[row.ConversationID] = mergeHistorySummary(existing, row)
-			} else {
-				summaries[row.ConversationID] = row
+			if row.ConversationID == "" {
+				continue
 			}
-			if row.ParentConversationID != "" && row.ParentConversationID != row.ConversationID {
-				if _, exists := parents[row.ConversationID]; !exists {
-					parents[row.ConversationID] = row.ParentConversationID
+			slim := slimHistorySummary(row)
+			if existing, ok := rootMap[row.ConversationID]; ok {
+				rootMap[row.ConversationID] = mergeHistorySummary(existing, slim)
+			} else {
+				rootMap[row.ConversationID] = slim
+			}
+		}
+		nextByRoot[root] = rootMap
+		nextStats[root] = st
+	}
+
+	for root := range s.sumByRoot {
+		if !activeRoots[root] {
+			anyChanged = true
+		}
+	}
+
+	if succeeded == 0 && firstErr != nil {
+		return stagedSummaries{summaries: prevSummaries, parents: prevParents}, firstErr
+	}
+	if !anyChanged && prevSummaries != nil {
+		return stagedSummaries{summaries: prevSummaries, parents: prevParents}, nil
+	}
+
+	total := 0
+	for _, root := range roots {
+		total += len(nextByRoot[root])
+	}
+	summaries := make(map[string]historySummary, total)
+	parents := make(map[string]string, total/4)
+	for _, root := range roots {
+		for convID, row := range nextByRoot[root] {
+			if existing, ok := summaries[convID]; ok {
+				summaries[convID] = mergeHistorySummary(existing, row)
+			} else {
+				summaries[convID] = row
+			}
+			if row.ParentConversationID != "" && row.ParentConversationID != convID {
+				if _, exists := parents[convID]; !exists {
+					parents[convID] = row.ParentConversationID
 				}
 			}
 		}
 	}
-	if succeeded == 0 && firstErr != nil {
-		return summaries, parents, firstErr
-	}
-	return summaries, parents, nil
+	return stagedSummaries{
+		summaries: summaries,
+		parents:   parents,
+		sumByRoot: nextByRoot,
+		sumStats:  nextStats,
+		changed:   true,
+	}, nil
 }
 
-func mergeHistorySummary(a, b source.SummaryRow) source.SummaryRow {
+func mergeHistorySummary(a, b historySummary) historySummary {
 	primary, secondary := a, b
 	if b.LastModifiedTime.After(a.LastModifiedTime) {
 		primary, secondary = b, a
 	}
-	if strings.TrimSpace(primary.Title) == "" {
+	if primary.Title == "" {
 		primary.Title = secondary.Title
 	}
-	if strings.TrimSpace(primary.Preview) == "" {
+	if primary.Title != "" {
+		primary.Preview = ""
+	} else if primary.Preview == "" {
 		primary.Preview = secondary.Preview
 	}
-	if strings.TrimSpace(primary.AgentName) == "" {
+	if primary.AgentName == "" {
 		primary.AgentName = secondary.AgentName
 	}
 	if primary.Workspace == "" {
 		primary.Workspace = secondary.Workspace
-		primary.WorkspaceURIs = secondary.WorkspaceURIs
 	}
 	if primary.ParentConversationID == "" {
 		primary.ParentConversationID = secondary.ParentConversationID
@@ -334,7 +499,7 @@ func mergeHistorySummary(a, b source.SummaryRow) source.SummaryRow {
 	return primary
 }
 
-func (s *Service) scanConvDB(ctx context.Context, rootDir, convID, dbPath string, st convFileStat, sum source.SummaryRow) (*cachedConv, error) {
+func (s *Service) scanConvDB(ctx context.Context, rootDir, convID, dbPath string, st convFileStat, sum historySummary) (*cachedConv, error) {
 	db, err := source.OpenReadOnlySQLite(dbPath)
 	if err != nil {
 		return nil, err
@@ -481,7 +646,7 @@ func (s *Service) scanConvDB(ctx context.Context, rootDir, convID, dbPath string
 			entry.Requests = append(entry.Requests, cachedRequest{
 				TSUnixMs:      rec.Timestamp.UnixMilli(),
 				TSUnixNs:      rec.Timestamp.UnixNano(),
-				SubModel:      metrics.ClassifySubModel(rec.ModelSlug, rec.ModelDisplay),
+				SubModel:      s.internSubModelLocked(metrics.ClassifySubModel(rec.ModelSlug, rec.ModelDisplay)),
 				Pool:          metrics.ClassifyPool(rec.ModelSlug, rec.ModelDisplay),
 				InputTokens:   rec.InputTokens,
 				CacheReadTok:  rec.CacheReadTokens,
@@ -519,7 +684,7 @@ func (s *Service) scanConvDB(ctx context.Context, rootDir, convID, dbPath string
 			entry.Requests = append(entry.Requests, cachedRequest{
 				TSUnixMs:      rec.Timestamp.UnixMilli(),
 				TSUnixNs:      rec.Timestamp.UnixNano(),
-				SubModel:      metrics.ClassifySubModel(rec.ModelSlug, rec.ModelDisplay),
+				SubModel:      s.internSubModelLocked(metrics.ClassifySubModel(rec.ModelSlug, rec.ModelDisplay)),
 				Pool:          metrics.ClassifyPool(rec.ModelSlug, rec.ModelDisplay),
 				InputTokens:   rec.InputTokens,
 				CacheReadTok:  rec.CacheReadTokens,

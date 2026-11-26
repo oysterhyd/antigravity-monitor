@@ -98,12 +98,13 @@ func (a *App) renderCurvePane(c *ui.Context, pal theme.Palette, conv model.Conve
 
 		// Pointer hover & click pinning over chart points.
 		if len(slice) > 0 {
-			xs := make([]float32, len(slice))
-			for i := range slice {
-				if len(slice) == 1 {
+			n := len(slice)
+			xs := a.chartXs[:n]
+			for i := 0; i < n; i++ {
+				if n == 1 {
 					xs[i] = 0.5
 				} else {
-					xs[i] = float32(i) / float32(len(slice)-1)
+					xs[i] = float32(i) / float32(n-1)
 				}
 			}
 
@@ -120,7 +121,7 @@ func (a *App) renderCurvePane(c *ui.Context, pal theme.Palette, conv model.Conve
 						frac = 1
 					}
 					nearest := chart.Nearest(xs, frac)
-					if nearest >= 0 && nearest < len(slice) {
+					if nearest >= 0 && nearest < n {
 						a.hoverChartIdx = nearest
 						a.morpher.SetCrosshairTarget(float64(xs[nearest]), false)
 					}
@@ -129,12 +130,12 @@ func (a *App) renderCurvePane(c *ui.Context, pal theme.Palette, conv model.Conve
 				a.hoverChartIdx = -1
 			}
 
-			if plotBox.Clicked() && a.hoverChartIdx >= 0 && a.hoverChartIdx < len(slice) {
+			if plotBox.Clicked() && a.hoverChartIdx >= 0 && a.hoverChartIdx < n {
 				a.pinnedReqSeq = slice[a.hoverChartIdx].Seq
 			}
 
 			_, activeIdx, _ := a.inspectedRequest(reqs)
-			drawYs := a.morpher.Tail(nil, len(slice))
+			drawYs := a.morpher.Tail(a.chartYs[:0], n)
 			crossFrac, hasCross := a.morpher.CrosshairFrac()
 
 			strokeCol := pal.Accent

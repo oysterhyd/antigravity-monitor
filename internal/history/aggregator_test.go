@@ -528,6 +528,55 @@ func TestConcurrentRefreshAndQueryRace(t *testing.T) {
 	wg.Wait()
 }
 
+func TestRefreshRetryAfterCacheSaveFailurePreservesSummariesAndParents(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	sumDB := createTestSummariesDB(t, root)
+	insertSummaryRow(t, sumDB, "root-1", "Parent Session Title", "", "", "", "", now)
+	insertSummaryRow(t, sumDB, "sub-1", "", "", "", "Researcher", "root-1", now)
+	_ = sumDB.Close()
+
+	rootDB := createTestWALConvDB(t, root, "root-1")
+	insertGenRow(t, rootDB, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 1000, 0, 0, 200, 0, 1200, 512000, "", "", "", now)
+	_ = rootDB.Close()
+
+	subDB := createTestWALConvDB(t, root, "sub-1")
+	// Intentionally omit RootCascadeID/ParentCascadeID from protobuf so parent rollup relies on summaries DB.
+	insertGenRow(t, subDB, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 500, 0, 0, 100, 0, 600, 512000, "", "", "", now)
+	_ = subDB.Close()
+
+	// Block cachePath with a non-empty directory so saveCacheAtomic fails on the first Refresh.
+	cachePath := filepath.Join(t.TempDir(), "usage_cache.json")
+	if err := os.MkdirAll(filepath.Join(cachePath, "blocker"), 0o755); err != nil {
+		t.Fatalf("mkdir blocker: %v", err)
+	}
+
+	svc := NewAggregator(root, cachePath, nil)
+	if err := svc.Refresh(context.Background()); err == nil {
+		t.Fatalf("expected first Refresh to fail when cachePath is a non-empty directory")
+	}
+
+	// Remove the blocker directory and retry Refresh; summaries & parent-child rollup must be committed.
+	if err := os.RemoveAll(cachePath); err != nil {
+		t.Fatalf("remove blocker: %v", err)
+	}
+	if err := svc.Refresh(context.Background()); err != nil {
+		t.Fatalf("retry Refresh failed: %v", err)
+	}
+
+	res := svc.Query(RangeToday, now)
+	if res.RequestCount != 2 {
+		t.Fatalf("RequestCount = %d, want 2", res.RequestCount)
+	}
+	if res.SessionCount != 1 {
+		t.Fatalf("SessionCount = %d, want 1 (sub-1 rolled up into root-1)", res.SessionCount)
+	}
+	if len(res.TopSessions) != 1 || res.TopSessions[0].ConvID != "root-1" || res.TopSessions[0].Title != "Parent Session Title" {
+		t.Fatalf("unexpected TopSessions after retry: %+v", res.TopSessions)
+	}
+}
+
 // --- Local test fixture & protowire helpers ---
 
 func createTestSummariesDB(t *testing.T, rootDir string) *sql.DB {

@@ -18,7 +18,7 @@ import (
 
 func (ctl *Controller) renderQuotaView(c *ui.Context, pal palette, now time.Time) {
 	st := ctl.state
-	tr := i18n.Get(st.Settings.Language)
+	tr := i18n.GetPtr(st.Settings.Language)
 	q := ctl.currentQuotaSnapshot(now)
 	available := !q.UpdatedAt.IsZero()
 
@@ -56,6 +56,7 @@ func (ctl *Controller) renderQuotaView(c *ui.Context, pal palette, now time.Time
 			})
 			if backBtn.Clicked() {
 				st.SetView(ViewLive)
+				ctl.notifyViewActivity()
 			}
 		})
 	})
@@ -85,7 +86,7 @@ func (ctl *Controller) renderQuotaView(c *ui.Context, pal palette, now time.Time
 }
 
 func renderTrayQuotaPoolCard(
-	c *ui.Context, pal palette, tr i18n.Strings,
+	c *ui.Context, pal palette, tr *i18n.Strings,
 	key, title string, available bool, pool quota.PoolQuota, color ui.Color, now time.Time,
 ) {
 	ui.Column(c.Key(key)).
@@ -106,7 +107,7 @@ func renderTrayQuotaPoolCard(
 }
 
 func renderTrayQuotaWindowRow(
-	c *ui.Context, pal palette, tr i18n.Strings,
+	c *ui.Context, pal palette, tr *i18n.Strings,
 	key, label string, w quota.WindowQuota, available bool, color ui.Color, now time.Time,
 ) {
 	pctText := "--%"
@@ -145,7 +146,7 @@ func renderTrayQuotaWindowRow(
 	})
 }
 
-func renderTrayQuotaTrendCard(c *ui.Context, pal palette, tr i18n.Strings, q quota.QuotaSnapshot) {
+func renderTrayQuotaTrendCard(c *ui.Context, pal palette, tr *i18n.Strings, q quota.QuotaSnapshot) {
 	fiveH := q.FiveHourTrend.Last24h
 	weekly := q.WeeklyTrend.Last24h
 
@@ -173,8 +174,6 @@ func renderTrayQuotaTrendCard(c *ui.Context, pal palette, tr i18n.Strings, q quo
 				return
 			}
 
-			fhCopy := append([]quota.TrendPoint(nil), fiveH...)
-			wkCopy := append([]quota.TrendPoint(nil), weekly...)
 			plot.Draw(func(p *ui.Painter, r ui.Rect) {
 				inner := ui.Rect{X: r.X + 4, Y: r.Y + 4, W: r.W - 8, H: r.H - 8}
 				if inner.W <= 4 || inner.H <= 4 {
@@ -222,15 +221,15 @@ func renderTrayQuotaTrendCard(c *ui.Context, pal palette, tr i18n.Strings, q quo
 					}
 				}
 
-				drawSeries(wkCopy, true)
-				drawSeries(fhCopy, false)
+				drawSeries(weekly, true)
+				drawSeries(fiveH, false)
 			})
 		})
 }
 
 func (ctl *Controller) renderHistoryView(c *ui.Context, pal palette, now time.Time) {
 	st := ctl.state
-	tr := i18n.Get(st.Settings.Language)
+	tr := i18n.GetPtr(st.Settings.Language)
 	res := ctl.queryHistory(now)
 
 	// 1. Top Range Segmented Pill: [ Today | 7D | 30D | All ]
@@ -303,6 +302,7 @@ func (ctl *Controller) renderHistoryView(c *ui.Context, pal palette, now time.Ti
 		})
 		if backBtn.Clicked() {
 			st.SetView(ViewLive)
+			ctl.notifyViewActivity()
 		}
 	})
 
@@ -387,7 +387,7 @@ func (ctl *Controller) renderHistoryView(c *ui.Context, pal palette, now time.Ti
 	})
 }
 
-func (ctl *Controller) renderTrayHistoryBars(c *ui.Context, pal palette, tr i18n.Strings, res history.QueryResult) {
+func (ctl *Controller) renderTrayHistoryBars(c *ui.Context, pal palette, tr *i18n.Strings, res history.QueryResult) {
 	st := ctl.state
 	buckets := res.Buckets
 
@@ -452,11 +452,10 @@ func (ctl *Controller) renderTrayHistoryBars(c *ui.Context, pal palette, tr i18n
 		if maxTok <= 0 {
 			maxTok = 1
 		}
-		drawBuckets := append([]history.BucketSummary(nil), buckets...)
 		hovered := st.HoverHistIdx
 
 		plotBox.Draw(func(p *ui.Painter, r ui.Rect) {
-			n := len(drawBuckets)
+			n := len(buckets)
 			if n == 0 || r.W <= 4 || r.H <= 8 {
 				return
 			}
@@ -471,7 +470,7 @@ func (ctl *Controller) renderTrayHistoryBars(c *ui.Context, pal palette, tr i18n
 				barW = max(2, slotW-1.5)
 			}
 
-			for i, bk := range drawBuckets {
+			for i, bk := range buckets {
 				alpha := float32(1.0)
 				if hovered >= 0 && i != hovered {
 					alpha = 0.42
@@ -554,7 +553,7 @@ func fmtQuotaPct(v float64) string {
 	return fmt.Sprintf("%.0f%%", math.Round(v))
 }
 
-func fmtResetCountdown(tr i18n.Strings, resetAt, now time.Time) string {
+func fmtResetCountdown(tr *i18n.Strings, resetAt, now time.Time) string {
 	if resetAt.IsZero() {
 		return tr.QuotaResetUnknown
 	}

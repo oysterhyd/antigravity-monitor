@@ -16,9 +16,11 @@ import (
 )
 
 const (
-	defaultMaxConversations = 20
-	defaultMaxHydratedTrees = 8
-	defaultPollInterval     = 3 * time.Second
+	defaultMaxConversations  = 20
+	defaultMaxHydratedTrees  = 8
+	defaultPollInterval      = 3 * time.Second
+	defaultIdlePollInterval  = 12 * time.Second
+	defaultRootDiscoverEvery = 30 * time.Second
 )
 
 // Options configures the local read-only Antigravity data engine.
@@ -44,10 +46,13 @@ type Options struct {
 	MaxHydratedTrees int
 	// Debounce sets the per-conversation fsnotify debounce interval (default 150ms).
 	Debounce time.Duration
-	// PollInterval sets the low-frequency safety-net refresh interval (default 3s; negative disables polling).
+	// PollInterval sets the low-frequency safety-net refresh interval (0 = adaptive 3s active / 12s idle; negative disables polling).
 	PollInterval time.Duration
 	// DisableWatcher disables fsnotify and background polling (useful for one-shot CLI runs and unit tests).
 	DisableWatcher bool
+	// AsyncInit hydrates only the top-1 active conversation synchronously during NewProvider
+	// and completes remaining background hydration asynchronously in runLoop for faster startup.
+	AsyncInit bool
 }
 
 // DefaultRootDir returns ~/.gemini/antigravity.
@@ -76,15 +81,21 @@ type Provider struct {
 	opts         Options
 	calc         *metrics.Calculator
 	autoDiscover bool
+	adaptivePoll bool
 	discoverFunc func() []string
 
 	// Sync serialization prevents overlapping DB refreshes while keeping Snapshot() non-blocking.
-	syncMu     sync.Mutex
-	roots      []*rootSource
-	rootsByKey map[string]*rootSource
-	convRoot   map[string]*rootSource
-	trees      []cachedTree
-	tailers    map[string]*TranscriptTailer
+	syncMu               sync.Mutex
+	roots                []*rootSource
+	rootsByKey           map[string]*rootSource
+	convRoot             map[string]*rootSource
+	resolvedRoot         map[string]*rootSource
+	trees                []cachedTree
+	tailers              map[string]*TranscriptTailer
+	hasSnapshot          bool
+	fullHydrated         bool
+	lastRootDiscover     time.Time
+	rootDiscoverInterval time.Duration
 
 	snapMu   sync.RWMutex
 	snapshot model.AppSnapshot
@@ -124,6 +135,7 @@ func NewProvider(opts Options) (*Provider, error) {
 	if opts.Debounce <= 0 {
 		opts.Debounce = defaultDebounce
 	}
+	adaptivePoll := opts.PollInterval == 0
 	if opts.PollInterval == 0 {
 		opts.PollInterval = defaultPollInterval
 	}
@@ -158,17 +170,21 @@ func NewProvider(opts Options) (*Provider, error) {
 	}
 
 	p := &Provider{
-		opts:         opts,
-		calc:         calc,
-		autoDiscover: autoDiscover,
-		discoverFunc: discoverFn,
-		rootsByKey:   make(map[string]*rootSource, len(initialRoots)),
-		convRoot:     make(map[string]*rootSource),
-		tailers:      make(map[string]*TranscriptTailer),
-		subs:         make(map[int]chan model.AppSnapshot),
-		triggerCh:    make(chan watchEvent, 64),
-		stopCh:       make(chan struct{}),
-		doneCh:       make(chan struct{}),
+		opts:             opts,
+		calc:             calc,
+		autoDiscover:     autoDiscover,
+		adaptivePoll:     adaptivePoll,
+		discoverFunc:     discoverFn,
+		rootsByKey:       make(map[string]*rootSource, len(initialRoots)),
+		convRoot:         make(map[string]*rootSource),
+		resolvedRoot:     make(map[string]*rootSource),
+		tailers:          make(map[string]*TranscriptTailer),
+		subs:             make(map[int]chan model.AppSnapshot),
+		triggerCh:            make(chan watchEvent, 64),
+		stopCh:               make(chan struct{}),
+		doneCh:               make(chan struct{}),
+		lastRootDiscover:     time.Now(),
+		rootDiscoverInterval: defaultRootDiscoverEvery,
 	}
 
 	for _, dir := range initialRoots {
@@ -176,8 +192,15 @@ func NewProvider(opts Options) (*Provider, error) {
 	}
 
 	// Perform initial synchronous refresh so Snapshot() is immediately ready.
+	// When AsyncInit is enabled with the background loop active, synchronously
+	// hydrate only the top-1 active conversation for instant first frame and let
+	// runLoop finish remaining background trees asynchronously.
+	initialHydrated := 0
+	if opts.AsyncInit && !opts.DisableWatcher {
+		initialHydrated = 1
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	_ = p.Refresh(ctx)
+	_ = p.refreshInternal(ctx, false, initialHydrated)
 	cancel()
 
 	if !opts.DisableWatcher {
@@ -210,6 +233,7 @@ func (p *Provider) addRootLocked(rootDir string) bool {
 	}
 	p.roots = append(p.roots, rs)
 	p.rootsByKey[key] = rs
+	clear(p.resolvedRoot)
 	return true
 }
 
@@ -308,15 +332,23 @@ func (p *Provider) OpenConvDBHandles() int {
 
 // Refresh forces an immediate L1 + L2 + L3 incremental sync across all roots and broadcasts the updated snapshot.
 func (p *Provider) Refresh(ctx context.Context) error {
+	return p.refreshInternal(ctx, true, 0)
+}
+
+func (p *Provider) refreshInternal(ctx context.Context, discoverRoots bool, maxHydratedOverride int) error {
 	p.syncMu.Lock()
 	defer p.syncMu.Unlock()
 
-	anyChanged := p.syncDiscoveredRootsLocked()
+	anyChanged := false
+	if discoverRoots {
+		anyChanged = p.syncDiscoveredRootsLocked()
+		p.lastRootDiscover = time.Now()
+	}
 	var firstErr error
 	succeeded := 0
 
 	for _, rs := range p.roots {
-		rows, changed, err := rs.summaries.readChanges(ctx)
+		rows, changed, err := rs.summaries.ReadChanges(ctx)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -341,7 +373,24 @@ func (p *Provider) Refresh(ctx context.Context) error {
 		}
 	}
 
-	snap := p.buildSnapshotLocked(ctx)
+	maxHydrated := p.opts.MaxHydratedTrees
+	strictLimit := false
+	if maxHydratedOverride > 0 && maxHydratedOverride < maxHydrated {
+		maxHydrated = maxHydratedOverride
+		strictLimit = true
+	}
+	isFull := !strictLimit
+	forceRebuild := !p.hasSnapshot || anyChanged || (!p.fullHydrated && isFull)
+
+	snap, treeChanged := p.buildSnapshotLocked(ctx, maxHydrated, strictLimit, forceRebuild)
+	if !forceRebuild && !treeChanged {
+		return nil
+	}
+
+	p.hasSnapshot = true
+	if isFull {
+		p.fullHydrated = true
+	}
 
 	p.snapMu.Lock()
 	p.snapshot = snap
@@ -361,15 +410,71 @@ func (p *Provider) enqueueEvent(ev watchEvent) {
 	}
 }
 
+func (p *Provider) nextPollInterval() time.Duration {
+	if !p.adaptivePoll {
+		return p.opts.PollInterval
+	}
+	if p.Snapshot().RunningCount > 0 {
+		return defaultPollInterval
+	}
+	return defaultIdlePollInterval
+}
+
 func (p *Provider) runLoop() {
 	defer close(p.doneCh)
 
-	var ticker *time.Ticker
+	// Finish full hydration asynchronously after AsyncInit fast first frame.
+	p.syncMu.Lock()
+	needFullHydrate := !p.fullHydrated
+	p.syncMu.Unlock()
+	if needFullHydrate {
+		select {
+		case <-p.stopCh:
+			return
+		default:
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = p.refreshInternal(ctx, false, 0)
+			cancel()
+		}
+	}
+
+	var timer *time.Timer
 	var tickCh <-chan time.Time
-	if p.opts.PollInterval > 0 {
-		ticker = time.NewTicker(p.opts.PollInterval)
-		tickCh = ticker.C
-		defer ticker.Stop()
+	resetTimer := func() {
+		if p.opts.PollInterval <= 0 {
+			return
+		}
+		d := p.nextPollInterval()
+		if timer == nil {
+			timer = time.NewTimer(d)
+			tickCh = timer.C
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(d)
+	}
+	resetTimer()
+	if timer != nil {
+		defer timer.Stop()
+	}
+
+	shouldDiscoverRoots := func() bool {
+		if !p.autoDiscover {
+			return false
+		}
+		p.syncMu.Lock()
+		interval := p.rootDiscoverInterval
+		if interval <= 0 {
+			interval = defaultRootDiscoverEvery
+		}
+		due := time.Since(p.lastRootDiscover) >= interval
+		p.syncMu.Unlock()
+		return due
 	}
 
 	for {
@@ -386,13 +491,17 @@ func (p *Provider) runLoop() {
 					break drain
 				}
 			}
+			discover := shouldDiscoverRoots()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = p.Refresh(ctx)
+			_ = p.refreshInternal(ctx, discover, 0)
 			cancel()
+			resetTimer()
 		case <-tickCh:
+			discover := shouldDiscoverRoots()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = p.Refresh(ctx)
+			_ = p.refreshInternal(ctx, discover, 0)
 			cancel()
+			resetTimer()
 		}
 	}
 }
@@ -492,6 +601,7 @@ func (p *Provider) mergeSummaryRowsLocked() []SummaryRow {
 		merged = append(merged, cand.row)
 	}
 	p.convRoot = nextConvRoot
+	clear(p.resolvedRoot)
 	return merged
 }
 
@@ -572,13 +682,25 @@ func (p *Provider) resolveStorageRootLocked(convID string) *rootSource {
 	if primary == nil || len(p.roots) <= 1 {
 		return primary
 	}
-	if hasLocal, _ := localConvFreshness(primary.rootDir, convID); hasLocal {
-		return primary
+	var staleCached *rootSource
+	if cached, ok := p.resolvedRoot[convID]; ok {
+		if hasLocal, _ := localConvFreshness(cached.rootDir, convID); hasLocal {
+			return cached
+		}
+		// Local files disappeared from the previously cached root; invalidate and relocate.
+		delete(p.resolvedRoot, convID)
+		staleCached = cached
+	}
+	if primary != staleCached {
+		if hasLocal, _ := localConvFreshness(primary.rootDir, convID); hasLocal {
+			p.resolvedRoot[convID] = primary
+			return primary
+		}
 	}
 	var best *rootSource
 	var bestMtime int64
 	for _, rs := range p.roots {
-		if rs == primary {
+		if rs == primary || rs == staleCached {
 			continue
 		}
 		if ok, mtime := localConvFreshness(rs.rootDir, convID); ok {
@@ -590,8 +712,11 @@ func (p *Provider) resolveStorageRootLocked(convID string) *rootSource {
 	}
 	if best != nil {
 		p.convRoot[convID] = best
+		p.resolvedRoot[convID] = best
 		return best
 	}
+	// Do not cache primary when no root has local data yet; a conversation DB or
+	// transcript may be created in another root on a subsequent refresh.
 	return primary
 }
 
@@ -602,12 +727,16 @@ func (p *Provider) syncTranscript(convID string) bool {
 	}
 	wantPath := TranscriptPath(rs.rootDir, convID)
 	tailer := p.tailers[convID]
+	switched := false
 	if tailer == nil || tailer.path != wantPath {
+		if tailer != nil {
+			switched = true
+		}
 		tailer = NewTranscriptTailer(wantPath)
 		p.tailers[convID] = tailer
 	}
 	transcriptChanged, _ := tailer.Sync()
-	return transcriptChanged
+	return transcriptChanged || switched
 }
 
 func (p *Provider) pruneTailers(keepIDs map[string]bool) {
@@ -618,19 +747,18 @@ func (p *Provider) pruneTailers(keepIDs map[string]bool) {
 	}
 }
 
-func (p *Provider) buildSnapshotLocked(ctx context.Context) model.AppSnapshot {
-	snap := model.AppSnapshot{
-		GeneratedAt:   time.Now().UTC(),
-		Conversations: make([]model.ConversationSnapshot, 0, len(p.trees)),
-	}
-
+func (p *Provider) buildSnapshotLocked(ctx context.Context, maxHydrated int, strictHydrateLimit bool, forceRebuild bool) (model.AppSnapshot, bool) {
 	keepIDs := make(map[string]bool, len(p.trees)*2)
+	activeIDs := make(map[string]bool)
 	hydratedByRoot := make(map[*rootSource][]string, len(p.roots))
 	keepByRoot := make(map[*rootSource]map[string]bool, len(p.roots))
 	hydratedCount := 0
 
-	addHydrated := func(id string) {
+	addHydrated := func(id string, active bool) {
 		keepIDs[id] = true
+		if active {
+			activeIDs[id] = true
+		}
 		rs := p.resolveStorageRootLocked(id)
 		if rs == nil {
 			return
@@ -646,25 +774,27 @@ func (p *Provider) buildSnapshotLocked(ctx context.Context) model.AppSnapshot {
 
 	for _, cached := range p.trees {
 		tree := cached.tree
-		if !isTreeRunning(tree) && hydratedCount >= p.opts.MaxHydratedTrees {
+		treeRunning := isTreeRunning(tree)
+		if hydratedCount >= maxHydrated && (strictHydrateLimit || !treeRunning) {
 			continue
 		}
 		hydratedCount++
-		addHydrated(tree.Root.ConversationID)
+		addHydrated(tree.Root.ConversationID, tree.Root.IsRunning())
 		for _, child := range tree.Children {
-			addHydrated(child.ConversationID)
+			addHydrated(child.ConversationID, child.IsRunning())
 		}
 	}
 
 	dbChanges := make(map[string]bool)
 	for rs, ids := range hydratedByRoot {
-		for id, ch := range rs.convPool.syncBatch(ctx, ids) {
+		for id, ch := range rs.convPool.syncBatch(ctx, ids, activeIDs) {
 			if ch {
 				dbChanges[id] = true
 			}
 		}
 	}
 
+	anyTreeChanged := false
 	for i := range p.trees {
 		cached := &p.trees[i]
 		tree := cached.tree
@@ -682,8 +812,25 @@ func (p *Provider) buildSnapshotLocked(ctx context.Context) model.AppSnapshot {
 		if changed {
 			cached.snapshot = p.buildConversationSnapshot(tree, hydrate)
 			cached.hydrated = hydrate
+			anyTreeChanged = true
 		}
-		convSnap := cached.snapshot
+	}
+
+	if !anyTreeChanged && !forceRebuild {
+		for _, rs := range p.roots {
+			if rs.watcher != nil {
+				rs.watcher.retryPendingDirs()
+			}
+		}
+		return model.AppSnapshot{}, false
+	}
+
+	snap := model.AppSnapshot{
+		GeneratedAt:   time.Now().UTC(),
+		Conversations: make([]model.ConversationSnapshot, 0, len(p.trees)),
+	}
+	for i := range p.trees {
+		convSnap := p.trees[i].snapshot
 		if convSnap.Running {
 			snap.RunningCount++
 		}
@@ -714,7 +861,7 @@ func (p *Provider) buildSnapshotLocked(ctx context.Context) model.AppSnapshot {
 	}
 	p.pruneTailers(keepIDs)
 
-	return snap
+	return snap, true
 }
 
 func (p *Provider) buildConversationSnapshot(tree ConversationTree, hydrate bool) model.ConversationSnapshot {
