@@ -72,7 +72,7 @@ irm https://github.com/oysterhyd/antigravity-monitor/releases/latest/download/in
 ## 使用说明
 
 - **实时监控**：安装并启动后自动监测本机 `~/.gemini/antigravity` 活跃对话，无需任何代理配置。
-- **账号额度**：需本机已登录 Antigravity；Windows 下应用会自动复用本机可用的额度读取组件，若缺失则在首次联网启动时从 Google 官方自动准备。
+- **账号额度**：通过官方 Antigravity CLI（`agy /usage`）按需读取；仅在打开账号额度视图或手动点击刷新时触发（附冷却防抖，关闭后台常驻轮询）。Windows 下优先复用本机已有的官方组件（反重力 App 用户无需二次登录），缺失时首次按需从 Google 官方源校验准备。
 - **后台驻留**：支持开机驻留托盘、关闭主窗退守托盘与主窗始终置顶，均可在左下角或托盘设置中按需开关。
 - **离线体验**：命令行支持 `antigravity-monitor -mock` 以仿真数据预览全部界面交互，或 `-tray-only` 仅驻留系统托盘启动。
 

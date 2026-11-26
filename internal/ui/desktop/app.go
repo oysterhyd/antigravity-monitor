@@ -64,12 +64,18 @@ type Options struct {
 	History history.Aggregator
 	// Quota provides account quota snapshots.
 	Quota quota.Tracker
-	// QuotaInterval enables an initial refresh and periodic sampling when positive
-	// (active polling rate when the Quota view is visible).
+	// QuotaInterval optionally enables periodic sampling when positive.
+	// When zero (default), quota refreshes strictly on demand (opening the Quota view or manual refresh).
 	QuotaInterval time.Duration
-	// QuotaIdleInterval optionally slows background quota polling when neither Desktop
-	// nor Tray is viewing Account Quota (0 uses QuotaInterval).
+	// QuotaIdleInterval optionally slows background quota polling when QuotaInterval > 0
+	// and neither Desktop nor Tray is viewing Account Quota.
 	QuotaIdleInterval time.Duration
+	// QuotaCooldown sets the minimum interval between automatic refreshes triggered by
+	// entering the Quota view (defaults to 60s when zero).
+	QuotaCooldown time.Duration
+	// QuotaManualCooldown sets the minimum interval after a successful refresh before
+	// another manual refresh runs (defaults to 10s when zero; negative disables it).
+	QuotaManualCooldown time.Duration
 	// Now optionally overrides the wall-clock timestamp used for quota countdowns and history windows.
 	Now func() time.Time
 	// ShowDevToolbar shows subtle top-right dev harness controls (theme, live toggle, burst).
@@ -105,7 +111,9 @@ type App struct {
 	desktopPinID     string
 	deskQuotaActive  bool
 	trayQuotaActive  bool
-	lastQuotaRefresh time.Time
+	quotaInFlight    bool
+	lastQuotaAttempt time.Time
+	lastQuotaSuccess time.Time
 	stopSub          func()
 	stopQuota        context.CancelFunc
 	closeOnce        sync.Once
@@ -241,17 +249,18 @@ func (a *App) SetWindow(w *mygo.Window) {
 }
 
 // SetWindowVisible reports whether the desktop window is currently open and visible,
-// allowing adaptive quota polling to slow down and releasing the desktop conversation pin
+// allowing on-demand quota refresh on view entry and releasing the desktop conversation pin
 // while resident in the system tray.
 func (a *App) SetWindowVisible(visible bool) {
 	a.mu.Lock()
-	prev := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
+	prevDesk := a.winVisible && a.deskQuotaActive
+	prevAny := prevDesk || a.trayQuotaActive
 	prevHidden := a.winHidden
 	a.winVisible = visible
 	a.winHidden = !visible
 	pinID := a.desktopPinID
-	next := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
-	stale := a.lastQuotaRefresh.IsZero() || (a.opts.QuotaInterval > 0 && time.Since(a.lastQuotaRefresh) >= a.opts.QuotaInterval)
+	nextDesk := a.winVisible && a.deskQuotaActive
+	nextAny := nextDesk || a.trayQuotaActive
 	a.mu.Unlock()
 
 	if prevHidden != !visible && pinID != "" {
@@ -262,45 +271,66 @@ func (a *App) SetWindowVisible(visible bool) {
 		}
 	}
 
-	if prev != next {
+	if prevAny != nextAny {
 		a.notifyQuotaModeChange()
-		if next && stale {
-			a.requestQuotaRefresh()
-		}
+	}
+	if !prevDesk && nextDesk {
+		a.requestQuotaRefresh(false)
 	}
 }
 
 // SetTrayQuotaActive reports whether the tray flyout is currently open on its Account Quota view.
 func (a *App) SetTrayQuotaActive(active bool) {
 	a.mu.Lock()
-	prev := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
+	prevTray := a.trayQuotaActive
+	prevAny := (a.winVisible && a.deskQuotaActive) || prevTray
 	a.trayQuotaActive = active
-	next := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
-	stale := a.lastQuotaRefresh.IsZero() || (a.opts.QuotaInterval > 0 && time.Since(a.lastQuotaRefresh) >= a.opts.QuotaInterval)
+	nextAny := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
 	a.mu.Unlock()
 
-	if prev != next {
+	if prevAny != nextAny {
 		a.notifyQuotaModeChange()
-		if next && stale {
-			a.requestQuotaRefresh()
-		}
+	}
+	if !prevTray && active {
+		a.requestQuotaRefresh(false)
 	}
 }
 
 func (a *App) setDeskQuotaActive(active bool) {
 	a.mu.Lock()
-	prev := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
+	prevDesk := a.winVisible && a.deskQuotaActive
+	prevAny := prevDesk || a.trayQuotaActive
 	a.deskQuotaActive = active
-	next := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
-	stale := a.lastQuotaRefresh.IsZero() || (a.opts.QuotaInterval > 0 && time.Since(a.lastQuotaRefresh) >= a.opts.QuotaInterval)
+	nextDesk := a.winVisible && a.deskQuotaActive
+	nextAny := nextDesk || a.trayQuotaActive
 	a.mu.Unlock()
 
-	if prev != next {
+	if prevAny != nextAny {
 		a.notifyQuotaModeChange()
-		if next && stale {
-			a.requestQuotaRefresh()
-		}
 	}
+	if !prevDesk && nextDesk {
+		a.requestQuotaRefresh(false)
+	}
+}
+
+func (a *App) autoQuotaCooldown() time.Duration {
+	if a.opts.QuotaCooldown > 0 {
+		return a.opts.QuotaCooldown
+	}
+	if a.opts.QuotaInterval > 0 {
+		return a.opts.QuotaInterval
+	}
+	return 60 * time.Second
+}
+
+func (a *App) manualQuotaCooldown() time.Duration {
+	if a.opts.QuotaManualCooldown < 0 {
+		return 0
+	}
+	if a.opts.QuotaManualCooldown > 0 {
+		return a.opts.QuotaManualCooldown
+	}
+	return 10 * time.Second
 }
 
 func (a *App) notifyQuotaModeChange() {
@@ -369,7 +399,7 @@ func (a *App) watchQuota(ctx context.Context) {
 			resetTimer(2 * time.Second)
 		} else {
 			resetTimer(a.opts.QuotaInterval)
-			a.requestQuotaRefresh()
+			a.requestQuotaRefresh(true)
 		}
 	}
 
@@ -383,7 +413,7 @@ func (a *App) watchQuota(ctx context.Context) {
 			}
 			interval := a.currentQuotaInterval()
 			a.mu.RLock()
-			last := a.lastQuotaRefresh
+			last := a.lastQuotaAttempt
 			a.mu.RUnlock()
 			if last.IsZero() {
 				resetTimer(2 * time.Second)
@@ -396,15 +426,30 @@ func (a *App) watchQuota(ctx context.Context) {
 			resetTimer(rem)
 			continue
 		case <-tick:
+			a.mu.Lock()
+			if a.quotaInFlight {
+				a.mu.Unlock()
+				continue
+			}
+			a.quotaInFlight = true
+			a.mu.Unlock()
 		case <-a.quotaRefresh:
+			// quotaInFlight is reserved atomically under a.mu in requestQuotaRefresh.
 		}
+
 		now := time.Now()
 		if a.opts.Now != nil {
 			now = a.opts.Now()
 		}
-		_ = a.quotaSvc.Refresh(ctx, now)
+		err := a.quotaSvc.Refresh(ctx, now)
+		doneAt := time.Now()
+
 		a.mu.Lock()
-		a.lastQuotaRefresh = time.Now()
+		a.quotaInFlight = false
+		a.lastQuotaAttempt = doneAt
+		if err == nil {
+			a.lastQuotaSuccess = doneAt
+		}
 		win := a.win
 		a.mu.Unlock()
 		if win != nil && ctx.Err() == nil {
@@ -419,14 +464,40 @@ func (a *App) watchQuota(ctx context.Context) {
 	}
 }
 
-func (a *App) requestQuotaRefresh() {
+// RequestQuotaRefresh triggers an on-demand quota refresh from manual UI actions
+// (subject to in-flight deduplication and short post-success cooldown).
+func (a *App) RequestQuotaRefresh() {
+	a.requestQuotaRefresh(true)
+}
+
+func (a *App) requestQuotaRefresh(manual bool) {
 	if a.quotaRefresh == nil {
 		return
 	}
+	a.mu.Lock()
+	if a.quotaInFlight {
+		a.mu.Unlock()
+		return
+	}
+	if manual {
+		cd := a.manualQuotaCooldown()
+		if !a.lastQuotaSuccess.IsZero() && cd > 0 && time.Since(a.lastQuotaSuccess) < cd {
+			a.mu.Unlock()
+			return
+		}
+	} else {
+		cd := a.autoQuotaCooldown()
+		if !a.lastQuotaAttempt.IsZero() && cd > 0 && time.Since(a.lastQuotaAttempt) < cd {
+			a.mu.Unlock()
+			return
+		}
+	}
+	a.quotaInFlight = true
 	select {
 	case a.quotaRefresh <- struct{}{}:
 	default:
 	}
+	a.mu.Unlock()
 }
 
 func (a *App) watchSnapshots(ch <-chan model.AppSnapshot) {

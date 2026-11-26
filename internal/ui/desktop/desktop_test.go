@@ -5,6 +5,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -528,6 +529,224 @@ func TestDesktopMaximized1920x1080Proportions(t *testing.T) {
 	tt.Advance(250 * time.Millisecond)
 	mustHaveText(t, tt, "历史消耗统计")
 	savePreview(t, tt, "15_max_1920x1080_history_zh.png")
+}
+
+func TestQuotaOnDemandRefreshAndCooldown(t *testing.T) {
+	p := mock.New(0)
+	defer p.Close()
+
+	var calls atomic.Int32
+	doneCh := make(chan struct{}, 8)
+	reading := quota.Reading{
+		Gemini:    quota.PoolQuota{FiveHour: quota.WindowQuota{RemainingPct: 80}, Weekly: quota.WindowQuota{RemainingPct: 90}},
+		ClaudeGPT: quota.PoolQuota{FiveHour: quota.WindowQuota{RemainingPct: 75}, Weekly: quota.WindowQuota{RemainingPct: 85}},
+	}
+	qSvc := quota.NewService(filepath.Join(t.TempDir(), "quota.json"), func(context.Context) (quota.Reading, error) {
+		calls.Add(1)
+		return reading, nil
+	})
+
+	app := desktop.New(p, desktop.Options{
+		ThemeMode:           theme.ModeLight,
+		Quota:               qSvc,
+		QuotaCooldown:       200 * time.Millisecond,
+		QuotaManualCooldown: 100 * time.Millisecond,
+		OnQuotaUpdated: func() {
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
+		},
+	})
+	defer app.Close()
+
+	// 1. No background polling on startup or while viewing Live.
+	app.SetWindowVisible(true)
+	time.Sleep(60 * time.Millisecond)
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("expected 0 background quota calls while on Live view, got %d", got)
+	}
+
+	// 2. Entering Quota view triggers exactly 1 on-demand refresh.
+	app.SetActiveView(desktop.ViewQuota)
+	select {
+	case <-doneCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for on-demand quota refresh")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected 1 quota call after opening Quota view, got %d", got)
+	}
+
+	// 3. Leaving and re-entering Quota view within cooldown must NOT trigger another call.
+	app.SetActiveView(desktop.ViewLive)
+	app.SetActiveView(desktop.ViewQuota)
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected cooldown to prevent duplicate auto refresh, got %d calls", got)
+	}
+
+	// 4. Rapid manual refresh within manual cooldown is debounced; after cooldown it runs.
+	app.RequestQuotaRefresh()
+	time.Sleep(40 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected manual cooldown to debounce rapid click, got %d calls", got)
+	}
+	time.Sleep(80 * time.Millisecond)
+	app.RequestQuotaRefresh()
+	select {
+	case <-doneCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for manual quota refresh after cooldown")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected 2 quota calls after manual refresh, got %d", got)
+	}
+}
+
+func TestQuotaSetupFailedBannerShown(t *testing.T) {
+	p := mock.New(0)
+	defer p.Close()
+
+	qSvc := quota.NewService(filepath.Join(t.TempDir(), "quota.json"), func(context.Context) (quota.Reading, error) {
+		return quota.Reading{}, quota.ErrCLISetup
+	})
+	_ = qSvc.Refresh(context.Background(), time.Now())
+
+	app := desktop.New(p, desktop.Options{
+		ThemeMode: theme.ModeLight,
+		Quota:     qSvc,
+	})
+	defer app.Close()
+
+	app.SetActiveView(desktop.ViewQuota)
+	tt := ui.NewTester(app.View, 900, 590)
+	tt.Advance(200 * time.Millisecond)
+	mustHaveText(t, tt, "暂时无法准备额度读取组件")
+}
+
+func TestQuotaTrayEntryRefreshesWhileDesktopStaysOnQuotaView(t *testing.T) {
+	p := mock.New(0)
+	defer p.Close()
+
+	var calls atomic.Int32
+	doneCh := make(chan struct{}, 8)
+	reading := quota.Reading{
+		Gemini:    quota.PoolQuota{FiveHour: quota.WindowQuota{RemainingPct: 80}, Weekly: quota.WindowQuota{RemainingPct: 90}},
+		ClaudeGPT: quota.PoolQuota{FiveHour: quota.WindowQuota{RemainingPct: 75}, Weekly: quota.WindowQuota{RemainingPct: 85}},
+	}
+	qSvc := quota.NewService(filepath.Join(t.TempDir(), "quota.json"), func(context.Context) (quota.Reading, error) {
+		calls.Add(1)
+		return reading, nil
+	})
+
+	app := desktop.New(p, desktop.Options{
+		ThemeMode:     theme.ModeLight,
+		Quota:         qSvc,
+		QuotaCooldown: 80 * time.Millisecond,
+		OnQuotaUpdated: func() {
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
+		},
+	})
+	defer app.Close()
+
+	// Desktop enters Quota view and stays there.
+	app.SetWindowVisible(true)
+	app.SetActiveView(desktop.ViewQuota)
+	select {
+	case <-doneCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for initial desktop quota refresh")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected 1 call after desktop entered Quota view, got %d", got)
+	}
+
+	// Opening Tray Quota view within shared cooldown must NOT trigger a duplicate call.
+	app.SetTrayQuotaActive(true)
+	time.Sleep(30 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected shared cooldown to suppress immediate tray refresh, got %d", got)
+	}
+
+	// Closing and reopening Tray Quota view after cooldown MUST refresh even though desktop stayed on Quota view.
+	app.SetTrayQuotaActive(false)
+	time.Sleep(70 * time.Millisecond)
+	app.SetTrayQuotaActive(true)
+	select {
+	case <-doneCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for tray quota refresh while desktop stayed on Quota view")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected 2 calls after tray entered Quota view past cooldown, got %d", got)
+	}
+}
+
+func TestQuotaBackToBackRefreshCannotBypassCooldown(t *testing.T) {
+	p := mock.New(0)
+	defer p.Close()
+
+	var calls atomic.Int32
+	started := make(chan struct{}, 8)
+	release := make(chan struct{})
+	doneCh := make(chan struct{}, 8)
+	reading := quota.Reading{
+		Gemini:    quota.PoolQuota{FiveHour: quota.WindowQuota{RemainingPct: 80}, Weekly: quota.WindowQuota{RemainingPct: 90}},
+		ClaudeGPT: quota.PoolQuota{FiveHour: quota.WindowQuota{RemainingPct: 75}, Weekly: quota.WindowQuota{RemainingPct: 85}},
+	}
+	qSvc := quota.NewService(filepath.Join(t.TempDir(), "quota.json"), func(context.Context) (quota.Reading, error) {
+		calls.Add(1)
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		return reading, nil
+	})
+
+	app := desktop.New(p, desktop.Options{
+		ThemeMode:           theme.ModeLight,
+		Quota:               qSvc,
+		QuotaManualCooldown: 5 * time.Second,
+		OnQuotaUpdated: func() {
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
+		},
+	})
+	defer app.Close()
+
+	// Fire a burst of back-to-back manual refreshes before and while the worker executes.
+	for i := 0; i < 20; i++ {
+		app.RequestQuotaRefresh()
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first refresh to start")
+	}
+	for i := 0; i < 10; i++ {
+		app.RequestQuotaRefresh()
+	}
+	close(release)
+
+	select {
+	case <-doneCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first refresh to complete")
+	}
+	// Additional immediate click right after completion must still obey manual cooldown.
+	app.RequestQuotaRefresh()
+	time.Sleep(60 * time.Millisecond)
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected strictly 1 quota refresh across queued/in-flight/cooldown burst, got %d", got)
+	}
 }
 
 func savePreview(t *testing.T, tt *ui.Tester, filename string) {

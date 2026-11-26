@@ -58,7 +58,7 @@ func (a *App) renderQuotaView(c *ui.Context, pal theme.Palette, now time.Time) {
 							ui.Text(c, tr.QuotaRefresh).FontSize(11).FontWeight(500).TextColor(pal.Ink1).NoWrap()
 						})
 						if refreshBtn.Clicked() {
-							a.requestQuotaRefresh()
+							a.RequestQuotaRefresh()
 						}
 
 						backBtn := ui.ButtonBase(c.Key("quota-back-btn")).

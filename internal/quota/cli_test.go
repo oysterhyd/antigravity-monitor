@@ -90,12 +90,15 @@ func TestCLIValidationExpiresWhenBinaryChanges(t *testing.T) {
 	}
 }
 
-func TestCleanCLIEnvStripsACPVars(t *testing.T) {
+func TestCleanCLIEnvStripsACPAndSSHVars(t *testing.T) {
 	in := []string{
 		"PATH=/usr/bin",
 		"GEMINI_HOME=C:\\t3\\isolated",
 		"antigravity_app_data_dir=C:\\t3\\isolated\\antigravity-acp",
 		"AGY_ACP_FORCE_FILE_STORAGE=1",
+		"SSH_CONNECTION=127.0.0.1 0 127.0.0.1 0",
+		"ssh_client=127.0.0.1 0 22",
+		"SSH_TTY=/dev/pts/0",
 		"USERPROFILE=C:\\Users\\oyster",
 	}
 	got := cleanCLIEnv(in)

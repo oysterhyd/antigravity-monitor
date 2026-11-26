@@ -136,6 +136,11 @@ func main() {
 					deskHost.SetTrayQuotaActive(active)
 				}
 			},
+			OnQuotaRefresh: func() {
+				if deskHost != nil {
+					deskHost.RequestQuotaRefresh()
+				}
+			},
 			OnHistoryViewOpen: wakeHistory,
 			OnQuit: func() {
 				if deskHost != nil {
@@ -288,8 +293,7 @@ func newDesktopHost(
 		Settings:          &s,
 		History:           histSvc,
 		Quota:             quotaSvc,
-		QuotaInterval:     30 * time.Second,
-		QuotaIdleInterval: 3 * time.Minute,
+		QuotaCooldown:     60 * time.Second,
 		OnQuotaUpdated:    onQuotaUpdated,
 		OnHistoryViewOpen: onHistoryOpen,
 		OnSettingsChange: func(next model.Settings) {
@@ -375,6 +379,12 @@ func (h *desktopHost) createWindow() {
 func (h *desktopHost) SetTrayQuotaActive(active bool) {
 	if h.app != nil {
 		h.app.SetTrayQuotaActive(active)
+	}
+}
+
+func (h *desktopHost) RequestQuotaRefresh() {
+	if h.app != nil {
+		h.app.RequestQuotaRefresh()
 	}
 }
 

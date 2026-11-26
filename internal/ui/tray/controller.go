@@ -27,6 +27,7 @@ type Callbacks struct {
 	OnFocusAgent      func(convID, agentID string)
 	OnSettingsChange  func(model.Settings)
 	OnQuotaViewActive func(active bool)
+	OnQuotaRefresh    func()
 	OnHistoryViewOpen func()
 	OnQuit            func()
 }
@@ -391,6 +392,10 @@ func (ctl *Controller) currentQuotaSnapshot(now time.Time) quota.QuotaSnapshot {
 }
 
 func (ctl *Controller) refreshQuotaAsync() {
+	if ctl.opts.Callbacks.OnQuotaRefresh != nil {
+		ctl.opts.Callbacks.OnQuotaRefresh()
+		return
+	}
 	if ctl.opts.Quota == nil {
 		return
 	}

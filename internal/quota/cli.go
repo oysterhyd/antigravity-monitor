@@ -110,9 +110,9 @@ func runCLI(ctx context.Context, binary string, args ...string) ([]byte, error) 
 	return execCLICommand(command)
 }
 
-// cleanCLIEnv strips ACP-scoped isolation variables (e.g. when Monitor is launched
-// from inside a T3 Code terminal) so `agy /usage` uses the standard CLI profile
-// instead of failing auth against an isolated ACP directory.
+// cleanCLIEnv strips ACP-scoped isolation and synthetic SSH variables (e.g. when
+// Monitor is launched from inside an IDE or terminal wrapper) so `agy /usage` uses
+// the standard CLI profile and native OS keyring instead of failing silent auth.
 func cleanCLIEnv(environ []string) []string {
 	out := make([]string, 0, len(environ))
 	for _, kv := range environ {
@@ -121,7 +121,8 @@ func cleanCLIEnv(environ []string) []string {
 			continue
 		}
 		switch strings.ToUpper(key) {
-		case "GEMINI_HOME", "ANTIGRAVITY_APP_DATA_DIR", "AGY_ACP_FORCE_FILE_STORAGE":
+		case "GEMINI_HOME", "ANTIGRAVITY_APP_DATA_DIR", "AGY_ACP_FORCE_FILE_STORAGE",
+			"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY":
 			continue
 		}
 		out = append(out, kv)
