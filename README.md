@@ -8,7 +8,7 @@
 
 桌面主窗口 · 系统托盘弹层 — 零代理、零 WebView、纯本地只读
 
-上下文成分拆解 · 父子 Agent 拓扑 · 账号实时额度 · 历史消耗统计
+上下文成分拆解 · 父子 Agent 拓扑 · 历史消耗统计
 
 [![Release](https://img.shields.io/github/v/release/oysterhyd/antigravity-monitor?label=release&color=007AFF)](https://github.com/oysterhyd/antigravity-monitor/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-0A84FF)](https://github.com/oysterhyd/antigravity-monitor/releases/latest)
@@ -31,7 +31,7 @@
 
 ### 双形态原生体验
 - **桌面主窗口**：Apple Liquid Glass 极简视觉与响应式大屏适配，支持浅色 / 深色跟随系统及中文 / English 实时切换。
-- **系统托盘弹层**：轻点托盘图标即刻呼出毛玻璃弹层，内置实时概览、速率与缓存、父子 Agent 树、账号实时额度与历史消耗统计，无需切出当前工作窗口即可一目了然。
+- **系统托盘弹层**：轻点托盘图标即刻呼出毛玻璃弹层，内置实时概览、速率与缓存、父子 Agent 树与历史消耗统计，无需切出当前工作窗口即可一目了然。
 
 ### 上下文窗口多色拆解
 - 直接解析本地精确遥测字段，按 **系统 / 工具 / 工具返回 / 对话 / 摘要** 五类成分呈现多色进度条，支持分段悬停高亮查看 Token 数与窗口占比。
@@ -44,10 +44,6 @@
 ### 全维度实时遥测
 - 实时统计 **本轮 / 会话费用**、**Prompt 缓存命中率**、**首字时长（TTFT）** 与 **纯吐字速度（Pure Decode TPS）**。
 - 底部支持平滑曲线与逐次请求明细双视图，支持键盘方向键与鼠标悬停逐点回看单次请求的输入、缓存、输出与费用构成。
-
-### 账号实时额度与双趋势线
-- 自动读取 **Gemini Models** 与 **Claude & GPT Models** 的 5 小时额度、周额度及重置倒计时；任一模型池剩余额度低于 25% 时在主窗与托盘底栏同步亮起轻盈琥珀提醒。
-- 内置 24 小时 / 7 天双序列趋势图，同时绘制 5 小时（实线）与周额度（虚线）变化曲线及重置标记。
 
 ### 本地历史消耗统计
 - 毫秒级聚合本地历史会话，支持 **今日 / 7 天 / 30 天 / 全部** 时间区间与 **Token / 费用 / 缓存率** 三维堆叠柱状图。
@@ -71,8 +67,7 @@ irm https://github.com/oysterhyd/antigravity-monitor/releases/latest/download/in
 
 ## 使用说明
 
-- **实时监控**：安装并启动后自动监测本机 `~/.gemini/antigravity` 活跃对话，无需任何代理配置。
-- **账号额度**：通过官方 Antigravity CLI（`agy /usage`）按需读取；仅在打开账号额度视图或手动点击刷新时触发（附冷却防抖，关闭后台常驻轮询）。Windows 下优先复用本机已有的官方组件（反重力 App 用户无需二次登录），缺失时首次按需从 Google 官方源校验准备。
+- **实时监控**：安装并启动后自动监测本机 `~/.gemini/antigravity` 及 T3 Code 中由 Antigravity 提供的会话，无需任何代理配置。
 - **后台驻留**：支持开机驻留托盘、关闭主窗退守托盘与主窗始终置顶，均可在左下角或托盘设置中按需开关。
 - **离线体验**：命令行支持 `antigravity-monitor -mock` 以仿真数据预览全部界面交互，或 `-tray-only` 仅驻留系统托盘启动。
 

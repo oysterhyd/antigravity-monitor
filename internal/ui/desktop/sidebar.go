@@ -477,7 +477,6 @@ func (a *App) renderAgentRow(c *ui.Context, pal theme.Palette, ag model.AgentNod
 
 func (a *App) renderSidebarFooter(c *ui.Context, pal theme.Palette, conv model.ConversationSnapshot, now time.Time) {
 	tr := a.tr()
-	hasLowQuota := a.quotaSvc != nil && a.quotaSvc.HasLowQuota()
 
 	ui.Row(c.Key("sidebar-footer")).
 		Padding(10, 2, 0, 4).
@@ -494,40 +493,9 @@ func (a *App) renderSidebarFooter(c *ui.Context, pal theme.Palette, conv model.C
 				TextColor(pal.Ink3).
 				SingleLine()
 
-			// Right: 3 monochrome SF-style icon buttons [Quota] [History] [Settings].
+			// Right: 2 monochrome SF-style icon buttons [History] [Settings].
 			ui.Row(c.Key("sidebar-footer-actions")).Gap(3).AlignItems(ui.Center).Shrink(0).Children(func() {
-				// 1. Account Quota button (Gauge icon + quiet amber dot when < 25%).
-				quotaActive := a.activeView == ViewQuota
-				quotaBtn := ui.ButtonBase(c.Key("quota-nav-btn")).
-					Size(26, 26).
-					Radius(8).
-					Center().
-					Cursor(ui.CursorPointer).
-					Label(tr.QuotaTitle).
-					Tooltip(tr.QuotaTitle)
-
-				quotaIconCol := pal.Ink2
-				if quotaActive {
-					quotaBtn.Background(pal.AccentSoft).Border(1, pal.Accent.Alpha(0.24))
-					quotaIconCol = pal.Accent
-				} else if quotaBtn.Hovered() {
-					quotaBtn.Background(pal.CardHover)
-					quotaIconCol = pal.Ink1
-				}
-				if hasLowQuota {
-					amber := pal.Amber
-					quotaBtn.DrawOver(func(p *ui.Painter, r ui.Rect) {
-						p.FillPath((&ui.Path{}).Circle(r.X+r.W-5, r.Y+5, 2.5), amber)
-					})
-				}
-				quotaBtn.Children(func() {
-					ui.Icon(c, theme.IconGauge).Size(14, 14).TextColor(quotaIconCol)
-				})
-				if quotaBtn.Clicked() {
-					a.ToggleSubView(ViewQuota)
-				}
-
-				// 2. Usage History button (3-Bar Chart icon).
+				// 1. Usage History button (3-Bar Chart icon).
 				histActive := a.activeView == ViewHistory
 				histBtn := ui.ButtonBase(c.Key("history-nav-btn")).
 					Size(26, 26).

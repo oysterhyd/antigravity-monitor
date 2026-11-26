@@ -14,7 +14,6 @@ import (
 	"github.com/oysterhyd/antigravity-monitor/internal/metrics"
 	"github.com/oysterhyd/antigravity-monitor/internal/mock"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
-	"github.com/oysterhyd/antigravity-monitor/internal/quota"
 )
 
 func TestTrayAgentTreeLayoutAndCopy(t *testing.T) {
@@ -200,28 +199,11 @@ func saveTrayPreview(t *testing.T, tt *ui.Tester, filename string) {
 	}
 }
 
-func TestTrayQuotaAndHistoryViews(t *testing.T) {
+func TestTrayHistoryView(t *testing.T) {
 	p := mock.New(0)
 	defer p.Close()
 
 	now := time.Date(2026, 11, 24, 15, 30, 0, 0, time.Local)
-	reading := quota.Reading{
-		Gemini: quota.PoolQuota{
-			FiveHour: quota.WindowQuota{RemainingPct: 88, ResetAt: now.Add(3*time.Hour + 18*time.Minute)},
-			Weekly:   quota.WindowQuota{RemainingPct: 62, ResetAt: now.Add(5*24*time.Hour + 4*time.Hour)},
-		},
-		ClaudeGPT: quota.PoolQuota{
-			FiveHour: quota.WindowQuota{RemainingPct: 22, ResetAt: now.Add(1*time.Hour + 45*time.Minute)},
-			Weekly:   quota.WindowQuota{RemainingPct: 74, ResetAt: now.Add(4*24*time.Hour + 2*time.Hour)},
-		},
-	}
-	qSvc := quota.NewService(filepath.Join(t.TempDir(), "quota.json"), func(context.Context) (quota.Reading, error) {
-		return reading, nil
-	})
-	_ = qSvc.Refresh(context.Background(), now.Add(-4*time.Hour))
-	reading.Gemini.FiveHour.RemainingPct = 76
-	reading.ClaudeGPT.FiveHour.RemainingPct = 18
-	_ = qSvc.Refresh(context.Background(), now.Add(-10*time.Minute))
 
 	var openedView ViewMode
 	openedCalled := false
@@ -230,7 +212,6 @@ func TestTrayQuotaAndHistoryViews(t *testing.T) {
 	ctl := New(Options{
 		Provider: p,
 		History:  &stubTrayHistory{},
-		Quota:    qSvc,
 		Now:      func() time.Time { return now },
 		Callbacks: Callbacks{
 			OnOpenView: func(v ViewMode) {
@@ -246,30 +227,7 @@ func TestTrayQuotaAndHistoryViews(t *testing.T) {
 	tt := ui.NewTester(ctl.buildView, flyoutWidth, 510)
 	tt.Advance(250 * time.Millisecond)
 
-	// 1. Switch to Quota view via footer Gauge icon.
-	if err := tt.Click("账号实时额度"); err != nil {
-		t.Fatalf("click tray quota nav: %v", err)
-	}
-	tt.Advance(250 * time.Millisecond)
-	if ctl.state.View != ViewQuota {
-		t.Fatalf("expected ViewQuota, got %v", ctl.state.View)
-	}
-	for _, want := range []string{"账号实时额度", "Gemini Models", "Claude & GPT Models", "76%", "18%", "62%", "74%"} {
-		if !tt.HasText(want) {
-			t.Fatalf("quota view missing %q; got %q", want, tt.Texts())
-		}
-	}
-	saveTrayPreview(t, tt, "tray_quota_light_zh.png")
-
-	// Clicking "打开主面板" while in Quota view forwards ViewQuota to OnOpenView.
-	if err := tt.Click("打开主面板"); err != nil {
-		t.Fatalf("click open desktop: %v", err)
-	}
-	if !openedCalled || openedView != ViewQuota {
-		t.Fatalf("expected OnOpenView(ViewQuota), got called=%v view=%v", openedCalled, openedView)
-	}
-
-	// 2. Switch to History view via footer BarChart icon.
+	// 1. Switch to History view via footer BarChart icon.
 	if err := tt.Click("历史消耗统计"); err != nil {
 		t.Fatalf("click tray history nav: %v", err)
 	}
@@ -283,6 +241,14 @@ func TestTrayQuotaAndHistoryViews(t *testing.T) {
 		}
 	}
 	saveTrayPreview(t, tt, "tray_history_light_zh.png")
+
+	// Clicking "打开主面板" while in History view forwards ViewHistory to OnOpenView.
+	if err := tt.Click("打开主面板"); err != nil {
+		t.Fatalf("click open desktop: %v", err)
+	}
+	if !openedCalled || openedView != ViewHistory {
+		t.Fatalf("expected OnOpenView(ViewHistory), got called=%v view=%v", openedCalled, openedView)
+	}
 
 	// Switch range to "今日" and verify hourly average label.
 	if err := tt.Click("今日"); err != nil {
@@ -304,7 +270,7 @@ func TestTrayQuotaAndHistoryViews(t *testing.T) {
 		t.Fatalf("expected focus conv-sql, got %q", focusedConv)
 	}
 
-	// 3. Dark EN visual check for History & Quota.
+	// 2. Dark EN visual check for History.
 	ctl.state.Settings.ThemeMode = "dark"
 	ctl.state.Settings.Language = "en"
 	ctl.state.SetHistoryRange(history.Range7D)
@@ -315,14 +281,6 @@ func TestTrayQuotaAndHistoryViews(t *testing.T) {
 	}
 	saveTrayPreview(t, tt, "tray_history_dark_en.png")
 
-	ctl.state.SetView(ViewQuota)
-	tt.Frame()
-	tt.Advance(250 * time.Millisecond)
-	if !tt.HasText("Account Quota") || !tt.HasText("5-hour limit") {
-		t.Fatalf("expected EN quota labels; got %q", tt.Texts())
-	}
-	saveTrayPreview(t, tt, "tray_quota_dark_en.png")
-
 	// Clicking the header Back button returns cleanly to Live view.
 	if err := tt.Click("← Live View"); err != nil {
 		t.Fatalf("click back to live: %v", err)
@@ -332,8 +290,8 @@ func TestTrayQuotaAndHistoryViews(t *testing.T) {
 		t.Fatalf("expected back button to return to ViewLive, got %v", ctl.state.View)
 	}
 	// ToggleView idempotency check.
-	ctl.state.ToggleView(ViewQuota)
-	ctl.state.ToggleView(ViewQuota)
+	ctl.state.ToggleView(ViewHistory)
+	ctl.state.ToggleView(ViewHistory)
 	if ctl.state.View != ViewLive {
 		t.Fatalf("expected ToggleView x2 to return to ViewLive, got %v", ctl.state.View)
 	}

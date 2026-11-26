@@ -18,12 +18,11 @@ const (
 	TabAgents
 )
 
-// ViewMode selects the active flyout surface: Live Monitor, Account Quota, or Usage History.
+// ViewMode selects the active flyout surface: Live Monitor or Usage History.
 type ViewMode uint8
 
 const (
 	ViewLive ViewMode = iota
-	ViewQuota
 	ViewHistory
 )
 
@@ -131,7 +130,7 @@ func (s *State) SetTab(tab Tab) {
 	s.syncDotTargets()
 }
 
-// SetView switches between Live, Quota, and History flyout surfaces.
+// SetView switches between Live and History flyout surfaces.
 func (s *State) SetView(v ViewMode) {
 	if v > ViewHistory {
 		v = ViewLive
@@ -143,7 +142,7 @@ func (s *State) SetView(v ViewMode) {
 	s.HoverHistIdx = -1
 }
 
-// ToggleView toggles a sub-view (Quota or History); selecting the active view returns to Live.
+// ToggleView toggles a sub-view (History); selecting the active view returns to Live.
 func (s *State) ToggleView(v ViewMode) {
 	if s.View == v {
 		s.SetView(ViewLive)

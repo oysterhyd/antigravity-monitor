@@ -159,29 +159,6 @@ type Strings struct {
 	// R1 Navigation & Shared Sub-View Actions
 	BackToLive string
 
-	// Account Quota
-	QuotaTitle             string
-	QuotaFiveHour          string
-	QuotaWeekly            string
-	QuotaTrendFiveHour     string
-	QuotaTrendWeekly       string
-	QuotaRefresh           string
-	QuotaResetInFmt        string // fmt: "3h 42m"
-	QuotaResetSoon         string
-	QuotaResetDaysHoursFmt string
-	QuotaResetUnknown      string
-	QuotaSetupFailed       string
-	QuotaUnavailable       string
-	QuotaShowingLast       string
-	QuotaTrendTitle        string
-	QuotaFilterAll         string
-	QuotaResetMarker       string
-	QuotaInspNowSuffix     string
-	QuotaInspDeltaFmt      string // fmt: geminiDelta, claudeDelta
-	QuotaInsp7dNote        string
-	QuotaTrendEmpty        string
-	QuotaTrendSinglePoint  string
-
 	// R3 Usage History View
 	HistoryTitle           string
 	HistoryRangeToday      string
@@ -339,28 +316,6 @@ var zhStrings = Strings{
 
 	BackToLive: "← 返回监控",
 
-	QuotaTitle:             "账号实时额度",
-	QuotaFiveHour:          "5 小时额度",
-	QuotaWeekly:            "周额度",
-	QuotaTrendFiveHour:     "5 小时",
-	QuotaTrendWeekly:       "每周",
-	QuotaRefresh:           "↻ 刷新采样",
-	QuotaResetInFmt:        "%s 后重置",
-	QuotaResetSoon:         "即将重置",
-	QuotaResetDaysHoursFmt: "%d 天 %d 小时",
-	QuotaResetUnknown:      "重置时间未知",
-	QuotaSetupFailed:       "暂时无法准备额度读取组件，请检查网络后刷新",
-	QuotaUnavailable:       "无法读取账号额度，请确认已登录 Antigravity 后刷新",
-	QuotaShowingLast:       "刷新失败，显示上次读取的额度",
-	QuotaTrendTitle:        "额度变化趋势",
-	QuotaFilterAll:         "全部",
-	QuotaResetMarker:       "↺ 重置",
-	QuotaInspNowSuffix:     " (当前)",
-	QuotaInspDeltaFmt:      "较上采样点: Gemini %s · Claude & GPT %s",
-	QuotaInsp7dNote:        "每日最低剩余",
-	QuotaTrendEmpty:        "暂无趋势采样",
-	QuotaTrendSinglePoint:  "已记录首个采样点，继续采样后将绘制平滑趋势曲线",
-
 	HistoryTitle:           "历史消耗统计",
 	HistoryRangeToday:      "今日",
 	HistoryRange7D:         "7 天",
@@ -516,28 +471,6 @@ var enStrings = Strings{
 	MenuQuit:           "Quit Antigravity Monitor",
 
 	BackToLive: "← Live View",
-
-	QuotaTitle:             "Account Quota",
-	QuotaFiveHour:          "5-hour limit",
-	QuotaWeekly:            "Weekly limit",
-	QuotaTrendFiveHour:     "5h",
-	QuotaTrendWeekly:       "Weekly",
-	QuotaRefresh:           "↻ Refresh",
-	QuotaResetInFmt:        "Resets in %s",
-	QuotaResetSoon:         "Resetting soon",
-	QuotaResetDaysHoursFmt: "%dd %dh",
-	QuotaResetUnknown:      "Reset time unknown",
-	QuotaSetupFailed:       "Could not prepare quota reader. Check your connection and refresh.",
-	QuotaUnavailable:       "Sign in to Antigravity and refresh if quota is unavailable",
-	QuotaShowingLast:       "Refresh failed. Showing the last quota reading.",
-	QuotaTrendTitle:        "Quota Usage Trend",
-	QuotaFilterAll:         "All",
-	QuotaResetMarker:       "↺ Reset",
-	QuotaInspNowSuffix:     " (Now)",
-	QuotaInspDeltaFmt:      "Delta: Gemini %s · Claude & GPT %s",
-	QuotaInsp7dNote:        "Daily lowest remaining",
-	QuotaTrendEmpty:        "No quota samples yet",
-	QuotaTrendSinglePoint:  "First snapshot recorded — trend curve builds as samples accumulate",
 
 	HistoryTitle:           "Usage History",
 	HistoryRangeToday:      "Today",

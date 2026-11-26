@@ -1,7 +1,6 @@
 package desktop
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"sort"
@@ -14,7 +13,6 @@ import (
 	"github.com/oysterhyd/antigravity-monitor/internal/history"
 	"github.com/oysterhyd/antigravity-monitor/internal/i18n"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
-	"github.com/oysterhyd/antigravity-monitor/internal/quota"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/anim"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/theme"
 )
@@ -42,7 +40,6 @@ type ActiveView string
 
 const (
 	ViewLive    ActiveView = "live"
-	ViewQuota   ActiveView = "quota"
 	ViewHistory ActiveView = "history"
 )
 
@@ -62,21 +59,7 @@ type Options struct {
 	Window *mygo.Window
 	// History provides read-only historical usage aggregation for the Usage History view.
 	History history.Aggregator
-	// Quota provides account quota snapshots.
-	Quota quota.Tracker
-	// QuotaInterval optionally enables periodic sampling when positive.
-	// When zero (default), quota refreshes strictly on demand (opening the Quota view or manual refresh).
-	QuotaInterval time.Duration
-	// QuotaIdleInterval optionally slows background quota polling when QuotaInterval > 0
-	// and neither Desktop nor Tray is viewing Account Quota.
-	QuotaIdleInterval time.Duration
-	// QuotaCooldown sets the minimum interval between automatic refreshes triggered by
-	// entering the Quota view (defaults to 60s when zero).
-	QuotaCooldown time.Duration
-	// QuotaManualCooldown sets the minimum interval after a successful refresh before
-	// another manual refresh runs (defaults to 10s when zero; negative disables it).
-	QuotaManualCooldown time.Duration
-	// Now optionally overrides the wall-clock timestamp used for quota countdowns and history windows.
+	// Now optionally overrides the wall-clock timestamp used for history windows.
 	Now func() time.Time
 	// ShowDevToolbar shows subtle top-right dev harness controls (theme, live toggle, burst).
 	ShowDevToolbar bool
@@ -88,8 +71,6 @@ type Options struct {
 	OnToggleLive func() bool
 	// OnSettingsChange notifies Track 3 (config persistence / window flags) when settings change.
 	OnSettingsChange func(model.Settings)
-	// OnQuotaUpdated is invoked after a background quota refresh completes (e.g. to invalidate tray flyout).
-	OnQuotaUpdated func()
 	// OnHistoryViewOpen is invoked when the user enters the Usage History view.
 	OnHistoryViewOpen func()
 }
@@ -98,25 +79,17 @@ type Options struct {
 type App struct {
 	provider   model.SnapshotProvider
 	historySvc history.Aggregator
-	quotaSvc   quota.Tracker
 	opts       Options
 
-	mu               sync.RWMutex
-	snap             model.AppSnapshot
-	snapRev          uint64
-	seenRev          uint64
-	win              *mygo.Window
-	winVisible       bool
-	winHidden        bool
-	desktopPinID     string
-	deskQuotaActive  bool
-	trayQuotaActive  bool
-	quotaInFlight    bool
-	lastQuotaAttempt time.Time
-	lastQuotaSuccess time.Time
-	stopSub          func()
-	stopQuota        context.CancelFunc
-	closeOnce        sync.Once
+	mu           sync.RWMutex
+	snap         model.AppSnapshot
+	snapRev      uint64
+	seenRev      uint64
+	win          *mygo.Window
+	winHidden    bool
+	desktopPinID string
+	stopSub      func()
+	closeOnce    sync.Once
 
 	// Interactive UI state (accessed on UI thread inside View / tests).
 	settings            model.Settings
@@ -132,15 +105,6 @@ type App struct {
 	sessionPopoverOpen  bool
 	settingsPopoverOpen bool
 	liveRunning         bool
-
-	// Account Quota view interactive state.
-	quotaSeries     string // "all" | "gemini" | "claude"
-	quotaRange      string // "24h" | "7d"
-	quotaHoverIdx   int
-	quotaRefresh    chan struct{}
-	quotaModeCh     chan struct{}
-	quotaTrendKey   quotaTrendCacheKey
-	quotaTrendCache []quotaTrendSample
 
 	// Reusable per-frame curve chart buffers (UI thread only).
 	chartXs [chartWindowLen]float32
@@ -189,7 +153,6 @@ func New(provider model.SnapshotProvider, opts Options) *App {
 	a := &App{
 		provider:       provider,
 		historySvc:     opts.History,
-		quotaSvc:       opts.Quota,
 		opts:           opts,
 		win:            opts.Window,
 		settings:       settings,
@@ -200,9 +163,6 @@ func New(provider model.SnapshotProvider, opts Options) *App {
 		hoverChartIdx:  -1,
 		hoverCtxSegIdx: -1,
 		liveRunning:    opts.LiveRunning,
-		quotaSeries:    "all",
-		quotaRange:     "24h",
-		quotaHoverIdx:  -1,
 		histRange:      history.Range7D,
 		histMetric:     "tokens",
 		histHoverIdx:   -1,
@@ -230,14 +190,6 @@ func New(provider model.SnapshotProvider, opts Options) *App {
 		go a.watchSnapshots(ch)
 	}
 
-	if opts.Quota != nil {
-		ctx, cancel := context.WithCancel(context.Background())
-		a.stopQuota = cancel
-		a.quotaRefresh = make(chan struct{}, 1)
-		a.quotaModeCh = make(chan struct{}, 1)
-		go a.watchQuota(ctx)
-	}
-
 	return a
 }
 
@@ -249,18 +201,12 @@ func (a *App) SetWindow(w *mygo.Window) {
 }
 
 // SetWindowVisible reports whether the desktop window is currently open and visible,
-// allowing on-demand quota refresh on view entry and releasing the desktop conversation pin
-// while resident in the system tray.
+// releasing the desktop conversation pin while resident in the system tray.
 func (a *App) SetWindowVisible(visible bool) {
 	a.mu.Lock()
-	prevDesk := a.winVisible && a.deskQuotaActive
-	prevAny := prevDesk || a.trayQuotaActive
 	prevHidden := a.winHidden
-	a.winVisible = visible
 	a.winHidden = !visible
 	pinID := a.desktopPinID
-	nextDesk := a.winVisible && a.deskQuotaActive
-	nextAny := nextDesk || a.trayQuotaActive
 	a.mu.Unlock()
 
 	if prevHidden != !visible && pinID != "" {
@@ -270,87 +216,6 @@ func (a *App) SetWindowVisible(visible bool) {
 			a.emitPinConversation(pinID)
 		}
 	}
-
-	if prevAny != nextAny {
-		a.notifyQuotaModeChange()
-	}
-	if !prevDesk && nextDesk {
-		a.requestQuotaRefresh(false)
-	}
-}
-
-// SetTrayQuotaActive reports whether the tray flyout is currently open on its Account Quota view.
-func (a *App) SetTrayQuotaActive(active bool) {
-	a.mu.Lock()
-	prevTray := a.trayQuotaActive
-	prevAny := (a.winVisible && a.deskQuotaActive) || prevTray
-	a.trayQuotaActive = active
-	nextAny := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
-	a.mu.Unlock()
-
-	if prevAny != nextAny {
-		a.notifyQuotaModeChange()
-	}
-	if !prevTray && active {
-		a.requestQuotaRefresh(false)
-	}
-}
-
-func (a *App) setDeskQuotaActive(active bool) {
-	a.mu.Lock()
-	prevDesk := a.winVisible && a.deskQuotaActive
-	prevAny := prevDesk || a.trayQuotaActive
-	a.deskQuotaActive = active
-	nextDesk := a.winVisible && a.deskQuotaActive
-	nextAny := nextDesk || a.trayQuotaActive
-	a.mu.Unlock()
-
-	if prevAny != nextAny {
-		a.notifyQuotaModeChange()
-	}
-	if !prevDesk && nextDesk {
-		a.requestQuotaRefresh(false)
-	}
-}
-
-func (a *App) autoQuotaCooldown() time.Duration {
-	if a.opts.QuotaCooldown > 0 {
-		return a.opts.QuotaCooldown
-	}
-	if a.opts.QuotaInterval > 0 {
-		return a.opts.QuotaInterval
-	}
-	return 60 * time.Second
-}
-
-func (a *App) manualQuotaCooldown() time.Duration {
-	if a.opts.QuotaManualCooldown < 0 {
-		return 0
-	}
-	if a.opts.QuotaManualCooldown > 0 {
-		return a.opts.QuotaManualCooldown
-	}
-	return 10 * time.Second
-}
-
-func (a *App) notifyQuotaModeChange() {
-	if a.quotaModeCh == nil {
-		return
-	}
-	select {
-	case a.quotaModeCh <- struct{}{}:
-	default:
-	}
-}
-
-func (a *App) currentQuotaInterval() time.Duration {
-	a.mu.RLock()
-	active := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
-	a.mu.RUnlock()
-	if active || a.opts.QuotaIdleInterval <= 0 {
-		return a.opts.QuotaInterval
-	}
-	return a.opts.QuotaIdleInterval
 }
 
 // Close unsubscribes from the SnapshotProvider.
@@ -360,144 +225,7 @@ func (a *App) Close() {
 		if a.stopSub != nil {
 			a.stopSub()
 		}
-		if a.stopQuota != nil {
-			a.stopQuota()
-		}
 	})
-}
-
-func (a *App) watchQuota(ctx context.Context) {
-	var timer *time.Timer
-	var tick <-chan time.Time
-	resetTimer := func(d time.Duration) {
-		if d <= 0 {
-			return
-		}
-		if timer == nil {
-			timer = time.NewTimer(d)
-			tick = timer.C
-			return
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		timer.Reset(d)
-	}
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-	}()
-
-	if a.opts.QuotaInterval > 0 {
-		if a.opts.QuotaIdleInterval > 0 {
-			// Defer initial background CLI launch slightly so cold startup stays instant
-			// unless the user opens the Quota view immediately.
-			resetTimer(2 * time.Second)
-		} else {
-			resetTimer(a.opts.QuotaInterval)
-			a.requestQuotaRefresh(true)
-		}
-	}
-
-	for ctx.Err() == nil {
-		select {
-		case <-ctx.Done():
-			return
-		case <-a.quotaModeCh:
-			if a.opts.QuotaInterval <= 0 {
-				continue
-			}
-			interval := a.currentQuotaInterval()
-			a.mu.RLock()
-			last := a.lastQuotaAttempt
-			a.mu.RUnlock()
-			if last.IsZero() {
-				resetTimer(2 * time.Second)
-				continue
-			}
-			rem := interval - time.Since(last)
-			if rem < 250*time.Millisecond {
-				rem = 250 * time.Millisecond
-			}
-			resetTimer(rem)
-			continue
-		case <-tick:
-			a.mu.Lock()
-			if a.quotaInFlight {
-				a.mu.Unlock()
-				continue
-			}
-			a.quotaInFlight = true
-			a.mu.Unlock()
-		case <-a.quotaRefresh:
-			// quotaInFlight is reserved atomically under a.mu in requestQuotaRefresh.
-		}
-
-		now := time.Now()
-		if a.opts.Now != nil {
-			now = a.opts.Now()
-		}
-		err := a.quotaSvc.Refresh(ctx, now)
-		doneAt := time.Now()
-
-		a.mu.Lock()
-		a.quotaInFlight = false
-		a.lastQuotaAttempt = doneAt
-		if err == nil {
-			a.lastQuotaSuccess = doneAt
-		}
-		win := a.win
-		a.mu.Unlock()
-		if win != nil && ctx.Err() == nil {
-			win.Invalidate()
-		}
-		if a.opts.OnQuotaUpdated != nil && ctx.Err() == nil {
-			a.opts.OnQuotaUpdated()
-		}
-		if a.opts.QuotaInterval > 0 {
-			resetTimer(a.currentQuotaInterval())
-		}
-	}
-}
-
-// RequestQuotaRefresh triggers an on-demand quota refresh from manual UI actions
-// (subject to in-flight deduplication and short post-success cooldown).
-func (a *App) RequestQuotaRefresh() {
-	a.requestQuotaRefresh(true)
-}
-
-func (a *App) requestQuotaRefresh(manual bool) {
-	if a.quotaRefresh == nil {
-		return
-	}
-	a.mu.Lock()
-	if a.quotaInFlight {
-		a.mu.Unlock()
-		return
-	}
-	if manual {
-		cd := a.manualQuotaCooldown()
-		if !a.lastQuotaSuccess.IsZero() && cd > 0 && time.Since(a.lastQuotaSuccess) < cd {
-			a.mu.Unlock()
-			return
-		}
-	} else {
-		cd := a.autoQuotaCooldown()
-		if !a.lastQuotaAttempt.IsZero() && cd > 0 && time.Since(a.lastQuotaAttempt) < cd {
-			a.mu.Unlock()
-			return
-		}
-	}
-	a.quotaInFlight = true
-	select {
-	case a.quotaRefresh <- struct{}{}:
-	default:
-	}
-	a.mu.Unlock()
 }
 
 func (a *App) watchSnapshots(ch <-chan model.AppSnapshot) {
@@ -534,19 +262,17 @@ func (a *App) ActiveView() ActiveView {
 	return a.activeView
 }
 
-// SetActiveView switches the right-hand main canvas between Live, Quota, and History views.
+// SetActiveView switches the right-hand main canvas between Live and History views.
 func (a *App) SetActiveView(v ActiveView) {
 	switch v {
-	case ViewLive, ViewQuota, ViewHistory:
+	case ViewLive, ViewHistory:
 	default:
 		v = ViewLive
 	}
 	a.activeView = v
 	a.sessionPopoverOpen = false
 	a.settingsPopoverOpen = false
-	a.quotaHoverIdx = -1
 	a.histHoverIdx = -1
-	a.setDeskQuotaActive(v == ViewQuota)
 	if v == ViewHistory {
 		a.histHasCache = false
 		if a.opts.OnHistoryViewOpen != nil {
@@ -560,7 +286,7 @@ func (a *App) SetView(v ActiveView) {
 	a.SetActiveView(v)
 }
 
-// ToggleSubView toggles a sub-view (Quota or History); clicking the active one returns to Live Monitor.
+// ToggleSubView toggles a sub-view (History); clicking the active one returns to Live Monitor.
 func (a *App) ToggleSubView(v ActiveView) {
 	if a.activeView == v {
 		a.SetActiveView(ViewLive)
@@ -580,7 +306,6 @@ func (a *App) FocusConversation(convID string, manual bool) {
 		return
 	}
 	a.activeView = ViewLive
-	a.setDeskQuotaActive(false)
 	a.convID = convID
 	a.pinConversation(convID)
 	if manual && a.settings.AutoFollowActive {
@@ -622,7 +347,6 @@ func (a *App) FocusAgent(agentID string) {
 		agentID = scopeAll
 	}
 	a.activeView = ViewLive
-	a.setDeskQuotaActive(false)
 	if a.scope == agentID {
 		return
 	}
@@ -875,8 +599,6 @@ func (a *App) View(c *ui.Context) {
 					}
 					frame.Children(func() {
 						switch a.activeView {
-						case ViewQuota:
-							a.renderQuotaView(c, pal, wallNow)
 						case ViewHistory:
 							a.renderHistoryView(c, pal, wallNow)
 						default:

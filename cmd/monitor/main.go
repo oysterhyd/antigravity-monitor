@@ -17,7 +17,6 @@ import (
 	"github.com/oysterhyd/antigravity-monitor/internal/metrics"
 	"github.com/oysterhyd/antigravity-monitor/internal/mock"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
-	"github.com/oysterhyd/antigravity-monitor/internal/quota"
 	"github.com/oysterhyd/antigravity-monitor/internal/source"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/desktop"
 	"github.com/oysterhyd/antigravity-monitor/internal/ui/tray"
@@ -35,8 +34,22 @@ func tuneRuntimeMemory() {
 	}
 }
 
+func cleanupLegacyQuotaCache() {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil || cacheDir == "" {
+		return
+	}
+	legacyDir := filepath.Join(cacheDir, "antigravity-monitor", "quota-reader")
+	if _, err := os.Stat(legacyDir); err != nil {
+		return
+	}
+	_ = os.RemoveAll(legacyDir)
+	_ = os.Remove(filepath.Join(cacheDir, "antigravity-monitor"))
+}
+
 func main() {
 	tuneRuntimeMemory()
+	cleanupLegacyQuotaCache()
 	appupdater.Register(githubRepo)
 	useMock := flag.Bool("mock", false, "use simulated SnapshotProvider instead of reading local Antigravity records")
 	mockInterval := flag.Duration("mock-interval", 2800*time.Millisecond, "mock stream interval when -mock is enabled")
@@ -60,9 +73,8 @@ func main() {
 	}
 	settings := store.Get()
 
-	// Initialize the Usage History and Account Quota readers.
+	// Initialize the Usage History reader.
 	var histSvc history.Aggregator
-	var quotaSvc quota.Tracker
 	var provider model.SnapshotProvider
 	wakeHistoryCh := make(chan struct{}, 1)
 	wakeHistory := func() {
@@ -78,11 +90,9 @@ func main() {
 		provider, calc = buildProvider(*dataDir, settings)
 		cfgDir := filepath.Dir(store.Path())
 		histCachePath := filepath.Join(cfgDir, "usage_cache.json")
-		quotaHistPath := filepath.Join(cfgDir, "quota_history.json")
 		hist := history.NewAggregator(*dataDir, histCachePath, calc)
 		defer func() { _ = hist.Close() }()
 		histSvc = hist
-		quotaSvc = quota.NewService(quotaHistPath, quota.ReadCLI)
 
 		// Defer initial history warm-up briefly so cold startup stays instant;
 		// wakes immediately if the user opens Usage History.
@@ -100,7 +110,6 @@ func main() {
 	trayCtl = tray.New(tray.Options{
 		Provider: provider,
 		History:  histSvc,
-		Quota:    quotaSvc,
 		Store:    store,
 		Callbacks: tray.Callbacks{
 			OnOpenDesktop: func() {
@@ -113,8 +122,6 @@ func main() {
 					return
 				}
 				switch view {
-				case tray.ViewQuota:
-					deskHost.ShowView(desktop.ViewQuota)
 				case tray.ViewHistory:
 					deskHost.ShowView(desktop.ViewHistory)
 				default:
@@ -129,16 +136,6 @@ func main() {
 			OnSettingsChange: func(s model.Settings) {
 				if deskHost != nil {
 					deskHost.ApplySettings(s)
-				}
-			},
-			OnQuotaViewActive: func(active bool) {
-				if deskHost != nil {
-					deskHost.SetTrayQuotaActive(active)
-				}
-			},
-			OnQuotaRefresh: func() {
-				if deskHost != nil {
-					deskHost.RequestQuotaRefresh()
 				}
 			},
 			OnHistoryViewOpen: wakeHistory,
@@ -172,10 +169,8 @@ func main() {
 		deskHost = newDesktopHost(
 			provider,
 			histSvc,
-			quotaSvc,
 			store,
 			func(s model.Settings) { trayCtl.ApplySettings(s) },
-			trayCtl.InvalidateFlyout,
 			wakeHistory,
 		)
 
@@ -276,10 +271,8 @@ type desktopHost struct {
 func newDesktopHost(
 	provider model.SnapshotProvider,
 	histSvc history.Aggregator,
-	quotaSvc quota.Tracker,
 	store *config.Store,
 	onSettings func(model.Settings),
-	onQuotaUpdated func(),
 	onHistoryOpen func(),
 ) *desktopHost {
 	s := store.Get()
@@ -292,9 +285,6 @@ func newDesktopHost(
 	h.app = desktop.New(provider, desktop.Options{
 		Settings:          &s,
 		History:           histSvc,
-		Quota:             quotaSvc,
-		QuotaCooldown:     60 * time.Second,
-		OnQuotaUpdated:    onQuotaUpdated,
 		OnHistoryViewOpen: onHistoryOpen,
 		OnSettingsChange: func(next model.Settings) {
 			next = config.Normalize(next)
@@ -374,18 +364,6 @@ func (h *desktopHost) createWindow() {
 			debug.FreeOSMemory()
 		})
 	})
-}
-
-func (h *desktopHost) SetTrayQuotaActive(active bool) {
-	if h.app != nil {
-		h.app.SetTrayQuotaActive(active)
-	}
-}
-
-func (h *desktopHost) RequestQuotaRefresh() {
-	if h.app != nil {
-		h.app.RequestQuotaRefresh()
-	}
 }
 
 func (h *desktopHost) Show() {

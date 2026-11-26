@@ -115,11 +115,8 @@ func TestNewStringsR1ToR4(t *testing.T) {
 			}
 		}
 
-		// Verify all new R1-R4 formatter templates render cleanly without fmt errors.
+		// Verify all formatter templates render cleanly without fmt errors.
 		formatted := []string{
-			fmt.Sprintf(tr.QuotaResetInFmt, "3h 42m"),
-			fmt.Sprintf(tr.QuotaInspDeltaFmt, "-4%", "-8%"),
-			fmt.Sprintf(tr.QuotaResetDaysHoursFmt, 6, 3),
 			fmt.Sprintf(tr.HistorySubOutFmt, "2.9M"),
 			fmt.Sprintf(tr.HistorySubDailyAvgFmt, "$6.12"),
 			fmt.Sprintf(tr.HistorySubHourlyAvgFmt, "$1.36/h"),
@@ -133,8 +130,8 @@ func TestNewStringsR1ToR4(t *testing.T) {
 			}
 		}
 
-		if tr.BackToLive == "" || tr.QuotaTitle == "" || tr.HistoryTitle == "" {
-			t.Fatalf("lang=%s missing R1-R3 header titles", lang)
+		if tr.BackToLive == "" || tr.HistoryTitle == "" {
+			t.Fatalf("lang=%s missing header titles", lang)
 		}
 	}
 }
