@@ -110,8 +110,9 @@ func (w *dirWatcher) retryPendingDirsLocked() {
 }
 
 // WatchTranscriptDirs ensures transcript log directories for the given conversation IDs
-// are watched for real-time USER_INPUT / subagent Role updates.
-func (w *dirWatcher) WatchTranscriptDirs(convIDs map[string]bool) {
+// are watched for real-time USER_INPUT / subagent Role updates, and returns the subset
+// of convIDs whose transcript log directory is currently registered with fsnotify.
+func (w *dirWatcher) WatchTranscriptDirs(convIDs map[string]bool) map[string]bool {
 	w.dirsMu.Lock()
 	defer w.dirsMu.Unlock()
 
@@ -125,7 +126,7 @@ func (w *dirWatcher) WatchTranscriptDirs(convIDs map[string]bool) {
 		}
 		if same {
 			w.retryPendingDirsLocked()
-			return
+			return w.activeWatchedIDsLocked(convIDs)
 		}
 	}
 
@@ -155,6 +156,24 @@ func (w *dirWatcher) WatchTranscriptDirs(convIDs map[string]bool) {
 	}
 	w.pendingDirs = pending
 	w.lastConvIDs = nextIDs
+	return w.activeWatchedIDsLocked(nextIDs)
+}
+
+func (w *dirWatcher) activeWatchedIDsLocked(convIDs map[string]bool) map[string]bool {
+	if len(convIDs) == 0 {
+		return nil
+	}
+	active := make(map[string]bool, len(convIDs))
+	for id := range convIDs {
+		if id == "" {
+			continue
+		}
+		dir := filepath.Clean(filepath.Dir(TranscriptPath(w.rootDir, id)))
+		if w.watchedDirs[dir] {
+			active[id] = true
+		}
+	}
+	return active
 }
 
 func (w *dirWatcher) Close() error {

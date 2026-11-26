@@ -106,7 +106,7 @@ func (p *ConvDBPool) cachedState(convID string) ([]GenMetadata, map[int]time.Tim
 	return cloneGenMetadata(state.records), cloneStepTimes(state.stepTimes)
 }
 
-func (p *ConvDBPool) syncBatch(ctx context.Context, ids []string, activeIDs map[string]bool) map[string]bool {
+func (p *ConvDBPool) syncBatch(ctx context.Context, ids []string, activeIDs map[string]bool) (map[string]bool, map[string]bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -131,15 +131,23 @@ func (p *ConvDBPool) syncBatch(ctx context.Context, ids []string, activeIDs map[
 	}
 
 	var changed map[string]bool
+	var failed map[string]bool
 	for _, id := range ordered {
-		if updated, _, _ := p.syncLocked(ctx, id, activeIDs[id]); updated {
+		updated, _, err := p.syncLocked(ctx, id, activeIDs[id])
+		if err != nil {
+			if failed == nil {
+				failed = make(map[string]bool)
+			}
+			failed[id] = true
+		}
+		if updated {
 			if changed == nil {
 				changed = make(map[string]bool)
 			}
 			changed[id] = true
 		}
 	}
-	return changed
+	return changed, failed
 }
 
 func statConvDBFiles(dbPath string) (exists bool, dbMtimeNs, dbSize, walMtimeNs, walSize int64) {

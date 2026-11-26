@@ -14,3 +14,14 @@ type SnapshotProvider interface {
 	// Close stops background watchers and releases read-only handles.
 	Close() error
 }
+
+// ConversationHydrator is an optional interface implemented by SnapshotProviders
+// that support on-demand priority hydration and live transcript watching for
+// UI-selected conversations. Implementations must be safe for concurrent use
+// and must not block the caller.
+type ConversationHydrator interface {
+	// PinConversation binds a consumer slot (e.g., "desktop" or "tray") to convID,
+	// replacing any previous pin held by that slot. Passing an empty convID
+	// releases the slot's pin.
+	PinConversation(slot, convID string)
+}

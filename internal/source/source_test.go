@@ -774,3 +774,987 @@ func TestAsyncInitEnforcesHardLimitWithMultipleRunningTrees(t *testing.T) {
 		t.Fatalf("hydrated %d running trees after full refresh, want 3", fullHydrated)
 	}
 }
+
+func TestProviderHydratesAllDefaultConversationsAsync(t *testing.T) {
+	root := t.TempDir()
+	summaries := createTestSummariesDB(t, root)
+	defer summaries.Close()
+	now := time.Now().UTC()
+
+	// Create 12 idle conversations (> old cap of 8) to verify all listed sessions hydrate asynchronously.
+	const total = 12
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("conv-%02d", i+1)
+		ts := now.Add(-time.Duration(i) * time.Minute)
+		if _, err := summaries.Exec(
+			`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time) VALUES (?, ?, ?)`,
+			id, fmt.Sprintf("Session %02d", i+1), ts.Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+		db := createTestConvDB(t, root, id)
+		insertGenRow(t, db, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 1000, 9000, 0, 200, 10200, 512000, time.Second, 2*time.Second, ts, "")
+		_ = db.Close()
+	}
+
+	prov, err := NewProvider(Options{
+		RootDir:      root,
+		AsyncInit:    true,
+		PollInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+
+	// First frame must already have the top conversation hydrated synchronously.
+	// (Background runLoop may have already started hydrating remaining trees, so do not
+	// assert an upper bound here; strict budget-1 is verified deterministically in
+	// TestAsyncInitEnforcesHardLimitWithMultipleRunningTrees.)
+	initSnap := prov.Snapshot()
+	if len(initSnap.Conversations) != total {
+		t.Fatalf("expected %d conversations, got %d", total, len(initSnap.Conversations))
+	}
+	if initSnap.Conversations[0].TreeMetrics.RequestCount != 1 {
+		t.Fatalf("expected top conversation hydrated synchronously on AsyncInit, got reqs=%d", initSnap.Conversations[0].TreeMetrics.RequestCount)
+	}
+
+	// Background runLoop hydrates all 12 conversations (none stuck at $0.000 / Ctx 0%).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := prov.Snapshot()
+		hydrated := 0
+		for _, c := range snap.Conversations {
+			if c.TreeMetrics.RequestCount == 1 && c.TreeMetrics.SessionCostUSD > 0 && c.Root.ContextRatio > 0 {
+				hydrated++
+			}
+		}
+		if hydrated == total {
+			if prov.OpenConvDBHandles() > defaultMaxOpenDBs {
+				t.Fatalf("open DB handles = %d, exceeds default LRU cap %d", prov.OpenConvDBHandles(), defaultMaxOpenDBs)
+			}
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("expected all %d conversations hydrated asynchronously", total)
+}
+
+func TestProviderEnsureHydratedOnDemandBeyondCustomCap(t *testing.T) {
+	root := t.TempDir()
+	summaries := createTestSummariesDB(t, root)
+	defer summaries.Close()
+	now := time.Now().UTC()
+
+	const total = 10
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("cap-%02d", i+1)
+		ts := now.Add(-time.Duration(i) * time.Minute)
+		if _, err := summaries.Exec(
+			`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time) VALUES (?, ?, ?)`,
+			id, fmt.Sprintf("Cap Session %02d", i+1), ts.Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+		db := createTestConvDB(t, root, id)
+		insertGenRow(t, db, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 2000, 18000, 0, 500, 20500, 512000, time.Second, 2*time.Second, ts, "")
+		_ = db.Close()
+	}
+
+	// Explicit cap smaller than MaxConversations: initially only top 3 are hydrated.
+	prov, err := NewProvider(Options{
+		RootDir:          root,
+		MaxConversations: total,
+		MaxHydratedTrees: 3,
+		PollInterval:     time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+
+	before, ok := prov.Snapshot().FindConversation("cap-09")
+	if !ok {
+		t.Fatalf("cap-09 missing from snapshot")
+	}
+	if before.TreeMetrics.RequestCount != 0 {
+		t.Fatalf("expected cap-09 initially unhydrated under cap=3, got reqs=%d", before.TreeMetrics.RequestCount)
+	}
+
+	// Focusing cap-09 triggers on-demand priority hydration and broadcasts its real telemetry.
+	ch, cancel := prov.Subscribe()
+	defer cancel()
+	<-ch // drain initial snapshot
+
+	prov.PinConversation("desktop", "cap-09")
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case snap := <-ch:
+			if c, found := snap.FindConversation("cap-09"); found && c.TreeMetrics.RequestCount == 1 && c.TreeMetrics.SessionCostUSD > 0 && c.Root.ContextRatio > 0 {
+				return
+			}
+		case <-deadline:
+			after, _ := prov.Snapshot().FindConversation("cap-09")
+			t.Fatalf("timed out waiting for on-demand hydration of cap-09; got %+v", after)
+		}
+	}
+}
+
+func TestProviderPinConversationSlotIsolationAndRelease(t *testing.T) {
+	root := t.TempDir()
+	summaries := createTestSummariesDB(t, root)
+	defer summaries.Close()
+	now := time.Now().UTC()
+
+	const total = 10
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("pin-%02d", i+1)
+		ts := now.Add(-time.Duration(i) * time.Minute)
+		if _, err := summaries.Exec(
+			`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time) VALUES (?, ?, ?)`,
+			id, fmt.Sprintf("Pin Session %02d", i+1), ts.Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+		db := createTestConvDB(t, root, id)
+		insertGenRow(t, db, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 1500, 8500, 0, 300, 10300, 512000, time.Second, 2*time.Second, ts, "")
+		_ = db.Close()
+	}
+
+	prov, err := NewProvider(Options{
+		RootDir:          root,
+		MaxConversations: total,
+		MaxHydratedTrees: 3,
+		PollInterval:     time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+
+	waitUntil := func(desc string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if cond() {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s", desc)
+	}
+
+	// Desktop pins pin-09, then Tray pins pin-10; both slots stay hydrated independently.
+	prov.PinConversation("desktop", "pin-09")
+	waitUntil("pin-09 hydrated", func() bool {
+		c, ok := prov.Snapshot().FindConversation("pin-09")
+		return ok && c.TreeMetrics.RequestCount == 1
+	})
+
+	prov.PinConversation("tray", "pin-10")
+	waitUntil("both pin-09 and pin-10 hydrated", func() bool {
+		snap := prov.Snapshot()
+		c9, ok9 := snap.FindConversation("pin-09")
+		c10, ok10 := snap.FindConversation("pin-10")
+		return ok9 && ok10 && c9.TreeMetrics.RequestCount == 1 && c10.TreeMetrics.RequestCount == 1
+	})
+
+	// Desktop switches to pin-01 -> old desktop pin (pin-09) must be released cleanly,
+	// while tray's pin (pin-10) stays hydrated.
+	prov.PinConversation("desktop", "pin-01")
+	waitUntil("pin-09 released while pin-10 remains hydrated", func() bool {
+		snap := prov.Snapshot()
+		c9, ok9 := snap.FindConversation("pin-09")
+		c10, ok10 := snap.FindConversation("pin-10")
+		return ok9 && ok10 && c9.TreeMetrics.RequestCount == 0 && c10.TreeMetrics.RequestCount == 1
+	})
+
+	// Releasing tray slot releases pin-10 as well.
+	prov.PinConversation("tray", "")
+	waitUntil("pin-10 released", func() bool {
+		c10, ok10 := prov.Snapshot().FindConversation("pin-10")
+		return ok10 && c10.TreeMetrics.RequestCount == 0
+	})
+}
+
+func TestProviderPinConversationNonBlockingWithDisableWatcher(t *testing.T) {
+	root := t.TempDir()
+	summaries := createTestSummariesDB(t, root)
+	defer summaries.Close()
+	now := time.Now().UTC()
+
+	const total = 10
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("sync-%02d", i+1)
+		ts := now.Add(-time.Duration(i) * time.Minute)
+		if _, err := summaries.Exec(
+			`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time) VALUES (?, ?, ?)`,
+			id, fmt.Sprintf("Sync Session %02d", i+1), ts.Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+		db := createTestConvDB(t, root, id)
+		insertGenRow(t, db, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 1200, 8800, 0, 250, 10250, 512000, time.Second, 2*time.Second, ts, "")
+		_ = db.Close()
+	}
+
+	prov, err := NewProvider(Options{
+		RootDir:          root,
+		MaxConversations: total,
+		MaxHydratedTrees: 3,
+		DisableWatcher:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+
+	before, _ := prov.Snapshot().FindConversation("sync-09")
+	if before.TreeMetrics.RequestCount != 0 {
+		t.Fatalf("expected sync-09 initially unhydrated, got reqs=%d", before.TreeMetrics.RequestCount)
+	}
+
+	ch, cancel := prov.Subscribe()
+	defer cancel()
+	<-ch // drain initial snapshot
+
+	// PinConversation must NEVER block the caller even when syncMu is held and DisableWatcher is true.
+	prov.syncMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		prov.PinConversation("desktop", "sync-09")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		prov.syncMu.Unlock()
+		t.Fatal("PinConversation blocked caller while syncMu was held under DisableWatcher")
+	}
+	prov.syncMu.Unlock()
+
+	// Once syncMu is free, the one-shot on-demand worker hydrates sync-09 without requiring manual Refresh.
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case snap := <-ch:
+			if after, ok := snap.FindConversation("sync-09"); ok && after.TreeMetrics.RequestCount == 1 && after.TreeMetrics.SessionCostUSD > 0 {
+				return
+			}
+		case <-deadline:
+			after, _ := prov.Snapshot().FindConversation("sync-09")
+			t.Fatalf("timed out waiting for async on-demand hydration under DisableWatcher; got %+v", after)
+		}
+	}
+}
+
+func TestProviderPinConversationAttachesTranscriptWatcherBeforeRead(t *testing.T) {
+	root := t.TempDir()
+	summaries := createTestSummariesDB(t, root)
+	defer summaries.Close()
+	now := time.Now().UTC()
+
+	// Create 10 idle conversations: all 10 are hydrated by default, while only the top 8
+	// have transcript directories watched initially.
+	const total = 10
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("watch-%02d", i+1)
+		ts := now.Add(-time.Duration(i) * time.Minute)
+		if _, err := summaries.Exec(
+			`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time) VALUES (?, ?, ?)`,
+			id, fmt.Sprintf("Watch Session %02d", i+1), ts.Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+		writeTranscriptFile(t, root, id, `{"step_index":0,"type":"USER_INPUT","created_at":"2026-11-24T14:00:00Z"}`+"\n"+
+			`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-24T14:00:05Z","model":"gemini-4-flash","input_tokens":1000,"cache_read_tokens":2000,"output_tokens":100}`+"\n")
+	}
+
+	prov, err := NewProvider(Options{
+		RootDir:      root,
+		Debounce:     25 * time.Millisecond,
+		PollInterval: -1, // disable polling completely to prove fsnotify catches the append
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+
+	c10, ok := prov.Snapshot().FindConversation("watch-10")
+	if !ok || c10.TreeMetrics.RequestCount != 1 {
+		t.Fatalf("expected watch-10 initially hydrated with 1 req, got ok=%v reqs=%d", ok, c10.TreeMetrics.RequestCount)
+	}
+
+	// Selecting watch-10 must register fsnotify BEFORE marking watchedSet[watch-10] true
+	// and before reading L3, leaving zero watch/read race window.
+	prov.PinConversation("desktop", "watch-10")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		prov.pinMu.Lock()
+		watched := prov.watchedSet["watch-10"]
+		prov.pinMu.Unlock()
+		if watched {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	prov.pinMu.Lock()
+	isWatched := prov.watchedSet["watch-10"]
+	prov.pinMu.Unlock()
+	if !isWatched {
+		t.Fatal("watch-10 was not marked watched after PinConversation")
+	}
+
+	ch, cancel := prov.Subscribe()
+	defer cancel()
+	<-ch // drain current snapshot
+
+	// Append a pure L3 transcript line to watch-10 (no L1/L2 writes, polling disabled).
+	trPath := TranscriptPath(root, "watch-10")
+	f, err := os.OpenFile(trPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open transcript for append: %v", err)
+	}
+	_, err = f.WriteString(`{"step_index":2,"type":"PLANNER_RESPONSE","created_at":"2026-11-24T14:01:00Z","model":"gemini-4-flash","input_tokens":1200,"cache_read_tokens":3000,"output_tokens":150}` + "\n")
+	_ = f.Close()
+	if err != nil {
+		t.Fatalf("append transcript: %v", err)
+	}
+
+	waitDeadline := time.After(3 * time.Second)
+	gotUpdate := false
+	for !gotUpdate {
+		select {
+		case snap := <-ch:
+			if c, found := snap.FindConversation("watch-10"); found && c.TreeMetrics.RequestCount == 2 {
+				gotUpdate = true
+			}
+		case <-waitDeadline:
+			after, _ := prov.Snapshot().FindConversation("watch-10")
+			t.Fatalf("timed out waiting for real-time L3 update on pinned watch-10; reqs=%d", after.TreeMetrics.RequestCount)
+		}
+	}
+
+	// Switching away from watch-10 releases its extra transcript watcher cleanly.
+	prov.PinConversation("desktop", "watch-01")
+	unwatchDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(unwatchDeadline) {
+		prov.pinMu.Lock()
+		stillWatched := prov.watchedSet["watch-10"]
+		prov.pinMu.Unlock()
+		if !stillWatched {
+			return
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	t.Fatal("expected watch-10 to be unwatched after switching desktop slot back to watch-01")
+}
+
+func TestProviderPinConversationRetriesLateCreatedTranscriptDir(t *testing.T) {
+	root := t.TempDir()
+	summaries := createTestSummariesDB(t, root)
+	defer summaries.Close()
+	now := time.Now().UTC()
+
+	const total = 10
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("late-%02d", i+1)
+		ts := now.Add(-time.Duration(i) * time.Minute)
+		if _, err := summaries.Exec(
+			`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time) VALUES (?, ?, ?)`,
+			id, fmt.Sprintf("Late Session %02d", i+1), ts.Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+		// Omit late-10's transcript directory initially so WatchTranscriptDirs queues it in pendingDirs.
+		if id != "late-10" {
+			writeTranscriptFile(t, root, id, `{"step_index":0,"type":"USER_INPUT","created_at":"2026-11-24T14:00:00Z"}`+"\n")
+		}
+	}
+
+	prov, err := NewProvider(Options{
+		RootDir:      root,
+		Debounce:     25 * time.Millisecond,
+		PollInterval: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+
+	// First selection before late-10's transcript dir exists: must NOT mark late-10 watched.
+	prov.PinConversation("desktop", "late-10")
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		prov.pinMu.Lock()
+		applied := prov.appliedPinGen == prov.pinGen
+		watched := prov.watchedSet["late-10"]
+		prov.pinMu.Unlock()
+		if applied {
+			if watched {
+				t.Fatal("late-10 was marked watched before its transcript directory existed")
+			}
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	// Create late-10's transcript directory and initial file, then re-select the same conversation.
+	writeTranscriptFile(t, root, "late-10", `{"step_index":0,"type":"USER_INPUT","created_at":"2026-11-24T14:00:00Z"}`+"\n"+
+		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-24T14:00:05Z","model":"gemini-4-flash","input_tokens":1000,"cache_read_tokens":2000,"output_tokens":100}`+"\n")
+
+	prov.PinConversation("desktop", "late-10")
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		prov.pinMu.Lock()
+		watched := prov.watchedSet["late-10"]
+		prov.pinMu.Unlock()
+		if watched {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	prov.pinMu.Lock()
+	watchedNow := prov.watchedSet["late-10"]
+	prov.pinMu.Unlock()
+	if !watchedNow {
+		t.Fatal("re-selecting late-10 after transcript dir creation did not attach watcher")
+	}
+
+	ch, cancel := prov.Subscribe()
+	defer cancel()
+	<-ch
+
+	// Append a new line to prove fsnotify is actively watching late-10 with polling disabled.
+	trPath := TranscriptPath(root, "late-10")
+	f, err := os.OpenFile(trPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open late-10 transcript: %v", err)
+	}
+	_, err = f.WriteString(`{"step_index":2,"type":"PLANNER_RESPONSE","created_at":"2026-11-24T14:01:00Z","model":"gemini-4-flash","input_tokens":1200,"cache_read_tokens":3000,"output_tokens":150}` + "\n")
+	_ = f.Close()
+	if err != nil {
+		t.Fatalf("append late-10 transcript: %v", err)
+	}
+
+	waitDeadline := time.After(3 * time.Second)
+	for {
+		select {
+		case snap := <-ch:
+			if c, ok := snap.FindConversation("late-10"); ok && c.TreeMetrics.RequestCount == 2 {
+				return
+			}
+		case <-waitDeadline:
+			after, _ := prov.Snapshot().FindConversation("late-10")
+			t.Fatalf("timed out waiting for fsnotify event on late-created late-10 transcript; reqs=%d", after.TreeMetrics.RequestCount)
+		}
+	}
+}
+
+func TestProviderPinConversationRetriesAfterOnDemandTimeout(t *testing.T) {
+	root := t.TempDir()
+	summaries := createTestSummariesDB(t, root)
+	defer summaries.Close()
+	now := time.Now().UTC()
+
+	const total = 10
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("timeout-%02d", i+1)
+		ts := now.Add(-time.Duration(i) * time.Minute)
+		if _, err := summaries.Exec(
+			`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time) VALUES (?, ?, ?)`,
+			id, fmt.Sprintf("Timeout Session %02d", i+1), ts.Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+		db := createTestConvDB(t, root, id)
+		insertGenRow(t, db, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 1200, 8800, 0, 250, 10250, 512000, time.Second, 2*time.Second, ts, "")
+		_ = db.Close()
+	}
+
+	prov, err := NewProvider(Options{
+		RootDir:          root,
+		MaxConversations: total,
+		MaxHydratedTrees: 3,
+		DisableWatcher:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+
+	// Use a short on-demand timeout and hold syncMu past that timeout to force expiration.
+	prov.onDemandTimeout = 80 * time.Millisecond
+	prov.syncMu.Lock()
+	prov.PinConversation("desktop", "timeout-09")
+	time.Sleep(150 * time.Millisecond)
+	prov.syncMu.Unlock()
+
+	// Wait for the timed-out worker to exit.
+	prov.onDemandWG.Wait()
+
+	// Timed-out conversation must NOT be falsely marked hydrated.
+	prov.pinMu.Lock()
+	falselyHydrated := prov.hydratedSet["timeout-09"]
+	prov.pinMu.Unlock()
+	if falselyHydrated {
+		t.Fatal("timed-out conversation timeout-09 was falsely marked hydrated")
+	}
+	if c, _ := prov.Snapshot().FindConversation("timeout-09"); c.TreeMetrics.RequestCount != 0 {
+		t.Fatalf("expected timeout-09 to remain unhydrated after timeout, got reqs=%d", c.TreeMetrics.RequestCount)
+	}
+
+	// Re-selecting timeout-09 with normal timeout must retry and succeed without manual Refresh.
+	prov.onDemandTimeout = 5 * time.Second
+	prov.PinConversation("desktop", "timeout-09")
+	prov.onDemandWG.Wait()
+
+	after, ok := prov.Snapshot().FindConversation("timeout-09")
+	if !ok || after.TreeMetrics.RequestCount != 1 || after.TreeMetrics.SessionCostUSD <= 0 {
+		t.Fatalf("expected timeout-09 retry to succeed, got ok=%v conv=%+v", ok, after)
+	}
+}
+
+func TestProviderPinConversationDoesNotDropNewSelectionAfterTimeout(t *testing.T) {
+	root := t.TempDir()
+	summaries := createTestSummariesDB(t, root)
+	defer summaries.Close()
+	now := time.Now().UTC()
+
+	const total = 10
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("switch-%02d", i+1)
+		ts := now.Add(-time.Duration(i) * time.Minute)
+		if _, err := summaries.Exec(
+			`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time) VALUES (?, ?, ?)`,
+			id, fmt.Sprintf("Switch Session %02d", i+1), ts.Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+		db := createTestConvDB(t, root, id)
+		insertGenRow(t, db, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 1200, 8800, 0, 250, 10250, 512000, time.Second, 2*time.Second, ts, "")
+		_ = db.Close()
+	}
+
+	prov, err := NewProvider(Options{
+		RootDir:          root,
+		MaxConversations: total,
+		MaxHydratedTrees: 3,
+		DisableWatcher:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+
+	// Select A while syncMu is held past timeout, then select B BEFORE A's worker can exit.
+	prov.pinMu.Lock()
+	prov.onDemandTimeout = 80 * time.Millisecond
+	prov.pinMu.Unlock()
+	prov.syncMu.Lock()
+	prov.PinConversation("desktop", "switch-09")
+	time.Sleep(150 * time.Millisecond)
+	// Restore normal timeout for the follow-up attempt and switch to B while A is still blocked on syncMu.
+	prov.pinMu.Lock()
+	prov.onDemandTimeout = 5 * time.Second
+	prov.pinMu.Unlock()
+	prov.PinConversation("desktop", "switch-10")
+	prov.syncMu.Unlock()
+
+	prov.onDemandWG.Wait()
+
+	afterB, ok := prov.Snapshot().FindConversation("switch-10")
+	if !ok || afterB.TreeMetrics.RequestCount != 1 || afterB.TreeMetrics.SessionCostUSD <= 0 {
+		t.Fatalf("expected switch-10 to be hydrated automatically after prior timeout, got ok=%v conv=%+v", ok, afterB)
+	}
+}
+
+func TestProviderDBErrorDoesNotMaskTranscriptAndDoesNotBroadcastWhenIdle(t *testing.T) {
+	root := t.TempDir()
+	summaries := createTestSummariesDB(t, root)
+	defer summaries.Close()
+	now := time.Now().UTC()
+
+	if _, err := summaries.Exec(
+		`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time) VALUES ('broken-l2', 'Broken L2 Valid L3', ?)`,
+		now.Format(time.RFC3339),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create an L2 DB file missing the gen_metadata table (causes SQLite query error),
+	// alongside a valid L3 transcript.jsonl with 1 request.
+	convDir := filepath.Join(root, "conversations")
+	if err := os.MkdirAll(convDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	badDB, err := sql.Open("sqlite", filepath.Join(convDir, "broken-l2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := badDB.Exec(`CREATE TABLE dummy (id integer PRIMARY KEY)`); err != nil {
+		_ = badDB.Close()
+		t.Fatal(err)
+	}
+	_ = badDB.Close()
+
+	writeTranscriptFile(t, root, "broken-l2",
+		`{"step_index":0,"type":"USER_INPUT","created_at":"2026-11-24T14:00:00Z"}`+"\n"+
+			`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-24T14:00:05Z","model":"gemini-4-flash","input_tokens":4000,"cache_read_tokens":6000,"output_tokens":200}`+"\n")
+
+	prov, err := NewProvider(Options{
+		RootDir:        root,
+		DisableWatcher: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+
+	// 1. Available L3 transcript data must still be visible despite L2 DB failure.
+	c, ok := prov.Snapshot().FindConversation("broken-l2")
+	if !ok || c.TreeMetrics.RequestCount != 1 {
+		t.Fatalf("expected L3 fallback request to be visible despite L2 DB error, got ok=%v reqs=%d", ok, c.TreeMetrics.RequestCount)
+	}
+
+	// 2. Retry state must remain enabled (not falsely marked hydrated).
+	prov.pinMu.Lock()
+	markedHydrated := prov.hydratedSet["broken-l2"]
+	prov.pinMu.Unlock()
+	if markedHydrated {
+		t.Fatal("broken-l2 must stay unmarked in hydratedSet while L2 DB fails")
+	}
+
+	// 3. Repeated idle refreshes with persistent L2 error must NOT broadcast when nothing changed.
+	ch, cancel := prov.Subscribe()
+	defer cancel()
+	<-ch // drain initial snapshot
+
+	for i := 0; i < 3; i++ {
+		if err := prov.Refresh(context.Background()); err != nil {
+			t.Fatalf("idle refresh %d failed: %v", i, err)
+		}
+		select {
+		case snap := <-ch:
+			t.Fatalf("unexpected idle broadcast #%d on unchanged persistent DB error: %v", i, snap.GeneratedAt)
+		default:
+		}
+	}
+
+	// 4. Once L2 DB is repaired with gen_metadata, Refresh retries cleanly and upgrades data.
+	repairedDB := createTestConvDB(t, root, "broken-l2")
+	defer repairedDB.Close()
+	insertGenRow(t, repairedDB, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 4000, 6000, 0, 200, 10200, 512000, time.Second, 2*time.Second, now, "")
+	insertGenRow(t, repairedDB, 1, 2, "gemini-4-neon", "Gemini 4 Neon (High)", 1000, 9000, 0, 300, 10300, 512000, time.Second, 2*time.Second, now.Add(time.Second), "")
+
+	if err := prov.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh after DB repair: %v", err)
+	}
+	select {
+	case snap := <-ch:
+		repaired, found := snap.FindConversation("broken-l2")
+		if !found || repaired.TreeMetrics.RequestCount != 2 {
+			t.Fatalf("expected 2 L2 requests after DB repair, got found=%v reqs=%d", found, repaired.TreeMetrics.RequestCount)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected broadcast after L2 DB repair")
+	}
+	prov.pinMu.Lock()
+	hydratedAfterRepair := prov.hydratedSet["broken-l2"]
+	prov.pinMu.Unlock()
+	if !hydratedAfterRepair {
+		t.Fatal("expected broken-l2 marked hydrated after L2 DB repair")
+	}
+}
+
+func TestProviderPinConversationDoesNotAckFailedNewPinOnInFlightTimeout(t *testing.T) {
+	root := t.TempDir()
+	summaries := createTestSummariesDB(t, root)
+	defer summaries.Close()
+	now := time.Now().UTC()
+
+	const total = 10
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("inflight-%02d", i+1)
+		ts := now.Add(-time.Duration(i) * time.Minute)
+		if _, err := summaries.Exec(
+			`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time) VALUES (?, ?, ?)`,
+			id, fmt.Sprintf("InFlight Session %02d", i+1), ts.Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+		db := createTestConvDB(t, root, id)
+		insertGenRow(t, db, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 1200, 8800, 0, 250, 10250, 512000, time.Second, 2*time.Second, ts, "")
+		_ = db.Close()
+	}
+
+	if _, err := summaries.Exec(`PRAGMA journal_mode=DELETE`); err != nil {
+		t.Fatal(err)
+	}
+
+	prov, err := NewProvider(Options{
+		RootDir:          root,
+		MaxConversations: total,
+		MaxHydratedTrees: 3,
+		DisableWatcher:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+
+	// Part 1: Deterministic check that buildSnapshotLocked with an expired ctx never
+	// advances appliedPinGen when a pinned conversation fails to hydrate.
+	prov.syncMu.Lock()
+	prov.pinMu.Lock()
+	prov.pinnedBySlot["desktop"] = "inflight-08"
+	prov.pinGen++
+	genBefore := prov.pinGen
+	appliedBefore := prov.appliedPinGen
+	prov.pinMu.Unlock()
+	expiredCtx, cancelExpired := context.WithCancel(context.Background())
+	cancelExpired()
+	_, _ = prov.buildSnapshotLocked(expiredCtx, prov.opts.MaxHydratedTrees, false, false)
+	prov.syncMu.Unlock()
+
+	prov.pinMu.Lock()
+	if prov.appliedPinGen >= genBefore || prov.appliedPinGen != appliedBefore {
+		t.Fatalf("expired buildSnapshotLocked falsely advanced appliedPinGen from %d to %d (pinGen=%d)", appliedBefore, prov.appliedPinGen, genBefore)
+	}
+	if prov.hydratedSet["inflight-08"] {
+		t.Fatal("expired buildSnapshotLocked falsely marked inflight-08 hydrated")
+	}
+	delete(prov.pinnedBySlot, "desktop")
+	prov.appliedPinGen = prov.pinGen
+	prov.pinMu.Unlock()
+
+	// Part 2: With summaries DB in rollback DELETE journal mode, BEGIN EXCLUSIVE
+	// deterministically blocks ReadChanges(ctx) past onDemandTimeout.
+	lockConn, err := summaries.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockConn.Close()
+	if _, err := lockConn.ExecContext(context.Background(), `BEGIN EXCLUSIVE`); err != nil {
+		t.Fatal(err)
+	}
+
+	prov.pinMu.Lock()
+	prov.onDemandTimeout = 80 * time.Millisecond
+	prov.pinMu.Unlock()
+
+	prov.PinConversation("desktop", "inflight-09")
+	// Wait past the 80ms timeout while ReadChanges is blocked on the exclusive lock,
+	// then switch to inflight-10 BEFORE releasing the lock (and before worker exits).
+	time.Sleep(120 * time.Millisecond)
+	prov.pinMu.Lock()
+	prov.onDemandTimeout = 5 * time.Second
+	prov.pinMu.Unlock()
+	prov.PinConversation("desktop", "inflight-10")
+
+	if _, err := lockConn.ExecContext(context.Background(), `ROLLBACK`); err != nil {
+		t.Fatal(err)
+	}
+
+	prov.onDemandWG.Wait()
+
+	afterA, _ := prov.Snapshot().FindConversation("inflight-09")
+	if afterA.TreeMetrics.RequestCount != 0 {
+		t.Fatalf("expected inflight-09 to have timed out and been replaced, got reqs=%d", afterA.TreeMetrics.RequestCount)
+	}
+	afterB, ok := prov.Snapshot().FindConversation("inflight-10")
+	if !ok || afterB.TreeMetrics.RequestCount != 1 || afterB.TreeMetrics.SessionCostUSD <= 0 {
+		t.Fatalf("expected inflight-10 hydrated after mid-read timeout on inflight-09, got ok=%v conv=%+v", ok, afterB)
+	}
+}
+
+func TestProviderClearedHydratedFlagRetriesAfterMidLifecycleDBFailure(t *testing.T) {
+	root := t.TempDir()
+	summaries := createTestSummariesDB(t, root)
+	defer summaries.Close()
+	now := time.Now().UTC()
+
+	if _, err := summaries.Exec(
+		`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time) VALUES ('flaky-db', 'Flaky L2 Session', ?)`,
+		now.Format(time.RFC3339),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	convDB := createTestConvDB(t, root, "flaky-db")
+	defer convDB.Close()
+	insertGenRow(t, convDB, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 1000, 9000, 0, 200, 10200, 512000, time.Second, 2*time.Second, now, "")
+
+	prov, err := NewProvider(Options{
+		RootDir:        root,
+		DisableWatcher: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+
+	// 1. Initially hydrated with 1 request.
+	c1, ok := prov.Snapshot().FindConversation("flaky-db")
+	if !ok || c1.TreeMetrics.RequestCount != 1 {
+		t.Fatalf("expected initial 1 request, got ok=%v reqs=%d", ok, c1.TreeMetrics.RequestCount)
+	}
+	prov.pinMu.Lock()
+	initHydrated := prov.hydratedSet["flaky-db"]
+	prov.pinMu.Unlock()
+	if !initHydrated {
+		t.Fatal("expected flaky-db marked hydrated initially")
+	}
+
+	// 2. Break gen_metadata temporarily so the next Refresh triggers an L2 read failure.
+	if _, err := convDB.Exec(`ALTER TABLE gen_metadata RENAME TO gen_metadata_bak`); err != nil {
+		t.Fatal(err)
+	}
+	if err := prov.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh during L2 failure: %v", err)
+	}
+
+	// Last good snapshot must remain visible, while hydratedSet clears so re-selection retries.
+	cDuring, _ := prov.Snapshot().FindConversation("flaky-db")
+	if cDuring.TreeMetrics.RequestCount != 1 {
+		t.Fatalf("expected last good snapshot preserved during failure, got reqs=%d", cDuring.TreeMetrics.RequestCount)
+	}
+	prov.pinMu.Lock()
+	hydratedAfterFail := prov.hydratedSet["flaky-db"]
+	prov.pinMu.Unlock()
+	if hydratedAfterFail {
+		t.Fatal("expected hydratedSet[flaky-db] cleared after L2 read failure")
+	}
+
+	// 3. Restore gen_metadata and append a 2nd request; re-selecting via PinConversation
+	// must retry and pick up request #2 without requiring an explicit Refresh().
+	if _, err := convDB.Exec(`ALTER TABLE gen_metadata_bak RENAME TO gen_metadata`); err != nil {
+		t.Fatal(err)
+	}
+	insertGenRow(t, convDB, 1, 2, "gemini-4-neon", "Gemini 4 Neon (High)", 1500, 9500, 0, 300, 11300, 512000, time.Second, 2*time.Second, now.Add(time.Second), "")
+
+	prov.PinConversation("desktop", "flaky-db")
+	prov.onDemandWG.Wait()
+
+	cAfter, ok := prov.Snapshot().FindConversation("flaky-db")
+	if !ok || cAfter.TreeMetrics.RequestCount != 2 {
+		t.Fatalf("expected re-selection retry to load 2nd request, got ok=%v reqs=%d", ok, cAfter.TreeMetrics.RequestCount)
+	}
+	prov.pinMu.Lock()
+	hydratedAfterRetry := prov.hydratedSet["flaky-db"]
+	prov.pinMu.Unlock()
+	if !hydratedAfterRetry {
+		t.Fatal("expected hydratedSet[flaky-db] restored after successful retry")
+	}
+}
+
+func TestProviderDeletedConversationPublishesAfterCancelledRefresh(t *testing.T) {
+	root1 := t.TempDir()
+	root2 := t.TempDir()
+	sum1 := createTestSummariesDB(t, root1)
+	defer sum1.Close()
+	sum2 := createTestSummariesDB(t, root2)
+	defer sum2.Close()
+
+	// Put root2's summaries DB in rollback DELETE mode so BEGIN EXCLUSIVE blocks ReadChanges until timeout.
+	if _, err := sum2.Exec(`PRAGMA journal_mode=DELETE`); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	if _, err := sum1.Exec(
+		`INSERT INTO conversation_summaries (conversation_id, title, last_modified_time) VALUES ('del-1', 'Soon Deleted', ?)`,
+		now.Format(time.RFC3339),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	prov, err := NewProvider(Options{
+		RootDirs:       []string{root1, root2},
+		DisableWatcher: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+
+	if len(prov.Snapshot().Conversations) != 1 {
+		t.Fatalf("expected initial 1 conversation, got %d", len(prov.Snapshot().Conversations))
+	}
+
+	// Delete del-1 from root1, then block root2 so Refresh observes root1's deletion
+	// and updates p.trees before failing with DeadlineExceeded on root2.
+	if _, err := sum1.Exec(`DELETE FROM conversation_summaries WHERE conversation_id = 'del-1'`); err != nil {
+		t.Fatal(err)
+	}
+	lockConn, err := sum2.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockConn.Close()
+	if _, err := lockConn.ExecContext(context.Background(), `BEGIN EXCLUSIVE`); err != nil {
+		t.Fatal(err)
+	}
+
+	shortCtx, cancelShort := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	err = prov.Refresh(shortCtx)
+	cancelShort()
+	if err == nil {
+		_, _ = lockConn.ExecContext(context.Background(), `ROLLBACK`)
+		t.Fatal("expected cancelled/timed-out refresh while root2 was exclusively locked")
+	}
+	if _, err := lockConn.ExecContext(context.Background(), `ROLLBACK`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-condition check: internal trees already dropped del-1, published snapshot still
+	// had 1, and BOTH roots retain valid version caches so recovery Refresh gets changed=false
+	// from every root and relies strictly on snapshotDirty to publish the deletion.
+	if len(prov.Snapshot().Conversations) != 1 {
+		t.Fatalf("expected stale pre-publish snapshot with 1 conversation before retry, got %d", len(prov.Snapshot().Conversations))
+	}
+	for i, rs := range prov.roots {
+		rs.summaries.mu.Lock()
+		vk := rs.summaries.versionKnown
+		rs.summaries.mu.Unlock()
+		if !vk {
+			t.Fatalf("expected root[%d] summaries versionKnown=true so recovery relies strictly on snapshotDirty", i)
+		}
+	}
+
+	ch, cancel := prov.Subscribe()
+	defer cancel()
+	<-ch // drain stale snapshot
+
+	// Next successful Refresh must publish the pending deletion even though root1's data_version is unchanged.
+	if err := prov.Refresh(context.Background()); err != nil {
+		t.Fatalf("recovery refresh failed: %v", err)
+	}
+	if got := len(prov.Snapshot().Conversations); got != 0 {
+		t.Fatalf("expected 0 conversations after recovery refresh, got %d", got)
+	}
+	select {
+	case snap := <-ch:
+		if len(snap.Conversations) != 0 {
+			t.Fatalf("expected broadcast with 0 conversations, got %d", len(snap.Conversations))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected broadcast publishing pending deletion")
+	}
+
+	// Subsequent idle refreshes must not broadcast again.
+	for i := 0; i < 2; i++ {
+		if err := prov.Refresh(context.Background()); err != nil {
+			t.Fatalf("idle refresh %d failed: %v", i, err)
+		}
+		select {
+		case snap := <-ch:
+			t.Fatalf("unexpected idle broadcast #%d after deletion published: %v", i, snap.GeneratedAt)
+		default:
+		}
+	}
+}

@@ -314,6 +314,7 @@ func (ctl *Controller) renderHeader(c *ui.Context, pal palette, conv model.Conve
 									})
 									if row.Clicked() {
 										st.SelectConversation(item.ID, true)
+										ctl.pinConversation(item.ID)
 										ctl.updateSettings(func(s *model.Settings) {
 											s.AutoFollowActive = false
 										})

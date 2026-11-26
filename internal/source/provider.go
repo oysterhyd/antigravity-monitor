@@ -16,11 +16,12 @@ import (
 )
 
 const (
-	defaultMaxConversations  = 20
-	defaultMaxHydratedTrees  = 8
-	defaultPollInterval      = 3 * time.Second
-	defaultIdlePollInterval  = 12 * time.Second
-	defaultRootDiscoverEvery = 30 * time.Second
+	defaultMaxConversations     = 20
+	defaultMaxHydratedTrees     = defaultMaxConversations
+	defaultWatchTranscriptTrees = 8
+	defaultPollInterval         = 3 * time.Second
+	defaultIdlePollInterval     = 12 * time.Second
+	defaultRootDiscoverEvery    = 30 * time.Second
 )
 
 // Options configures the local read-only Antigravity data engine.
@@ -42,7 +43,7 @@ type Options struct {
 	MaxOpenDBs int
 	// MaxConversations caps how many top-level conversations appear in AppSnapshot (default 20).
 	MaxConversations int
-	// MaxHydratedTrees caps how many top-level trees are hydrated via L2/L3 (default 8; all running trees are always hydrated).
+	// MaxHydratedTrees caps how many top-level trees are hydrated via L2/L3 (default MaxConversations; all running and pinned trees are always hydrated).
 	MaxHydratedTrees int
 	// Debounce sets the per-conversation fsnotify debounce interval (default 150ms).
 	Debounce time.Duration
@@ -94,31 +95,50 @@ type Provider struct {
 	tailers              map[string]*TranscriptTailer
 	hasSnapshot          bool
 	fullHydrated         bool
+	snapshotDirty        bool
+	onDemandTimeout      time.Duration
 	lastRootDiscover     time.Time
 	rootDiscoverInterval time.Duration
 
 	snapMu   sync.RWMutex
 	snapshot model.AppSnapshot
 
+	pinMu          sync.Mutex
+	pinnedBySlot   map[string]string
+	hydratedSet    map[string]bool
+	watchedSet     map[string]bool
+	pinGen         uint64
+	appliedPinGen  uint64
+	stopped        bool
+	onDemandActive bool
+	onDemandWG     sync.WaitGroup
+
 	subMu   sync.Mutex
 	subs    map[int]chan model.AppSnapshot
 	nextSub int
 	closed  bool
 
-	triggerCh chan watchEvent
-	stopCh    chan struct{}
-	doneCh    chan struct{}
-	hasLoop   bool
+	baseCtx    context.Context
+	cancelBase context.CancelFunc
+	triggerCh  chan watchEvent
+	hydrateCh  chan struct{}
+	stopCh     chan struct{}
+	doneCh     chan struct{}
+	hasLoop    bool
 }
 
 type cachedTree struct {
-	tree     ConversationTree
-	snapshot model.ConversationSnapshot
-	hydrated bool
+	tree          ConversationTree
+	snapshot      model.ConversationSnapshot
+	hydrated      bool // true only when L2 DB sync for the tree completed without error
+	builtHydrated bool // true when snapshot reflects hydrate=true data (including partial L3 fallback)
 }
 
-// Compile-time assertion that *Provider implements model.SnapshotProvider.
-var _ model.SnapshotProvider = (*Provider)(nil)
+// Compile-time assertions that *Provider implements model.SnapshotProvider and model.ConversationHydrator.
+var (
+	_ model.SnapshotProvider     = (*Provider)(nil)
+	_ model.ConversationHydrator = (*Provider)(nil)
+)
 
 // NewProvider initializes the read-only local data engine, performs an initial synchronous
 // snapshot build, and starts the fsnotify watcher unless Options.DisableWatcher is set.
@@ -130,7 +150,7 @@ func NewProvider(opts Options) (*Provider, error) {
 		opts.MaxConversations = defaultMaxConversations
 	}
 	if opts.MaxHydratedTrees <= 0 {
-		opts.MaxHydratedTrees = defaultMaxHydratedTrees
+		opts.MaxHydratedTrees = opts.MaxConversations
 	}
 	if opts.Debounce <= 0 {
 		opts.Debounce = defaultDebounce
@@ -169,20 +189,29 @@ func NewProvider(opts Options) (*Provider, error) {
 		initialRoots = []string{DefaultRootDir()}
 	}
 
+	baseCtx, cancelBase := context.WithCancel(context.Background())
+
 	p := &Provider{
-		opts:             opts,
-		calc:             calc,
-		autoDiscover:     autoDiscover,
-		adaptivePoll:     adaptivePoll,
-		discoverFunc:     discoverFn,
-		rootsByKey:       make(map[string]*rootSource, len(initialRoots)),
-		convRoot:         make(map[string]*rootSource),
-		resolvedRoot:     make(map[string]*rootSource),
-		tailers:          make(map[string]*TranscriptTailer),
-		subs:             make(map[int]chan model.AppSnapshot),
+		opts:                 opts,
+		calc:                 calc,
+		autoDiscover:         autoDiscover,
+		adaptivePoll:         adaptivePoll,
+		discoverFunc:         discoverFn,
+		rootsByKey:           make(map[string]*rootSource, len(initialRoots)),
+		convRoot:             make(map[string]*rootSource),
+		resolvedRoot:         make(map[string]*rootSource),
+		tailers:              make(map[string]*TranscriptTailer),
+		subs:                 make(map[int]chan model.AppSnapshot),
+		pinnedBySlot:         make(map[string]string),
+		hydratedSet:          make(map[string]bool),
+		watchedSet:           make(map[string]bool),
+		baseCtx:              baseCtx,
+		cancelBase:           cancelBase,
 		triggerCh:            make(chan watchEvent, 64),
+		hydrateCh:            make(chan struct{}, 1),
 		stopCh:               make(chan struct{}),
 		doneCh:               make(chan struct{}),
+		onDemandTimeout:      5 * time.Second,
 		lastRootDiscover:     time.Now(),
 		rootDiscoverInterval: defaultRootDiscoverEvery,
 	}
@@ -257,6 +286,108 @@ func (p *Provider) Snapshot() model.AppSnapshot {
 	return p.snapshot
 }
 
+// PinConversation implements model.ConversationHydrator, binding a consumer slot
+// (such as "desktop" or "tray") to convID so it stays hydrated and watched without
+// accumulating stale pins or overwriting other consumers. Passing an empty convID
+// releases the slot's pin. Always non-blocking; safe to call from UI threads.
+func (p *Provider) PinConversation(slot, convID string) {
+	slot = strings.TrimSpace(slot)
+	if slot == "" {
+		slot = "default"
+	}
+	id := strings.TrimSpace(convID)
+
+	p.pinMu.Lock()
+	if p.stopped {
+		p.pinMu.Unlock()
+		return
+	}
+	if p.pinnedBySlot == nil {
+		p.pinnedBySlot = make(map[string]string)
+	}
+	prevID, hadPrev := p.pinnedBySlot[slot]
+	slotChanged := false
+	if id == "" {
+		if hadPrev {
+			delete(p.pinnedBySlot, slot)
+			slotChanged = true
+		}
+	} else if !hadPrev || prevID != id {
+		p.pinnedBySlot[slot] = id
+		slotChanged = true
+	}
+
+	needSync := slotChanged
+	if id != "" {
+		if !p.hydratedSet[id] || (p.hasLoop && !p.watchedSet[id]) {
+			needSync = true
+		}
+	}
+	if !needSync {
+		p.pinMu.Unlock()
+		return
+	}
+	p.pinGen++
+
+	if !p.hasLoop {
+		if !p.onDemandActive {
+			p.onDemandActive = true
+			p.onDemandWG.Add(1)
+			go p.runOnDemandHydrate()
+		}
+		p.pinMu.Unlock()
+		return
+	}
+	p.pinMu.Unlock()
+
+	select {
+	case p.hydrateCh <- struct{}{}:
+	default:
+	}
+}
+
+func (p *Provider) runOnDemandHydrate() {
+	defer p.onDemandWG.Done()
+	for {
+		p.pinMu.Lock()
+		if p.stopped || p.appliedPinGen == p.pinGen {
+			p.onDemandActive = false
+			p.pinMu.Unlock()
+			return
+		}
+		attemptGen := p.pinGen
+		beforeApplied := p.appliedPinGen
+		timeout := p.onDemandTimeout
+		p.pinMu.Unlock()
+
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(p.baseCtx, timeout)
+		err := p.refreshInternal(ctx, false, 0)
+		cancel()
+
+		p.pinMu.Lock()
+		if p.stopped {
+			p.onDemandActive = false
+			p.pinMu.Unlock()
+			return
+		}
+		// If a newer PinConversation arrived while this attempt was running (even if this
+		// attempt timed out or failed), continue immediately so the new selection is not dropped.
+		if p.pinGen != attemptGen {
+			p.pinMu.Unlock()
+			continue
+		}
+		if err != nil || p.appliedPinGen == p.pinGen || p.appliedPinGen == beforeApplied {
+			p.onDemandActive = false
+			p.pinMu.Unlock()
+			return
+		}
+		p.pinMu.Unlock()
+	}
+}
+
 // Subscribe implements model.SnapshotProvider with latest-wins coalescing semantics.
 func (p *Provider) Subscribe() (<-chan model.AppSnapshot, func()) {
 	p.subMu.Lock()
@@ -291,15 +422,23 @@ func (p *Provider) Close() error {
 	}
 	p.closed = true
 	close(p.stopCh)
+	if p.cancelBase != nil {
+		p.cancelBase()
+	}
 	for id, ch := range p.subs {
 		delete(p.subs, id)
 		close(ch)
 	}
 	p.subMu.Unlock()
 
+	p.pinMu.Lock()
+	p.stopped = true
+	p.pinMu.Unlock()
+
 	if p.hasLoop {
 		<-p.doneCh
 	}
+	p.onDemandWG.Wait()
 
 	p.syncMu.Lock()
 	defer p.syncMu.Unlock()
@@ -339,6 +478,10 @@ func (p *Provider) refreshInternal(ctx context.Context, discoverRoots bool, maxH
 	p.syncMu.Lock()
 	defer p.syncMu.Unlock()
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	anyChanged := false
 	if discoverRoots {
 		anyChanged = p.syncDiscoveredRootsLocked()
@@ -367,10 +510,14 @@ func (p *Provider) refreshInternal(ctx context.Context, discoverRoots bool, maxH
 	}
 
 	if anyChanged {
+		p.snapshotDirty = true
 		merged := p.mergeSummaryRowsLocked()
 		if len(merged) > 0 || len(p.trees) > 0 {
 			p.updateTrees(merged)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	maxHydrated := p.opts.MaxHydratedTrees
@@ -380,24 +527,25 @@ func (p *Provider) refreshInternal(ctx context.Context, discoverRoots bool, maxH
 		strictLimit = true
 	}
 	isFull := !strictLimit
-	forceRebuild := !p.hasSnapshot || anyChanged || (!p.fullHydrated && isFull)
+	forceRebuild := !p.hasSnapshot || p.snapshotDirty
 
 	snap, treeChanged := p.buildSnapshotLocked(ctx, maxHydrated, strictLimit, forceRebuild)
+	if isFull && ctx.Err() == nil {
+		p.fullHydrated = true
+	}
 	if !forceRebuild && !treeChanged {
-		return nil
+		return ctx.Err()
 	}
 
 	p.hasSnapshot = true
-	if isFull {
-		p.fullHydrated = true
-	}
+	p.snapshotDirty = false
 
 	p.snapMu.Lock()
 	p.snapshot = snap
 	p.snapMu.Unlock()
 
 	p.broadcast(snap)
-	return nil
+	return ctx.Err()
 }
 
 func (p *Provider) enqueueEvent(ev watchEvent) {
@@ -432,7 +580,7 @@ func (p *Provider) runLoop() {
 		case <-p.stopCh:
 			return
 		default:
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			_ = p.refreshInternal(ctx, false, 0)
 			cancel()
 		}
@@ -481,6 +629,25 @@ func (p *Provider) runLoop() {
 		select {
 		case <-p.stopCh:
 			return
+		case <-p.hydrateCh:
+			p.pinMu.Lock()
+			needSync := p.appliedPinGen != p.pinGen
+			if !needSync {
+				for _, id := range p.pinnedBySlot {
+					if id != "" && (!p.hydratedSet[id] || !p.watchedSet[id]) {
+						needSync = true
+						break
+					}
+				}
+			}
+			p.pinMu.Unlock()
+			if !needSync {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(p.baseCtx, 10*time.Second)
+			_ = p.refreshInternal(ctx, false, 0)
+			cancel()
+			resetTimer()
 		case <-p.triggerCh:
 			// Drain any burst of already-queued debounced triggers before rebuilding once.
 		drain:
@@ -752,9 +919,22 @@ func (p *Provider) buildSnapshotLocked(ctx context.Context, maxHydrated int, str
 	activeIDs := make(map[string]bool)
 	hydratedByRoot := make(map[*rootSource][]string, len(p.roots))
 	keepByRoot := make(map[*rootSource]map[string]bool, len(p.roots))
+	watchByRoot := make(map[*rootSource]map[string]bool, len(p.roots))
 	hydratedCount := 0
 
-	addHydrated := func(id string, active bool) {
+	p.pinMu.Lock()
+	startPinGen := p.pinGen
+	pinnedSlots := make(map[string]string, len(p.pinnedBySlot))
+	pinned := make(map[string]bool, len(p.pinnedBySlot))
+	for slot, id := range p.pinnedBySlot {
+		if id != "" {
+			pinnedSlots[slot] = id
+			pinned[id] = true
+		}
+	}
+	p.pinMu.Unlock()
+
+	addHydrated := func(id string, active bool, watchTranscript bool) {
 		keepIDs[id] = true
 		if active {
 			activeIDs[id] = true
@@ -770,58 +950,171 @@ func (p *Provider) buildSnapshotLocked(ctx context.Context, maxHydrated int, str
 			keepByRoot[rs] = rk
 		}
 		rk[id] = true
+		if watchTranscript {
+			rw := watchByRoot[rs]
+			if rw == nil {
+				rw = make(map[string]bool)
+				watchByRoot[rs] = rw
+			}
+			rw[id] = true
+		}
 	}
 
-	for _, cached := range p.trees {
+	treeIDs := make(map[string]bool, len(p.trees))
+	wantWatchRoots := make(map[string]bool, len(p.trees))
+	for i, cached := range p.trees {
 		tree := cached.tree
+		rootID := tree.Root.ConversationID
+		treeIDs[rootID] = true
 		treeRunning := isTreeRunning(tree)
-		if hydratedCount >= maxHydrated && (strictHydrateLimit || !treeRunning) {
+		treePinned := pinned[rootID]
+		if hydratedCount >= maxHydrated && (strictHydrateLimit || (!treeRunning && !treePinned)) {
 			continue
 		}
 		hydratedCount++
-		addHydrated(tree.Root.ConversationID, tree.Root.IsRunning())
+		watchTranscript := treeRunning || treePinned || i < defaultWatchTranscriptTrees
+		if watchTranscript {
+			wantWatchRoots[rootID] = true
+		}
+		addHydrated(rootID, tree.Root.IsRunning(), watchTranscript)
 		for _, child := range tree.Children {
-			addHydrated(child.ConversationID, child.IsRunning())
+			addHydrated(child.ConversationID, child.IsRunning(), watchTranscript)
+		}
+	}
+
+	// Register fsnotify transcript watches BEFORE reading L2/L3 so no transcript append
+	// occurring between read and watch registration can be missed. Only mark a tree as
+	// watched when its transcript directory (and any child dirs) actually registered.
+	actuallyWatchedIDs := make(map[string]bool)
+	for _, rs := range p.roots {
+		if rs.watcher != nil {
+			for id := range rs.watcher.WatchTranscriptDirs(watchByRoot[rs]) {
+				actuallyWatchedIDs[id] = true
+			}
+		}
+	}
+	watchedRoots := make(map[string]bool, len(wantWatchRoots))
+	for _, cached := range p.trees {
+		tree := cached.tree
+		rootID := tree.Root.ConversationID
+		if !wantWatchRoots[rootID] || !actuallyWatchedIDs[rootID] {
+			continue
+		}
+		allChildrenWatched := true
+		for _, child := range tree.Children {
+			if !actuallyWatchedIDs[child.ConversationID] {
+				allChildrenWatched = false
+				break
+			}
+		}
+		if allChildrenWatched {
+			watchedRoots[rootID] = true
+		}
+	}
+
+	commitPinState := func(pruneCache bool, ackPins bool) {
+		hydratedRoots := make(map[string]bool, len(p.trees))
+		for i := range p.trees {
+			if p.trees[i].hydrated {
+				hydratedRoots[p.trees[i].tree.Root.ConversationID] = true
+			}
+		}
+		p.pinMu.Lock()
+		for slot, id := range pinnedSlots {
+			if !treeIDs[id] && p.pinnedBySlot[slot] == id {
+				delete(p.pinnedBySlot, slot)
+			}
+		}
+		p.hydratedSet = hydratedRoots
+		p.watchedSet = watchedRoots
+		if ackPins && startPinGen > p.appliedPinGen {
+			p.appliedPinGen = startPinGen
+		}
+		p.pinMu.Unlock()
+
+		if pruneCache {
+			for _, rs := range p.roots {
+				rs.convPool.PruneCache(keepByRoot[rs])
+			}
 		}
 	}
 
 	dbChanges := make(map[string]bool)
+	dbFailed := make(map[string]bool)
 	for rs, ids := range hydratedByRoot {
-		for id, ch := range rs.convPool.syncBatch(ctx, ids, activeIDs) {
+		chMap, failMap := rs.convPool.syncBatch(ctx, ids, activeIDs)
+		for id, ch := range chMap {
 			if ch {
 				dbChanges[id] = true
 			}
 		}
+		for id := range failMap {
+			dbFailed[id] = true
+		}
 	}
 
 	anyTreeChanged := false
+	pinnedFailed := false
 	for i := range p.trees {
 		cached := &p.trees[i]
 		tree := cached.tree
-		hydrate := keepIDs[tree.Root.ConversationID]
-		changed := cached.snapshot.ID == "" || cached.hydrated != hydrate
+		rootID := tree.Root.ConversationID
+		hydrate := keepIDs[rootID]
+		treeFailed := false
 		if hydrate {
-			rootID := tree.Root.ConversationID
-			changed = p.syncTranscript(rootID) || dbChanges[rootID] || changed
+			if dbFailed[rootID] {
+				treeFailed = true
+			}
 			for _, child := range tree.Children {
-				id := child.ConversationID
-				changed = p.syncTranscript(id) || dbChanges[id] || changed
+				if dbFailed[child.ConversationID] {
+					treeFailed = true
+					break
+				}
+			}
+			if treeFailed && pinned[rootID] {
+				pinnedFailed = true
 			}
 		}
 
-		if changed {
+		dataChanged := false
+		if hydrate {
+			dataChanged = p.syncTranscript(rootID) || dbChanges[rootID]
+			for _, child := range tree.Children {
+				id := child.ConversationID
+				dataChanged = p.syncTranscript(id) || dbChanges[id] || dataChanged
+			}
+		}
+
+		// Always rebuild when visible data changed, when the snapshot has never been built,
+		// when un-hydrating, or when transitioning cleanly to hydrated without DB errors.
+		// When L2 fails, still surface any available L3 transcript or healthy sibling data,
+		// while keeping cached.hydrated=false so retries remain enabled.
+		stateChanged := cached.snapshot.ID == "" ||
+			(cached.builtHydrated != hydrate && (!hydrate || !treeFailed))
+		if dataChanged || stateChanged {
 			cached.snapshot = p.buildConversationSnapshot(tree, hydrate)
-			cached.hydrated = hydrate
+			if hydrate {
+				cached.builtHydrated = !treeFailed || dataChanged
+				cached.hydrated = !treeFailed
+			} else {
+				cached.builtHydrated = false
+				cached.hydrated = false
+			}
 			anyTreeChanged = true
+		} else if hydrate && treeFailed && cached.hydrated {
+			// Clear the clean-hydrated flag on subsequent L2 read failures while preserving
+			// the last good cached snapshot so re-selecting the session retries cleanly.
+			cached.hydrated = false
+		} else if hydrate && !treeFailed && !cached.hydrated {
+			// DB recovered with no new rows; mark cleanly hydrated without spurious broadcast.
+			cached.hydrated = true
+			cached.builtHydrated = true
 		}
 	}
 
+	ackPins := ctx.Err() == nil && !pinnedFailed
 	if !anyTreeChanged && !forceRebuild {
-		for _, rs := range p.roots {
-			if rs.watcher != nil {
-				rs.watcher.retryPendingDirs()
-			}
-		}
+		commitPinState(false, ackPins)
 		return model.AppSnapshot{}, false
 	}
 
@@ -852,13 +1145,7 @@ func (p *Provider) buildSnapshotLocked(ctx context.Context, maxHydrated int, str
 		snap.ActiveConversationID = snap.Conversations[0].ID
 	}
 
-	for _, rs := range p.roots {
-		rk := keepByRoot[rs]
-		rs.convPool.PruneCache(rk)
-		if rs.watcher != nil {
-			rs.watcher.WatchTranscriptDirs(rk)
-		}
-	}
+	commitPinState(true, ackPins)
 	p.pruneTailers(keepIDs)
 
 	return snap, true

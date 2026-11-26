@@ -167,6 +167,9 @@ func (a *App) renderSessionSwitcher(c *ui.Context, pal theme.Palette, snap model
 				})
 				sw := ui.Switch(c.Key("auto-follow-sw"), &a.settings.AutoFollowActive).Label(tr.AutoFollowShort)
 				if sw.Changed() {
+					if a.settings.AutoFollowActive {
+						a.pinConversation("")
+					}
 					a.emitSettings()
 				}
 			})

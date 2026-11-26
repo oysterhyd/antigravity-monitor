@@ -49,6 +49,7 @@ const (
 const (
 	scopeAll       = "all"
 	chartWindowLen = 18
+	desktopPinSlot = "desktop"
 )
 
 // Options configures the desktop UI view.
@@ -100,6 +101,8 @@ type App struct {
 	seenRev          uint64
 	win              *mygo.Window
 	winVisible       bool
+	winHidden        bool
+	desktopPinID     string
 	deskQuotaActive  bool
 	trayQuotaActive  bool
 	lastQuotaRefresh time.Time
@@ -238,14 +241,26 @@ func (a *App) SetWindow(w *mygo.Window) {
 }
 
 // SetWindowVisible reports whether the desktop window is currently open and visible,
-// allowing adaptive quota polling to slow down while resident in the system tray.
+// allowing adaptive quota polling to slow down and releasing the desktop conversation pin
+// while resident in the system tray.
 func (a *App) SetWindowVisible(visible bool) {
 	a.mu.Lock()
 	prev := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
+	prevHidden := a.winHidden
 	a.winVisible = visible
+	a.winHidden = !visible
+	pinID := a.desktopPinID
 	next := (a.winVisible && a.deskQuotaActive) || a.trayQuotaActive
 	stale := a.lastQuotaRefresh.IsZero() || (a.opts.QuotaInterval > 0 && time.Since(a.lastQuotaRefresh) >= a.opts.QuotaInterval)
 	a.mu.Unlock()
+
+	if prevHidden != !visible && pinID != "" {
+		if !visible {
+			a.emitPinConversation("")
+		} else {
+			a.emitPinConversation(pinID)
+		}
+	}
 
 	if prev != next {
 		a.notifyQuotaModeChange()
@@ -311,6 +326,7 @@ func (a *App) currentQuotaInterval() time.Duration {
 // Close unsubscribes from the SnapshotProvider.
 func (a *App) Close() {
 	a.closeOnce.Do(func() {
+		a.pinConversation("")
 		if a.stopSub != nil {
 			a.stopSub()
 		}
@@ -495,6 +511,7 @@ func (a *App) FocusConversation(convID string, manual bool) {
 	a.activeView = ViewLive
 	a.setDeskQuotaActive(false)
 	a.convID = convID
+	a.pinConversation(convID)
 	if manual && a.settings.AutoFollowActive {
 		a.settings.AutoFollowActive = false
 		a.emitSettings()
@@ -505,6 +522,27 @@ func (a *App) FocusConversation(convID string, manual bool) {
 	a.hoverChartIdx = -1
 	a.sessionPopoverOpen = false
 	a.morpher.ClearCrosshair()
+}
+
+func (a *App) pinConversation(convID string) {
+	a.mu.Lock()
+	a.desktopPinID = convID
+	hidden := a.winHidden
+	a.mu.Unlock()
+
+	if hidden && convID != "" {
+		return
+	}
+	a.emitPinConversation(convID)
+}
+
+func (a *App) emitPinConversation(convID string) {
+	if a.provider == nil {
+		return
+	}
+	if h, ok := a.provider.(model.ConversationHydrator); ok {
+		h.PinConversation(desktopPinSlot, convID)
+	}
 }
 
 // FocusAgent switches the active scope to a specific agent node ("all", "root", or subagent ID).
@@ -569,6 +607,9 @@ func (a *App) FocusConversationAgent(convID, agentID string) {
 			a.emitSettings()
 		}
 	}
+	if convID != "" {
+		a.pinConversation(convID)
+	}
 	if agentID == "" {
 		agentID = scopeAll
 	}
@@ -593,6 +634,9 @@ func (a *App) ApplySettings(s model.Settings) {
 		s.ContextWarnThreshold = 0.80
 	}
 	a.settings = s
+	if s.AutoFollowActive {
+		a.pinConversation("")
+	}
 	a.mu.RLock()
 	win := a.win
 	a.mu.RUnlock()

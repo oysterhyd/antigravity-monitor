@@ -179,6 +179,9 @@ func (r *SummariesReader) readChanges(ctx context.Context) ([]SummaryRow, bool, 
 	if err == nil && r.versionKnown && r.version == version {
 		return nil, false, nil
 	}
+	if ctx.Err() != nil {
+		return nil, false, ctx.Err()
+	}
 	r.versionKnown = false
 	rows, parentsRead, readErr := r.readAllLocked(ctx, db)
 	if readErr != nil {

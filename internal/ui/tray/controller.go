@@ -202,6 +202,17 @@ func (ctl *Controller) InvalidateFlyout() {
 	})
 }
 
+const trayPinSlot = "tray"
+
+func (ctl *Controller) pinConversation(convID string) {
+	if ctl.opts.Provider == nil {
+		return
+	}
+	if h, ok := ctl.opts.Provider.(model.ConversationHydrator); ok {
+		h.PinConversation(trayPinSlot, convID)
+	}
+}
+
 func (ctl *Controller) notifyViewActivity() {
 	quotaActive := ctl.flyout != nil && ctl.state.View == ViewQuota
 	if ctl.opts.Callbacks.OnQuotaViewActive != nil {
@@ -224,6 +235,9 @@ func (ctl *Controller) HideFlyout() {
 func (ctl *Controller) ApplySettings(s model.Settings) {
 	mygo.RunOnMain(func() {
 		ctl.state.ApplySettings(s)
+		if s.AutoFollowActive {
+			ctl.pinConversation("")
+		}
 		applyThemeSource(s.ThemeMode)
 		if ctl.followItem != nil {
 			ctl.followItem.SetChecked(s.AutoFollowActive)
@@ -243,6 +257,7 @@ func (ctl *Controller) ApplySettings(s model.Settings) {
 // Close unsubscribes from snapshots and destroys the system tray icon.
 func (ctl *Controller) Close() {
 	ctl.stopOnce.Do(func() {
+		ctl.pinConversation("")
 		if ctl.cancel != nil {
 			ctl.cancel()
 		}
@@ -305,6 +320,9 @@ func (ctl *Controller) updateSettings(mut func(*model.Settings)) {
 
 	prevLaunch := ctl.state.Settings.LaunchAtLogin
 	ctl.state.ApplySettings(next)
+	if next.AutoFollowActive {
+		ctl.pinConversation("")
+	}
 	applyThemeSource(next.ThemeMode)
 
 	if next.LaunchAtLogin != prevLaunch {

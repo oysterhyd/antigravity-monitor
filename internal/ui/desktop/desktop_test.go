@@ -231,8 +231,14 @@ func TestApplySettingsAndFocusConversationAgent(t *testing.T) {
 	mustHaveText(t, tt, "browser")
 }
 
+type pinCall struct {
+	slot   string
+	convID string
+}
+
 type staticProvider struct {
 	snap model.AppSnapshot
+	pins []pinCall
 }
 
 func (s *staticProvider) Snapshot() model.AppSnapshot { return s.snap }
@@ -241,6 +247,40 @@ func (s *staticProvider) Subscribe() (<-chan model.AppSnapshot, func()) {
 	return ch, func() { close(ch) }
 }
 func (s *staticProvider) Close() error { return nil }
+func (s *staticProvider) PinConversation(slot, convID string) {
+	s.pins = append(s.pins, pinCall{slot: slot, convID: convID})
+}
+
+func TestDesktopFocusRequestsOnDemandHydration(t *testing.T) {
+	p := mock.New(0)
+	defer p.Close()
+
+	sp := &staticProvider{snap: p.Snapshot()}
+	app := desktop.New(sp, desktop.Options{ThemeMode: theme.ModeLight})
+
+	app.FocusConversation("conv-sql", true)
+	app.FocusConversationAgent("conv-payments", "root")
+	// Closing the window to tray releases the desktop pin; reopening restores it.
+	app.SetWindowVisible(false)
+	app.SetWindowVisible(true)
+	app.Close()
+
+	want := []pinCall{
+		{slot: "desktop", convID: "conv-sql"},
+		{slot: "desktop", convID: "conv-payments"},
+		{slot: "desktop", convID: ""},
+		{slot: "desktop", convID: "conv-payments"},
+		{slot: "desktop", convID: ""},
+	}
+	if len(sp.pins) != len(want) {
+		t.Fatalf("expected PinConversation calls %+v, got %+v", want, sp.pins)
+	}
+	for i := range want {
+		if sp.pins[i] != want[i] {
+			t.Fatalf("pin call %d = %+v, want %+v", i, sp.pins[i], want[i])
+		}
+	}
+}
 
 func TestSessionPopoverManyConversations(t *testing.T) {
 	p := mock.New(0)
