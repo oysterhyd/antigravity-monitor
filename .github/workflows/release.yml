@@ -14,8 +14,8 @@ jobs:
     env:
       CGO_ENABLED: '1'
       GOFLAGS: -tags=monitor_sqlite_cgo,mygo_nowebview
-      CGO_CFLAGS: -Os -ffunction-sections -fdata-sections -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_PROGRESS_CALLBACK
-      CGO_LDFLAGS: -static -Wl,--gc-sections
+      CGO_CFLAGS: -Os -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_PROGRESS_CALLBACK
+      CGO_LDFLAGS: -static
     steps:
       - uses: actions/checkout@v4
 
