@@ -18,7 +18,8 @@ import (
 
 type historySummary struct {
 	Title                string
-	Preview              string // kept only when Title is empty
+	Preview              string // kept when DB title is empty (for fallback if annotation is absent or removed)
+	DBTitleEmpty         bool
 	AgentName            string
 	Workspace            string
 	ParentConversationID string
@@ -27,13 +28,15 @@ type historySummary struct {
 
 func slimHistorySummary(row source.SummaryRow) historySummary {
 	title := strings.TrimSpace(row.Title)
+	dbTitleEmpty := title == "" || row.TitleFromAnnotation
 	preview := ""
-	if title == "" {
+	if dbTitleEmpty {
 		preview = strings.TrimSpace(row.Preview)
 	}
 	return historySummary{
 		Title:                title,
 		Preview:              preview,
+		DBTitleEmpty:         dbTitleEmpty,
 		AgentName:            strings.TrimSpace(row.AgentName),
 		Workspace:            row.Workspace,
 		ParentConversationID: row.ParentConversationID,
@@ -51,11 +54,12 @@ type Service struct {
 	calc         *metrics.Calculator
 	pricingHash  string
 
-	loadOnce    sync.Once
-	syncMu      sync.Mutex
-	sumStats    map[string]convFileStat
-	sumByRoot   map[string]map[string]historySummary
-	modelIntern map[string]string
+	loadOnce       sync.Once
+	syncMu         sync.Mutex
+	sumStats       map[string]convFileStat
+	sumByRoot      map[string]map[string]historySummary
+	sumEmptyTitles map[string][]string
+	modelIntern    map[string]string
 
 	mu         sync.RWMutex
 	cache      cacheFile
@@ -116,9 +120,10 @@ func newService(roots []string, autoDiscover bool, discoverFn func() []string, c
 		cachePath:    cachePath,
 		calc:         calc,
 		pricingHash:  pricingHash,
-		sumStats:     make(map[string]convFileStat),
-		sumByRoot:    make(map[string]map[string]historySummary),
-		modelIntern:  make(map[string]string, 16),
+		sumStats:       make(map[string]convFileStat),
+		sumByRoot:      make(map[string]map[string]historySummary),
+		sumEmptyTitles: make(map[string][]string),
+		modelIntern:    make(map[string]string, 16),
 		summaries:    make(map[string]historySummary),
 		parents:      make(map[string]string),
 	}
@@ -257,6 +262,13 @@ func (s *Service) Refresh(ctx context.Context) error {
 		return firstDirErr
 	}
 
+	// Attach transcript stat strictly from the winning DB+WAL replica so an older replica's
+	// transcript modification can never pull history back to an older database.
+	for convID, cand := range candidates {
+		cand.stat = attachTranscriptStat(cand.stat, source.TranscriptPath(cand.root, convID))
+		candidates[convID] = cand
+	}
+
 	var stats RefreshStats
 	var missIDs []string
 	for convID, cand := range candidates {
@@ -277,6 +289,7 @@ func (s *Service) Refresh(ctx context.Context) error {
 		if stagedSum.changed {
 			s.sumByRoot = stagedSum.sumByRoot
 			s.sumStats = stagedSum.sumStats
+			s.sumEmptyTitles = stagedSum.sumEmptyTitles
 		}
 		s.mu.Lock()
 		if stagedSum.changed {
@@ -332,6 +345,7 @@ func (s *Service) Refresh(ctx context.Context) error {
 	if stagedSum.changed {
 		s.sumByRoot = stagedSum.sumByRoot
 		s.sumStats = stagedSum.sumStats
+		s.sumEmptyTitles = stagedSum.sumEmptyTitles
 	}
 	s.mu.Lock()
 	s.cache = nextCache
@@ -347,11 +361,12 @@ func (s *Service) Refresh(ctx context.Context) error {
 }
 
 type stagedSummaries struct {
-	summaries map[string]historySummary
-	parents   map[string]string
-	sumByRoot map[string]map[string]historySummary
-	sumStats  map[string]convFileStat
-	changed   bool
+	summaries      map[string]historySummary
+	parents        map[string]string
+	sumByRoot      map[string]map[string]historySummary
+	sumStats       map[string]convFileStat
+	sumEmptyTitles map[string][]string
+	changed        bool
 }
 
 func (s *Service) readSummariesLocked(
@@ -363,6 +378,7 @@ func (s *Service) readSummariesLocked(
 	activeRoots := make(map[string]bool, len(roots))
 	nextByRoot := make(map[string]map[string]historySummary, len(roots))
 	nextStats := make(map[string]convFileStat, len(roots))
+	nextEmptyTitles := make(map[string][]string, len(roots))
 	anyChanged := false
 	var firstErr error
 	succeeded := 0
@@ -384,6 +400,9 @@ func (s *Service) readSummariesLocked(
 				if prevSt, ok := s.sumStats[root]; ok {
 					nextStats[root] = prevSt
 				}
+				if prevEmpty, ok := s.sumEmptyTitles[root]; ok {
+					nextEmptyTitles[root] = prevEmpty
+				}
 			}
 			if firstErr == nil {
 				firstErr = statErr
@@ -392,8 +411,16 @@ func (s *Service) readSummariesLocked(
 		}
 		if prevSt, ok := s.sumStats[root]; ok && prevSt == st {
 			if prevMap, hasMap := s.sumByRoot[root]; hasMap {
-				nextByRoot[root] = prevMap
+				emptyIDs := s.sumEmptyTitles[root]
+				refreshedMap, annChanged := refreshRootAnnotations(root, prevMap, emptyIDs)
+				nextByRoot[root] = refreshedMap
 				nextStats[root] = prevSt
+				if len(emptyIDs) > 0 {
+					nextEmptyTitles[root] = emptyIDs
+				}
+				if annChanged {
+					anyChanged = true
+				}
 				succeeded++
 				continue
 			}
@@ -407,6 +434,9 @@ func (s *Service) readSummariesLocked(
 				nextByRoot[root] = prevMap
 				if prevSt, ok := s.sumStats[root]; ok {
 					nextStats[root] = prevSt
+				}
+				if prevEmpty, ok := s.sumEmptyTitles[root]; ok {
+					nextEmptyTitles[root] = prevEmpty
 				}
 			}
 			if firstErr == nil {
@@ -428,8 +458,17 @@ func (s *Service) readSummariesLocked(
 				rootMap[row.ConversationID] = slim
 			}
 		}
+		var emptyIDs []string
+		for convID, entry := range rootMap {
+			if entry.DBTitleEmpty {
+				emptyIDs = append(emptyIDs, convID)
+			}
+		}
 		nextByRoot[root] = rootMap
 		nextStats[root] = st
+		if len(emptyIDs) > 0 {
+			nextEmptyTitles[root] = emptyIDs
+		}
 	}
 
 	for root := range s.sumByRoot {
@@ -466,12 +505,51 @@ func (s *Service) readSummariesLocked(
 		}
 	}
 	return stagedSummaries{
-		summaries: summaries,
-		parents:   parents,
-		sumByRoot: nextByRoot,
-		sumStats:  nextStats,
-		changed:   true,
+		summaries:      summaries,
+		parents:        parents,
+		sumByRoot:      nextByRoot,
+		sumStats:       nextStats,
+		sumEmptyTitles: nextEmptyTitles,
+		changed:        true,
 	}, nil
+}
+
+func refreshRootAnnotations(root string, prevMap map[string]historySummary, emptyIDs []string) (map[string]historySummary, bool) {
+	if len(emptyIDs) == 0 {
+		return prevMap, false
+	}
+	annDir := filepath.Join(root, "annotations")
+	annDirExists := false
+	if fi, err := os.Stat(annDir); err == nil && fi.IsDir() {
+		annDirExists = true
+	}
+
+	var updated map[string]historySummary
+	for _, convID := range emptyIDs {
+		cur, ok := prevMap[convID]
+		if !ok || !cur.DBTitleEmpty {
+			continue
+		}
+		nextTitle := ""
+		if annDirExists {
+			nextTitle = source.ReadAnnotationTitle(root, convID)
+		}
+		if nextTitle == cur.Title {
+			continue
+		}
+		if updated == nil {
+			updated = make(map[string]historySummary, len(prevMap))
+			for k, v := range prevMap {
+				updated[k] = v
+			}
+		}
+		cur.Title = nextTitle
+		updated[convID] = cur
+	}
+	if updated == nil {
+		return prevMap, false
+	}
+	return updated, true
 }
 
 func mergeHistorySummary(a, b historySummary) historySummary {
@@ -482,7 +560,7 @@ func mergeHistorySummary(a, b historySummary) historySummary {
 	if primary.Title == "" {
 		primary.Title = secondary.Title
 	}
-	if primary.Title != "" {
+	if primary.Title != "" && !primary.DBTitleEmpty {
 		primary.Preview = ""
 	} else if primary.Preview == "" {
 		primary.Preview = secondary.Preview
@@ -507,13 +585,15 @@ func (s *Service) scanConvDB(ctx context.Context, rootDir, convID, dbPath string
 	defer db.Close()
 
 	entry := &cachedConv{
-		ConvID:     convID,
-		MtimeNs:    st.effectiveMtimeNs,
-		Size:       st.effectiveSize,
-		DBMtimeNs:  st.dbMtimeNs,
-		DBSize:     st.dbSize,
-		WalMtimeNs: st.walMtimeNs,
-		WalSize:    st.walSize,
+		ConvID:            convID,
+		MtimeNs:           st.effectiveMtimeNs,
+		Size:              st.effectiveSize,
+		DBMtimeNs:         st.dbMtimeNs,
+		DBSize:            st.dbSize,
+		WalMtimeNs:        st.walMtimeNs,
+		WalSize:           st.walSize,
+		TranscriptMtimeNs: st.transcriptMtimeNs,
+		TranscriptSize:    st.transcriptSize,
 	}
 
 	rows, err := db.QueryContext(ctx, `SELECT idx, data FROM gen_metadata ORDER BY idx ASC`)
@@ -525,7 +605,8 @@ func (s *Service) scanConvDB(ctx context.Context, rootDir, convID, dbPath string
 		rows = nil
 	}
 
-	var validGens []source.GenMetadata
+	var allGens []source.GenMetadata
+	var validCount int
 	var stepIdxs []int
 	seenSteps := make(map[int]bool)
 
@@ -545,23 +626,38 @@ func (s *Service) scanConvDB(ctx context.Context, rootDir, convID, dbPath string
 			if decErr != nil {
 				continue
 			}
+			allGens = append(allGens, gm)
+			if !gm.BelongsTo(convID) {
+				continue
+			}
 			if entry.RootConvID == "" {
-				if gm.RootCascadeID != "" && gm.RootCascadeID != convID {
+				if gm.RootCascadeID != "" && !strings.EqualFold(gm.RootCascadeID, convID) {
 					entry.RootConvID = gm.RootCascadeID
-				} else if gm.ParentCascadeID != "" && gm.ParentCascadeID != convID {
+				} else if gm.ParentCascadeID != "" && !strings.EqualFold(gm.ParentCascadeID, convID) {
 					entry.RootConvID = gm.ParentCascadeID
 				}
 			}
 			if gm.IsEmptyFailure() {
 				continue
 			}
-			validGens = append(validGens, gm)
-			if gm.StepIndex >= 0 && !seenSteps[gm.StepIndex] {
-				seenSteps[gm.StepIndex] = true
-				stepIdxs = append(stepIdxs, gm.StepIndex)
+			validCount++
+			for _, si := range gm.KnownStepIndices() {
+				if si >= 0 && !seenSteps[si] {
+					seenSteps[si] = true
+					stepIdxs = append(stepIdxs, si)
+				}
 			}
 		}
 		_ = rows.Close()
+	}
+
+	if entry.RootConvID == "" {
+		tm := source.ReadTrajectoryMetadata(ctx, db)
+		if tm.RootConversationID != "" && !strings.EqualFold(tm.RootConversationID, convID) {
+			entry.RootConvID = tm.RootConversationID
+		} else if tm.ParentConversationID != "" && !strings.EqualFold(tm.ParentConversationID, convID) {
+			entry.RootConvID = tm.ParentConversationID
+		}
 	}
 
 	stepTimes := make(map[int]time.Time, len(stepIdxs))
@@ -569,11 +665,15 @@ func (s *Service) scanConvDB(ctx context.Context, rootDir, convID, dbPath string
 		fetchStepTimestamps(ctx, db, stepIdxs, stepTimes)
 	}
 
-	needsTranscript := len(validGens) == 0
+	needsTranscript := validCount == 0 || st.transcriptSize > 0 || st.transcriptStatErr
 	if !needsTranscript {
-		for _, gm := range validGens {
-			if stepTimes[gm.StepIndex].IsZero() ||
+		for _, gm := range allGens {
+			if !gm.BelongsTo(convID) || gm.IsEmptyFailure() {
+				continue
+			}
+			if firstStepTime(stepTimes, gm.KnownStepIndices()).IsZero() ||
 				gm.ModelSlug == "" ||
+				s.calc.IsUnresolvedModelEnum(gm.ModelSlug) ||
 				(gm.InputTokens == 0 && gm.OutputTokens == 0 && gm.CacheReadTokens == 0 && gm.CacheWriteTokens == 0) {
 				needsTranscript = true
 				break
@@ -584,7 +684,11 @@ func (s *Service) scanConvDB(ctx context.Context, rootDir, convID, dbPath string
 	var tr source.TranscriptData
 	if needsTranscript {
 		tailer := source.NewTranscriptTailer(source.TranscriptPath(rootDir, convID))
-		_, _ = tailer.Sync()
+		if _, trErr := tailer.Sync(); trErr != nil {
+			// Preserve retry eligibility on the next Refresh when transcript.jsonl is temporarily
+			// unreadable (e.g. exclusively locked on Windows) so fallback pricing is not pinned.
+			entry.TranscriptUnreadable = true
+		}
 		tr = tailer.Snapshot()
 	}
 
@@ -593,9 +697,19 @@ func (s *Service) scanConvDB(ctx context.Context, rootDir, convID, dbPath string
 		fallbackMtime = time.Unix(0, st.effectiveMtimeNs).UTC()
 	}
 
-	if len(validGens) > 0 {
-		entry.Requests = make([]cachedRequest, 0, len(validGens))
-		for _, gm := range validGens {
+	matchRes := tr.MatchPlanners(allGens, convID, s.calc)
+
+	maxGenIdx := -1
+	if validCount > 0 {
+		entry.Requests = make([]cachedRequest, 0, validCount+len(matchRes.UnclaimedPlanners))
+		for i, gm := range allGens {
+			if !gm.BelongsTo(convID) || gm.IsEmptyFailure() {
+				continue
+			}
+			if gm.GenIndex > maxGenIdx {
+				maxGenIdx = gm.GenIndex
+			}
+			knownSteps := gm.KnownStepIndices()
 			rec := model.RequestRecord{
 				GenIndex:         gm.GenIndex,
 				StepIndex:        gm.StepIndex,
@@ -614,20 +728,23 @@ func (s *Service) scanConvDB(ctx context.Context, rootDir, convID, dbPath string
 				TotalDuration:    gm.TotalDuration,
 			}
 
-			if ts, ok := stepTimes[gm.StepIndex]; ok && !ts.IsZero() {
+			if ts := firstStepTime(stepTimes, knownSteps); !ts.IsZero() {
 				rec.Timestamp = ts
-			} else if ts, ok := tr.StepTimestamps[gm.StepIndex]; ok && !ts.IsZero() {
+			} else if ts := firstStepTime(tr.StepTimestamps, knownSteps); !ts.IsZero() {
 				rec.Timestamp = ts
 			}
 
-			if pl, ok := tr.PlannersByStep[gm.StepIndex]; ok {
+			if pl := matchRes.MatchedByGen[i]; pl != nil {
 				if rec.InputTokens == 0 && rec.OutputTokens == 0 && rec.CacheReadTokens == 0 && rec.CacheWriteTokens == 0 {
 					rec.InputTokens = pl.InputTokens
 					rec.CacheReadTokens = pl.CacheReadTokens
 					rec.OutputTokens = pl.OutputTokens
 					rec.ResponseTokens = pl.OutputTokens
 				}
-				if rec.ModelSlug == "" && pl.Model != "" {
+				if s.calc.PreferTranscriptModel(rec.ModelSlug, rec.ModelDisplay, pl.Model) {
+					if s.calc.IsUnresolvedModelEnum(rec.ModelDisplay) {
+						rec.ModelDisplay = ""
+					}
 					rec.ModelSlug = pl.Model
 				}
 				if rec.Timestamp.IsZero() && !pl.CreatedAt.IsZero() {
@@ -656,15 +773,14 @@ func (s *Service) scanConvDB(ctx context.Context, rootDir, convID, dbPath string
 				CacheSavedUSD: rec.CacheSavedUSD,
 			})
 		}
-		return entry, nil
 	}
 
-	// Full L3 transcript fallback if L2 gen_metadata was empty.
-	if len(tr.Planners) > 0 {
-		entry.Requests = make([]cachedRequest, 0, len(tr.Planners))
-		for i, pl := range tr.Planners {
+	// Merge unclaimed L3 transcript planners representing requests not yet persisted to L2.
+	if len(matchRes.UnclaimedPlanners) > 0 {
+		nextGenIdx := maxGenIdx + 1
+		for _, pl := range matchRes.UnclaimedPlanners {
 			rec := model.RequestRecord{
-				GenIndex:        i,
+				GenIndex:        nextGenIdx,
 				StepIndex:       pl.StepIndex,
 				ConversationID:  convID,
 				ModelSlug:       pl.Model,
@@ -674,6 +790,7 @@ func (s *Service) scanConvDB(ctx context.Context, rootDir, convID, dbPath string
 				OutputTokens:    pl.OutputTokens,
 				ResponseTokens:  pl.OutputTokens,
 			}
+			nextGenIdx++
 			if rec.Timestamp.IsZero() && !sum.LastModifiedTime.IsZero() {
 				rec.Timestamp = sum.LastModifiedTime
 			}
@@ -694,9 +811,21 @@ func (s *Service) scanConvDB(ctx context.Context, rootDir, convID, dbPath string
 				CacheSavedUSD: rec.CacheSavedUSD,
 			})
 		}
+		if len(entry.Requests) == 0 {
+			entry.Requests = nil
+		}
 	}
 
 	return entry, nil
+}
+
+func firstStepTime(times map[int]time.Time, steps []int) time.Time {
+	for _, si := range steps {
+		if ts, ok := times[si]; ok && !ts.IsZero() {
+			return ts
+		}
+	}
+	return time.Time{}
 }
 
 func fetchStepTimestamps(ctx context.Context, db *sql.DB, idxs []int, dst map[int]time.Time) {

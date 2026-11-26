@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oysterhyd/antigravity-monitor/internal/metrics"
 	"github.com/oysterhyd/antigravity-monitor/internal/model"
 	_ "modernc.org/sqlite"
 )
@@ -1756,5 +1757,1628 @@ func TestProviderDeletedConversationPublishesAfterCancelledRefresh(t *testing.T)
 			t.Fatalf("unexpected idle broadcast #%d after deletion published: %v", i, snap.GeneratedAt)
 		default:
 		}
+	}
+}
+
+func TestProvider_ForkDedupAnnotationTitleAndMetadataRole(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+
+	// Parent conversation with empty SQLite title -> should fall back to annotations/conv-parent.pbtxt.
+	annDir := filepath.Join(rootDir, "annotations")
+	if err := os.MkdirAll(annDir, 0o755); err != nil {
+		t.Fatalf("mkdir annotations: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(annDir, "conv-parent.pbtxt"), []byte("title: \"\\346\\227\\245\\345\\277\\227\\345\\210\\206\\346\\236\\220\"\n"), 0o644); err != nil {
+		t.Fatalf("write pbtxt: %v", err)
+	}
+
+	_, err := sumDB.Exec(
+		`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time, status, agent_name, parent_conversation_id, not_fully_idle) VALUES
+		('conv-parent', '', ?, 'CASCADE_RUN_STATUS_IDLE', '', '', 0),
+		('sub-no-tr', '', ?, 'CASCADE_RUN_STATUS_IDLE', '', 'conv-parent', 0),
+		('conv-fork', 'Forked Branch', ?, 'CASCADE_RUN_STATUS_IDLE', '', '', 0)`,
+		now.Format(time.RFC3339), now.Add(time.Minute).Format(time.RFC3339), now.Add(2*time.Minute).Format(time.RFC3339),
+	)
+	if err != nil {
+		t.Fatalf("insert summaries: %v", err)
+	}
+
+	insertWithCascade := func(db *sql.DB, idx, stepIdx int, cascadeID string, inTok, outTok int64, ts time.Time) {
+		var packed []byte
+		packed = protowireAppendVarint(packed, uint64(stepIdx))
+		usage := buildProtoMsg(func(b []byte) []byte {
+			b = appendVarintField(b, 2, uint64(inTok))
+			b = appendVarintField(b, 3, uint64(outTok))
+			return b
+		})
+		inner := buildProtoMsg(func(b []byte) []byte {
+			b = appendVarintField(b, 3, 1535) // MODEL_PLACEHOLDER_M535 -> gemini-4-neon-xhigh
+			b = appendSubMsg(b, 4, usage)
+			b = appendKV(b, 20, "cascade_id", cascadeID)
+			return b
+		})
+		blob := buildProtoMsg(func(b []byte) []byte {
+			b = appendSubMsg(b, 2, packed)
+			b = appendSubMsg(b, 1, inner)
+			return b
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES(?, ?, ?)`, idx, blob, len(blob)); err != nil {
+			t.Fatalf("insert gen: %v", err)
+		}
+		tsMsg := buildProtoMsg(func(b []byte) []byte {
+			b = appendVarintField(b, 1, uint64(ts.Unix()))
+			return b
+		})
+		if _, err := db.Exec(`INSERT OR REPLACE INTO steps(idx, step_type, metadata) VALUES(?, 15, ?)`, stepIdx, appendSubMsg(nil, 1, tsMsg)); err != nil {
+			t.Fatalf("insert step: %v", err)
+		}
+	}
+
+	parentDB := createTestConvDB(t, rootDir, "conv-parent")
+	defer parentDB.Close()
+	insertWithCascade(parentDB, 0, 1, "conv-parent", 5000, 500, now)
+
+	// Subagent with NO transcript.jsonl and empty agent_name: role comes from trajectory_metadata_blob.
+	subDB := createTestConvDB(t, rootDir, "sub-no-tr")
+	defer subDB.Close()
+	if _, err := subDB.Exec(`CREATE TABLE trajectory_metadata_blob (id text PRIMARY KEY, data blob)`); err != nil {
+		t.Fatalf("create trajectory_metadata_blob: %v", err)
+	}
+	spec := buildProtoMsg(func(b []byte) []byte {
+		b = appendStringField(b, 1, "research")
+		b = appendStringField(b, 2, "Protocol Inspector")
+		return b
+	})
+	metaBlob := buildProtoMsg(func(b []byte) []byte {
+		b = appendStringField(b, 5, "conv-parent")
+		b = appendStringField(b, 6, "conv-parent")
+		b = appendSubMsg(b, 8, spec)
+		return b
+	})
+	if _, err := subDB.Exec(`INSERT INTO trajectory_metadata_blob(id, data) VALUES('main', ?)`, metaBlob); err != nil {
+		t.Fatalf("insert meta blob: %v", err)
+	}
+	insertWithCascade(subDB, 0, 1, "sub-no-tr", 2000, 200, now.Add(30*time.Second))
+
+	// Forked conversation contains 1 cloned parent step (cascade_id=conv-parent) + 1 own step (cascade_id=conv-fork).
+	forkDB := createTestConvDB(t, rootDir, "conv-fork")
+	defer forkDB.Close()
+	insertWithCascade(forkDB, 0, 1, "conv-parent", 5000, 500, now)
+	insertWithCascade(forkDB, 1, 2, "conv-fork", 3000, 300, now.Add(2*time.Minute))
+
+	prov, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer prov.Close()
+
+	snap := prov.Snapshot()
+
+	parent, ok := snap.FindConversation("conv-parent")
+	if !ok {
+		t.Fatal("conv-parent not found")
+	}
+	if parent.Title != "日志分析" {
+		t.Fatalf("parent.Title = %q, want 日志分析 (from annotations/*.pbtxt)", parent.Title)
+	}
+	if len(parent.Subagents) != 1 || parent.Subagents[0].Name != "Protocol Inspector" {
+		t.Fatalf("subagent metadata role fallback failed: %+v", parent.Subagents)
+	}
+	if parent.Root.ModelDisplay != "Gemini 4 Neon (XHigh)" {
+		t.Fatalf("placeholder model display = %q, want Gemini 4 Neon (XHigh)", parent.Root.ModelDisplay)
+	}
+
+	fork, ok := snap.FindConversation("conv-fork")
+	if !ok {
+		t.Fatal("conv-fork not found")
+	}
+	if fork.TreeMetrics.RequestCount != 1 {
+		t.Fatalf("fork RequestCount = %d, want 1 (cloned parent step must be filtered)", fork.TreeMetrics.RequestCount)
+	}
+	if fork.Requests[0].InputTokens != 3000 {
+		t.Fatalf("fork kept wrong request: %+v", fork.Requests[0])
+	}
+}
+
+func TestProvider_UnknownModelEnumPrefersTranscriptModel(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 25, 11, 0, 0, 0, time.UTC)
+	if _, err := sumDB.Exec(
+		`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time, status) VALUES ('conv-enum', 'Enum Fallback', ?, 'CASCADE_RUN_STATUS_IDLE')`,
+		now.Format(time.RFC3339),
+	); err != nil {
+		t.Fatalf("insert summary: %v", err)
+	}
+
+	convDB := createTestConvDB(t, rootDir, "conv-enum")
+	defer convDB.Close()
+	var packed []byte
+	packed = protowireAppendVarint(packed, 1)
+	usage := buildProtoMsg(func(b []byte) []byte {
+		b = appendVarintField(b, 3, 100) // 100 output tokens
+		return b
+	})
+	inner := buildProtoMsg(func(b []byte) []byte {
+		b = appendVarintField(b, 3, 1999) // MODEL_PLACEHOLDER_M999 (unresolved)
+		b = appendSubMsg(b, 4, usage)
+		return b
+	})
+	blob := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 2, packed)
+		b = appendSubMsg(b, 1, inner)
+		return b
+	})
+	if _, err := convDB.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES(0, ?, ?)`, blob, len(blob)); err != nil {
+		t.Fatalf("insert gen_metadata: %v", err)
+	}
+	tsMsg := buildProtoMsg(func(b []byte) []byte {
+		b = appendVarintField(b, 1, uint64(now.Unix()))
+		return b
+	})
+	if _, err := convDB.Exec(`INSERT OR REPLACE INTO steps(idx, step_type, metadata) VALUES(1, 15, ?)`, appendSubMsg(nil, 1, tsMsg)); err != nil {
+		t.Fatalf("insert step: %v", err)
+	}
+
+	trPath := TranscriptPath(rootDir, "conv-enum")
+	if err := os.MkdirAll(filepath.Dir(trPath), 0o755); err != nil {
+		t.Fatalf("mkdir transcript: %v", err)
+	}
+	trLine := `{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T11:00:00Z","model":"claude-opus-5-5","output_tokens":100}` + "\n"
+	if err := os.WriteFile(trPath, []byte(trLine), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	prov, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer prov.Close()
+
+	conv, ok := prov.Snapshot().FindConversation("conv-enum")
+	if !ok || len(conv.Requests) != 1 {
+		t.Fatalf("expected 1 request for conv-enum, got ok=%v len=%d", ok, len(conv.Requests))
+	}
+	req := conv.Requests[0]
+	if req.ModelSlug != "claude-opus-5-5" {
+		t.Fatalf("ModelSlug = %q, want claude-opus-5-5", req.ModelSlug)
+	}
+	wantCost := 100 * 75.0 / 1e6
+	if diff := req.CostUSD - wantCost; diff < -1e-12 || diff > 1e-12 {
+		t.Fatalf("CostUSD = %.8f, want %.8f", req.CostUSD, wantCost)
+	}
+}
+
+func TestConvDBPool_StandaloneTrajectoryMetadataWriteTriggersRefresh(t *testing.T) {
+	rootDir := t.TempDir()
+	convDB := createTestConvDB(t, rootDir, "sub-meta")
+	defer convDB.Close()
+
+	if _, err := convDB.Exec(`CREATE TABLE trajectory_metadata_blob (id text PRIMARY KEY, data blob)`); err != nil {
+		t.Fatalf("create trajectory_metadata_blob: %v", err)
+	}
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	insertGenRow(t, convDB, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 1000, 0, 0, 100, 1100, 512000, time.Second, time.Second, now, "")
+
+	pool := NewConvDBPool(filepath.Join(rootDir, "conversations"), 5)
+	defer pool.Close()
+
+	// Initial sync: reads gen_metadata, no trajectory_metadata_blob row yet.
+	changed, _, _, err := pool.Sync(context.Background(), "sub-meta")
+	if err != nil {
+		t.Fatalf("initial Sync: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected changed=true on initial Sync")
+	}
+	if got := pool.cachedMeta("sub-meta").SubagentRole; got != "" {
+		t.Fatalf("expected empty initial SubagentRole, got %q", got)
+	}
+
+	// Idle sync: unchanged.
+	changed, _, _, err = pool.Sync(context.Background(), "sub-meta")
+	if err != nil {
+		t.Fatalf("idle Sync: %v", err)
+	}
+	if changed {
+		t.Fatal("expected changed=false on idle Sync")
+	}
+
+	// Write ONLY trajectory_metadata_blob without appending any gen_metadata row.
+	buildMeta := func(role string) []byte {
+		spec := buildProtoMsg(func(b []byte) []byte {
+			b = appendStringField(b, 1, "research")
+			b = appendStringField(b, 2, role)
+			return b
+		})
+		return buildProtoMsg(func(b []byte) []byte {
+			b = appendStringField(b, 5, "parent-1")
+			b = appendSubMsg(b, 8, spec)
+			return b
+		})
+	}
+	if _, err := convDB.Exec(`INSERT INTO trajectory_metadata_blob(id, data) VALUES('main', ?)`, buildMeta("Security Auditor")); err != nil {
+		t.Fatalf("insert trajectory_metadata_blob: %v", err)
+	}
+
+	changed, _, _, err = pool.Sync(context.Background(), "sub-meta")
+	if err != nil {
+		t.Fatalf("post-meta Sync: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected changed=true after standalone trajectory_metadata_blob write")
+	}
+	if got := pool.cachedMeta("sub-meta").SubagentRole; got != "Security Auditor" {
+		t.Fatalf("SubagentRole = %q, want Security Auditor", got)
+	}
+
+	// Update role in-place without appending gen_metadata.
+	if _, err := convDB.Exec(`UPDATE trajectory_metadata_blob SET data = ? WHERE id = 'main'`, buildMeta("Lead Auditor")); err != nil {
+		t.Fatalf("update trajectory_metadata_blob: %v", err)
+	}
+	changed, _, _, err = pool.Sync(context.Background(), "sub-meta")
+	if err != nil {
+		t.Fatalf("post-meta-update Sync: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected changed=true after standalone trajectory_metadata_blob update")
+	}
+	if got := pool.cachedMeta("sub-meta").SubagentRole; got != "Lead Auditor" {
+		t.Fatalf("SubagentRole = %q, want Lead Auditor", got)
+	}
+
+	// Subsequent idle sync must return changed=false.
+	changed, _, _, err = pool.Sync(context.Background(), "sub-meta")
+	if err != nil {
+		t.Fatalf("final idle Sync: %v", err)
+	}
+	if changed {
+		t.Fatal("expected changed=false on final idle Sync")
+	}
+}
+
+func TestSummariesReader_StandaloneAnnotationChangesTriggerRefresh(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 25, 13, 0, 0, 0, time.UTC)
+	if _, err := sumDB.Exec(
+		`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time) VALUES ('child', '', ?)`,
+		now.Format(time.RFC3339),
+	); err != nil {
+		t.Fatalf("insert summary: %v", err)
+	}
+
+	reader := NewSummariesReader(filepath.Join(rootDir, "conversation_summaries.db"))
+	defer reader.Close()
+
+	// 1. Initial read: empty title, no annotation file yet.
+	rows, changed, err := reader.ReadChanges(context.Background())
+	if err != nil || !changed || len(rows) != 1 || rows[0].Title != "" {
+		t.Fatalf("initial ReadChanges: rows=%+v changed=%v err=%v", rows, changed, err)
+	}
+
+	// 2. Idle read: unchanged.
+	if _, changed, err = reader.ReadChanges(context.Background()); err != nil || changed {
+		t.Fatalf("idle ReadChanges: changed=%v err=%v", changed, err)
+	}
+
+	// 3. Create annotations/child.pbtxt without modifying conversation_summaries.db.
+	annPath := filepath.Join(rootDir, "annotations", "child.pbtxt")
+	if err := os.MkdirAll(filepath.Dir(annPath), 0o755); err != nil {
+		t.Fatalf("mkdir annotations: %v", err)
+	}
+	if err := os.WriteFile(annPath, []byte("title: \"Child Real Title\"\n"), 0o600); err != nil {
+		t.Fatalf("write annotation: %v", err)
+	}
+
+	rows, changed, err = reader.ReadChanges(context.Background())
+	if err != nil || !changed || len(rows) != 1 || rows[0].Title != "Child Real Title" {
+		t.Fatalf("post-create ReadChanges: rows=%+v changed=%v err=%v", rows, changed, err)
+	}
+
+	// 4. Idle read after picking up annotation title: unchanged.
+	if _, changed, err = reader.ReadChanges(context.Background()); err != nil || changed {
+		t.Fatalf("post-create idle ReadChanges: changed=%v err=%v", changed, err)
+	}
+
+	// 5. Modify annotations/child.pbtxt in-place (same byte length as before) without touching DB.
+	if err := os.WriteFile(annPath, []byte("title: \"Child Next Title\"\n"), 0o600); err != nil {
+		t.Fatalf("update annotation: %v", err)
+	}
+	rows, changed, err = reader.ReadChanges(context.Background())
+	if err != nil || !changed || len(rows) != 1 || rows[0].Title != "Child Next Title" {
+		t.Fatalf("post-update ReadChanges: rows=%+v changed=%v err=%v", rows, changed, err)
+	}
+
+	// 6. Delete annotations/child.pbtxt: title reverts to empty and triggers refresh.
+	if err := os.Remove(annPath); err != nil {
+		t.Fatalf("remove annotation: %v", err)
+	}
+	rows, changed, err = reader.ReadChanges(context.Background())
+	if err != nil || !changed || len(rows) != 1 || rows[0].Title != "" {
+		t.Fatalf("post-delete ReadChanges: rows=%+v changed=%v err=%v", rows, changed, err)
+	}
+}
+
+func TestProvider_ForkedBranchMatchesHistoryWithClonedDBStepAndOwnTranscriptStep(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 25, 14, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		id, title string
+	}{
+		{"conv-parent", "Parent Session"},
+		{"conv-fork-own-tr", "Fork Own Transcript"},
+		{"conv-fork-empty", "Fork Empty"},
+	} {
+		if _, err := sumDB.Exec(
+			`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time, status) VALUES (?, ?, ?, 'CASCADE_RUN_STATUS_IDLE')`,
+			row.id, row.title, now.Format(time.RFC3339),
+		); err != nil {
+			t.Fatalf("insert summary %s: %v", row.id, err)
+		}
+	}
+
+	insertClonedGen := func(db *sql.DB, idx, stepIdx int, cascadeID string, inTok, outTok int64, ts time.Time) {
+		var packed []byte
+		packed = protowireAppendVarint(packed, uint64(stepIdx))
+		usage := buildProtoMsg(func(b []byte) []byte {
+			b = appendVarintField(b, 2, uint64(inTok))
+			b = appendVarintField(b, 3, uint64(outTok))
+			return b
+		})
+		inner := buildProtoMsg(func(b []byte) []byte {
+			b = appendVarintField(b, 3, 1535) // MODEL_PLACEHOLDER_M535
+			b = appendSubMsg(b, 4, usage)
+			b = appendKV(b, 20, "cascade_id", cascadeID)
+			return b
+		})
+		blob := buildProtoMsg(func(b []byte) []byte {
+			b = appendSubMsg(b, 1, inner)
+			b = appendSubMsg(b, 2, packed)
+			return b
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES(?, ?, ?)`, idx, blob, len(blob)); err != nil {
+			t.Fatalf("insert gen_metadata: %v", err)
+		}
+		tsMsg := buildProtoMsg(func(b []byte) []byte {
+			b = appendVarintField(b, 1, uint64(ts.Unix()))
+			return b
+		})
+		if _, err := db.Exec(`INSERT OR REPLACE INTO steps(idx, step_type, metadata) VALUES(?, 15, ?)`, stepIdx, appendSubMsg(nil, 1, tsMsg)); err != nil {
+			t.Fatalf("insert step: %v", err)
+		}
+	}
+
+	parentDB := createTestConvDB(t, rootDir, "conv-parent")
+	defer parentDB.Close()
+	insertClonedGen(parentDB, 0, 1, "conv-parent", 10_000, 1_000, now.Add(-10*time.Minute))
+
+	// Fork with ONLY cloned parent step 1 in DB, plus cloned step 1 and own step 2 in transcript.jsonl.
+	forkOwnDB := createTestConvDB(t, rootDir, "conv-fork-own-tr")
+	defer forkOwnDB.Close()
+	insertClonedGen(forkOwnDB, 0, 1, "conv-parent", 10_000, 1_000, now.Add(-10*time.Minute))
+
+	trLine1 := `{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T13:50:00Z","model":"gemini-4-neon","input_tokens":10000,"output_tokens":1000}` + "\n"
+	trLine2 := `{"step_index":2,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T13:55:00Z","model":"gemini-4-neon","input_tokens":2000,"output_tokens":200}` + "\n"
+	trPathOwn := TranscriptPath(rootDir, "conv-fork-own-tr")
+	if err := os.MkdirAll(filepath.Dir(trPathOwn), 0o755); err != nil {
+		t.Fatalf("mkdir transcript own: %v", err)
+	}
+	if err := os.WriteFile(trPathOwn, []byte(trLine1+trLine2), 0o600); err != nil {
+		t.Fatalf("write transcript own: %v", err)
+	}
+
+	// Fork with ONLY cloned parent step 1 in DB and ONLY cloned step 1 in transcript.jsonl.
+	forkEmptyDB := createTestConvDB(t, rootDir, "conv-fork-empty")
+	defer forkEmptyDB.Close()
+	insertClonedGen(forkEmptyDB, 0, 1, "conv-parent", 10_000, 1_000, now.Add(-10*time.Minute))
+
+	trPathEmpty := TranscriptPath(rootDir, "conv-fork-empty")
+	if err := os.MkdirAll(filepath.Dir(trPathEmpty), 0o755); err != nil {
+		t.Fatalf("mkdir transcript empty: %v", err)
+	}
+	if err := os.WriteFile(trPathEmpty, []byte(trLine1), 0o600); err != nil {
+		t.Fatalf("write transcript empty: %v", err)
+	}
+
+	prov, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer prov.Close()
+
+	snap := prov.Snapshot()
+
+	forkOwn, ok := snap.FindConversation("conv-fork-own-tr")
+	if !ok {
+		t.Fatal("conv-fork-own-tr not found")
+	}
+	if forkOwn.TreeMetrics.RequestCount != 1 || len(forkOwn.Requests) != 1 {
+		t.Fatalf("conv-fork-own-tr RequestCount = %d (len=%d), want 1 (must exclude cloned step 1 and keep own transcript step 2)", forkOwn.TreeMetrics.RequestCount, len(forkOwn.Requests))
+	}
+	if forkOwn.Requests[0].StepIndex != 2 || forkOwn.Requests[0].InputTokens != 2000 || forkOwn.Requests[0].OutputTokens != 200 {
+		t.Fatalf("conv-fork-own-tr kept wrong request: %+v", forkOwn.Requests[0])
+	}
+
+	forkEmpty, ok := snap.FindConversation("conv-fork-empty")
+	if !ok {
+		t.Fatal("conv-fork-empty not found")
+	}
+	if forkEmpty.TreeMetrics.RequestCount != 0 || len(forkEmpty.Requests) != 0 {
+		t.Fatalf("conv-fork-empty RequestCount = %d (len=%d), want 0 (cloned parent step must not be re-added)", forkEmpty.TreeMetrics.RequestCount, len(forkEmpty.Requests))
+	}
+}
+
+func TestConvDBPool_DeletingTrajectoryMetadataRowClearsCachedRole(t *testing.T) {
+	rootDir := t.TempDir()
+	convDB := createTestConvDB(t, rootDir, "sub-del")
+	defer convDB.Close()
+
+	if _, err := convDB.Exec(`CREATE TABLE trajectory_metadata_blob (id text PRIMARY KEY, data blob)`); err != nil {
+		t.Fatalf("create trajectory_metadata_blob: %v", err)
+	}
+	now := time.Date(2026, 11, 25, 12, 30, 0, 0, time.UTC)
+	insertGenRow(t, convDB, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 1000, 0, 0, 100, 1100, 512000, time.Second, time.Second, now, "")
+
+	spec := buildProtoMsg(func(b []byte) []byte {
+		b = appendStringField(b, 1, "review")
+		b = appendStringField(b, 2, "Reviewer")
+		return b
+	})
+	metaBlob := buildProtoMsg(func(b []byte) []byte {
+		b = appendStringField(b, 5, "parent-1")
+		b = appendSubMsg(b, 8, spec)
+		return b
+	})
+	if _, err := convDB.Exec(`INSERT INTO trajectory_metadata_blob(id, data) VALUES('main', ?)`, metaBlob); err != nil {
+		t.Fatalf("insert trajectory_metadata_blob: %v", err)
+	}
+
+	pool := NewConvDBPool(filepath.Join(rootDir, "conversations"), 5)
+	defer pool.Close()
+
+	// 1. Initial sync reads Reviewer role.
+	changed, _, _, err := pool.Sync(context.Background(), "sub-del")
+	if err != nil || !changed {
+		t.Fatalf("initial Sync: changed=%v err=%v", changed, err)
+	}
+	if got := pool.cachedMeta("sub-del").SubagentRole; got != "Reviewer" {
+		t.Fatalf("initial SubagentRole = %q, want Reviewer", got)
+	}
+
+	// 2. Transient/canceled context error on readTrajectoryMetadata must be distinguished from confirmed deletion.
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, readErr := readTrajectoryMetadata(canceledCtx, convDB); readErr == nil {
+		t.Fatal("expected readTrajectoryMetadata with canceled context to return an error")
+	}
+
+	// 3. Delete the 'main' row from trajectory_metadata_blob -> Sync must clear cached role and report changed=true.
+	if _, err := convDB.Exec(`DELETE FROM trajectory_metadata_blob WHERE id = 'main'`); err != nil {
+		t.Fatalf("delete trajectory_metadata_blob: %v", err)
+	}
+	changed, _, _, err = pool.Sync(context.Background(), "sub-del")
+	if err != nil {
+		t.Fatalf("post-delete Sync: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected changed=true after deleting trajectory_metadata_blob main row")
+	}
+	if got := pool.cachedMeta("sub-del").SubagentRole; got != "" {
+		t.Fatalf("post-delete SubagentRole = %q, want empty", got)
+	}
+	if got := pool.cachedMeta("sub-del"); got != (TrajectoryMetadata{}) {
+		t.Fatalf("post-delete TrajectoryMetadata = %+v, want zero value", got)
+	}
+
+	// 4. Subsequent idle sync must return changed=false.
+	changed, _, _, err = pool.Sync(context.Background(), "sub-del")
+	if err != nil || changed {
+		t.Fatalf("post-delete idle Sync: changed=%v err=%v", changed, err)
+	}
+}
+
+func TestProvider_PartialDBWriteMergesRemainingTranscriptSteps(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 25, 15, 0, 0, 0, time.UTC)
+	if _, err := sumDB.Exec(
+		`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time, status) VALUES ('conv-fork-partial', 'Fork Partial', ?, 'CASCADE_RUN_STATUS_RUNNING')`,
+		now.Format(time.RFC3339),
+	); err != nil {
+		t.Fatalf("insert summary: %v", err)
+	}
+
+	insertWithCascade := func(db *sql.DB, idx, stepIdx int, cascadeID string, inTok, outTok int64, ts time.Time) {
+		var packed []byte
+		packed = protowireAppendVarint(packed, uint64(stepIdx))
+		usage := buildProtoMsg(func(b []byte) []byte {
+			b = appendVarintField(b, 2, uint64(inTok))
+			b = appendVarintField(b, 3, uint64(outTok))
+			return b
+		})
+		inner := buildProtoMsg(func(b []byte) []byte {
+			b = appendVarintField(b, 3, 1535) // MODEL_PLACEHOLDER_M535
+			b = appendSubMsg(b, 4, usage)
+			b = appendKV(b, 20, "cascade_id", cascadeID)
+			return b
+		})
+		blob := buildProtoMsg(func(b []byte) []byte {
+			b = appendSubMsg(b, 1, inner)
+			b = appendSubMsg(b, 2, packed)
+			return b
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES(?, ?, ?)`, idx, blob, len(blob)); err != nil {
+			t.Fatalf("insert gen_metadata: %v", err)
+		}
+		tsMsg := buildProtoMsg(func(b []byte) []byte {
+			b = appendVarintField(b, 1, uint64(ts.Unix()))
+			return b
+		})
+		if _, err := db.Exec(`INSERT OR REPLACE INTO steps(idx, step_type, metadata) VALUES(?, 15, ?)`, stepIdx, appendSubMsg(nil, 1, tsMsg)); err != nil {
+			t.Fatalf("insert step: %v", err)
+		}
+	}
+
+	// Initially DB has ONLY cloned parent step 1; transcript has cloned step 1 + own steps 2 and 3.
+	forkDB := createTestConvDB(t, rootDir, "conv-fork-partial")
+	defer forkDB.Close()
+	insertWithCascade(forkDB, 0, 1, "conv-parent", 10_000, 1_000, now.Add(-10*time.Minute))
+
+	trPath := TranscriptPath(rootDir, "conv-fork-partial")
+	if err := os.MkdirAll(filepath.Dir(trPath), 0o755); err != nil {
+		t.Fatalf("mkdir transcript: %v", err)
+	}
+	trContent := "" +
+		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T14:50:00Z","model":"gemini-4-neon","input_tokens":10000,"output_tokens":1000}` + "\n" +
+		`{"step_index":2,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T14:55:00Z","model":"gemini-4-neon","input_tokens":2000,"output_tokens":200}` + "\n" +
+		`{"step_index":3,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T14:58:00Z","model":"gemini-4-neon","input_tokens":3000,"output_tokens":300}` + "\n"
+	if err := os.WriteFile(trPath, []byte(trContent), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	prov, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer prov.Close()
+
+	conv1, ok := prov.Snapshot().FindConversation("conv-fork-partial")
+	if !ok || conv1.TreeMetrics.RequestCount != 2 {
+		t.Fatalf("initial RequestCount = %d (ok=%v), want 2 (steps 2 and 3 from transcript)", conv1.TreeMetrics.RequestCount, ok)
+	}
+
+	// Persist ONLY step 2 into DB while step 3 remains only in transcript.
+	insertWithCascade(forkDB, 1, 2, "conv-fork-partial", 2_000, 200, now.Add(-5*time.Minute))
+	if err := prov.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh after partial DB write: %v", err)
+	}
+
+	conv2, ok := prov.Snapshot().FindConversation("conv-fork-partial")
+	if !ok || conv2.TreeMetrics.RequestCount != 2 || len(conv2.Requests) != 2 {
+		t.Fatalf("after partial DB write: RequestCount=%d len=%d (ok=%v), want 2 (must keep step 3 from transcript without dropping to 1)", conv2.TreeMetrics.RequestCount, len(conv2.Requests), ok)
+	}
+	if conv2.Requests[0].StepIndex != 2 || conv2.Requests[1].StepIndex != 3 {
+		t.Fatalf("unexpected merged steps: [%d, %d], want [2, 3]", conv2.Requests[0].StepIndex, conv2.Requests[1].StepIndex)
+	}
+
+	// Persist step 3 into DB as well: must still be 2 requests (no duplication).
+	insertWithCascade(forkDB, 2, 3, "conv-fork-partial", 3_000, 300, now.Add(-2*time.Minute))
+	if err := prov.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh after full DB write: %v", err)
+	}
+	conv3, ok := prov.Snapshot().FindConversation("conv-fork-partial")
+	if !ok || conv3.TreeMetrics.RequestCount != 2 || len(conv3.Requests) != 2 {
+		t.Fatalf("after full DB write: RequestCount=%d len=%d (ok=%v), want 2", conv3.TreeMetrics.RequestCount, len(conv3.Requests), ok)
+	}
+}
+
+func TestProvider_CanceledZeroTokenDBStepNotResurrectedByTranscript(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 25, 16, 0, 0, 0, time.UTC)
+	if _, err := sumDB.Exec(
+		`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time, status) VALUES ('conv-canceled', 'Canceled Request', ?, 'CASCADE_RUN_STATUS_IDLE')`,
+		now.Format(time.RFC3339),
+	); err != nil {
+		t.Fatalf("insert summary: %v", err)
+	}
+
+	convDB := createTestConvDB(t, rootDir, "conv-canceled")
+	defer convDB.Close()
+
+	// Insert confirmed empty failure (f5="context canceled", all tokens 0) for step 1.
+	var packed []byte
+	packed = protowireAppendVarint(packed, 1)
+	inner := buildProtoMsg(func(b []byte) []byte {
+		b = appendStringField(b, 19, "gemini-4-neon")
+		return b
+	})
+	blob := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 1, inner)
+		b = appendSubMsg(b, 2, packed)
+		b = appendStringField(b, 5, "context canceled")
+		return b
+	})
+	if _, err := convDB.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES(0, ?, ?)`, blob, len(blob)); err != nil {
+		t.Fatalf("insert canceled gen_metadata: %v", err)
+	}
+	tsMsg := buildProtoMsg(func(b []byte) []byte {
+		b = appendVarintField(b, 1, uint64(now.Unix()))
+		return b
+	})
+	if _, err := convDB.Exec(`INSERT OR REPLACE INTO steps(idx, step_type, metadata) VALUES(1, 15, ?)`, appendSubMsg(nil, 1, tsMsg)); err != nil {
+		t.Fatalf("insert step: %v", err)
+	}
+
+	// Same step 1 appears in transcript.jsonl as a zero-token PLANNER_RESPONSE.
+	trPath := TranscriptPath(rootDir, "conv-canceled")
+	if err := os.MkdirAll(filepath.Dir(trPath), 0o755); err != nil {
+		t.Fatalf("mkdir transcript: %v", err)
+	}
+	trLine := `{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T16:00:00Z","model":"gemini-4-neon","input_tokens":0,"output_tokens":0}` + "\n"
+	if err := os.WriteFile(trPath, []byte(trLine), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	prov, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer prov.Close()
+
+	conv, ok := prov.Snapshot().FindConversation("conv-canceled")
+	if !ok {
+		t.Fatal("conv-canceled not found")
+	}
+	if conv.TreeMetrics.RequestCount != 0 || len(conv.Requests) != 0 {
+		t.Fatalf("canceled zero-token step was resurrected: RequestCount=%d requests=%+v, want 0", conv.TreeMetrics.RequestCount, conv.Requests)
+	}
+}
+
+func TestProvider_MissingStepIndexAndMultiStepGenerationUsage(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 25, 21, 0, 0, 0, time.UTC)
+	for _, row := range []struct{ id, title string }{
+		{"conv-no-step", "No Step Index"},
+		{"conv-multi-step", "Multi Step Gen"},
+	} {
+		if _, err := sumDB.Exec(
+			`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time, status) VALUES (?, ?, ?, 'CASCADE_RUN_STATUS_IDLE')`,
+			row.id, row.title, now.Format(time.RFC3339),
+		); err != nil {
+			t.Fatalf("insert summary %s: %v", row.id, err)
+		}
+	}
+
+	// 1. conv-no-step: DB gen 0 has NO StepIndices and NO last_step_index, 100 output tokens;
+	// transcript has same request at step 7 -> must stay 1 request, 100 tokens.
+	dbNoStep := createTestConvDB(t, rootDir, "conv-no-step")
+	defer dbNoStep.Close()
+	usage100 := buildProtoMsg(func(b []byte) []byte {
+		b = appendVarintField(b, 3, 100)
+		return b
+	})
+	innerNoStep := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 4, usage100)
+		b = appendStringField(b, 19, "gemini-4-neon")
+		return b
+	})
+	blobNoStep := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 1, innerNoStep)
+		return b
+	})
+	if _, err := dbNoStep.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES(0, ?, ?)`, blobNoStep, len(blobNoStep)); err != nil {
+		t.Fatalf("insert conv-no-step gen: %v", err)
+	}
+	trNoStep := TranscriptPath(rootDir, "conv-no-step")
+	if err := os.MkdirAll(filepath.Dir(trNoStep), 0o755); err != nil {
+		t.Fatalf("mkdir trNoStep: %v", err)
+	}
+	if err := os.WriteFile(trNoStep, []byte(`{"step_index":7,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T21:00:00Z","model":"gemini-4-neon","output_tokens":100}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write trNoStep: %v", err)
+	}
+
+	// 2. conv-multi-step: DB gen 0 covers [6, 7] with 0 tokens; transcript provides 100 tokens on step 7 ->
+	// must resolve to 1 request, 100 tokens.
+	dbMulti := createTestConvDB(t, rootDir, "conv-multi-step")
+	defer dbMulti.Close()
+	var packed []byte
+	packed = protowireAppendVarint(packed, 6)
+	packed = protowireAppendVarint(packed, 7)
+	innerMulti := buildProtoMsg(func(b []byte) []byte {
+		b = appendStringField(b, 19, "gemini-4-neon")
+		return b
+	})
+	blobMulti := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 1, innerMulti)
+		b = appendSubMsg(b, 2, packed)
+		return b
+	})
+	if _, err := dbMulti.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES(0, ?, ?)`, blobMulti, len(blobMulti)); err != nil {
+		t.Fatalf("insert conv-multi-step gen: %v", err)
+	}
+	trMulti := TranscriptPath(rootDir, "conv-multi-step")
+	if err := os.MkdirAll(filepath.Dir(trMulti), 0o755); err != nil {
+		t.Fatalf("mkdir trMulti: %v", err)
+	}
+	if err := os.WriteFile(trMulti, []byte(`{"step_index":7,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T21:00:00Z","model":"gemini-4-neon","output_tokens":100}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write trMulti: %v", err)
+	}
+
+	prov, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer prov.Close()
+
+	snap := prov.Snapshot()
+
+	noStep, ok := snap.FindConversation("conv-no-step")
+	if !ok {
+		t.Fatal("conv-no-step not found")
+	}
+	if noStep.TreeMetrics.RequestCount != 1 || noStep.TreeMetrics.TotalOutputTokens != 100 {
+		t.Fatalf("conv-no-step got RequestCount=%d Output=%d, want 1 / 100", noStep.TreeMetrics.RequestCount, noStep.TreeMetrics.TotalOutputTokens)
+	}
+
+	multi, ok := snap.FindConversation("conv-multi-step")
+	if !ok {
+		t.Fatal("conv-multi-step not found")
+	}
+	if multi.TreeMetrics.RequestCount != 1 || multi.TreeMetrics.TotalOutputTokens != 100 {
+		t.Fatalf("conv-multi-step got RequestCount=%d Output=%d, want 1 / 100", multi.TreeMetrics.RequestCount, multi.TreeMetrics.TotalOutputTokens)
+	}
+}
+
+func TestProvider_TranscriptDeleteAndSameLengthReplaceRefresh(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 25, 22, 0, 0, 0, time.UTC)
+	if _, err := sumDB.Exec(
+		`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time, status) VALUES ('conv-tr-mut', 'Transcript Mutate', ?, 'CASCADE_RUN_STATUS_RUNNING')`,
+		now.Format(time.RFC3339),
+	); err != nil {
+		t.Fatalf("insert summary: %v", err)
+	}
+
+	// DB has step 1 with 10 output tokens.
+	convDB := createTestConvDB(t, rootDir, "conv-tr-mut")
+	defer convDB.Close()
+	insertGenRow(t, convDB, 0, 1, "gemini-4-neon", "Gemini 4 Neon (High)", 0, 0, 0, 10, 10, 512000, time.Second, time.Second, now, "")
+
+	// Transcript initially has step 1 (10 output) + step 2 (100 output) -> total 2 requests, 110 output.
+	trPath := TranscriptPath(rootDir, "conv-tr-mut")
+	if err := os.MkdirAll(filepath.Dir(trPath), 0o755); err != nil {
+		t.Fatalf("mkdir transcript: %v", err)
+	}
+	trV1 := "" +
+		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T22:00:00Z","model":"gemini-4-neon","output_tokens":10}` + "\n" +
+		`{"step_index":2,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T22:01:00Z","model":"gemini-4-neon","output_tokens":100}` + "\n"
+	trV2 := "" +
+		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T22:00:00Z","model":"gemini-4-neon","output_tokens":10}` + "\n" +
+		`{"step_index":2,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T22:01:00Z","model":"gemini-4-neon","output_tokens":200}` + "\n"
+	if len(trV1) != len(trV2) {
+		t.Fatalf("test setup error: trV1 len (%d) != trV2 len (%d)", len(trV1), len(trV2))
+	}
+	if err := os.WriteFile(trPath, []byte(trV1), 0o600); err != nil {
+		t.Fatalf("write trV1: %v", err)
+	}
+
+	prov, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer prov.Close()
+
+	conv1, ok := prov.Snapshot().FindConversation("conv-tr-mut")
+	if !ok || conv1.TreeMetrics.RequestCount != 2 || conv1.TreeMetrics.TotalOutputTokens != 110 {
+		t.Fatalf("initial snapshot got RequestCount=%d Output=%d (ok=%v), want 2 / 110", conv1.TreeMetrics.RequestCount, conv1.TreeMetrics.TotalOutputTokens, ok)
+	}
+
+	// 1. Replace transcript in-place with an IDENTICAL byte-length file (step 2 output: 100 -> 200).
+	if err := os.WriteFile(trPath, []byte(trV2), 0o600); err != nil {
+		t.Fatalf("write trV2: %v", err)
+	}
+	if err := prov.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh after same-length replace: %v", err)
+	}
+	conv2, ok := prov.Snapshot().FindConversation("conv-tr-mut")
+	if !ok || conv2.TreeMetrics.RequestCount != 2 || conv2.TreeMetrics.TotalOutputTokens != 210 {
+		t.Fatalf("after same-length replace got RequestCount=%d Output=%d (ok=%v), want 2 / 210", conv2.TreeMetrics.RequestCount, conv2.TreeMetrics.TotalOutputTokens, ok)
+	}
+
+	// 2. Delete transcript.jsonl -> Refresh must clear cached transcript state and leave only DB step 1 (1 request, 10 output).
+	if err := os.Remove(trPath); err != nil {
+		t.Fatalf("remove transcript: %v", err)
+	}
+	if err := prov.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh after transcript delete: %v", err)
+	}
+	conv3, ok := prov.Snapshot().FindConversation("conv-tr-mut")
+	if !ok || conv3.TreeMetrics.RequestCount != 1 || conv3.TreeMetrics.TotalOutputTokens != 10 {
+		t.Fatalf("after transcript delete got RequestCount=%d Output=%d (ok=%v), want 1 / 10", conv3.TreeMetrics.RequestCount, conv3.TreeMetrics.TotalOutputTokens, ok)
+	}
+}
+
+func TestProvider_MissingStepIndexBackfillsAndMergesSubsequentTranscriptRequest(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 25, 22, 30, 0, 0, time.UTC)
+	for _, row := range []struct{ id, title string }{
+		{"conv-est-backfill", "Est Backfill"},
+		{"conv-est-merge", "Est Merge"},
+	} {
+		if _, err := sumDB.Exec(
+			`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time, status) VALUES (?, ?, ?, 'CASCADE_RUN_STATUS_IDLE')`,
+			row.id, row.title, now.Format(time.RFC3339),
+		); err != nil {
+			t.Fatalf("insert summary %s: %v", row.id, err)
+		}
+	}
+
+	// 1. Unknown placeholder + 0 tokens + no step index in DB -> backfill Claude Opus 100 tokens & $0.0075.
+	dbBackfill := createTestConvDB(t, rootDir, "conv-est-backfill")
+	defer dbBackfill.Close()
+	innerBackfill := buildProtoMsg(func(b []byte) []byte {
+		b = appendVarintField(b, 3, 1999) // MODEL_PLACEHOLDER_M999
+		return b
+	})
+	blobBackfill := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 1, innerBackfill)
+		return b
+	})
+	if _, err := dbBackfill.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES(0, ?, ?)`, blobBackfill, len(blobBackfill)); err != nil {
+		t.Fatalf("insert conv-est-backfill gen: %v", err)
+	}
+	trBackfill := TranscriptPath(rootDir, "conv-est-backfill")
+	if err := os.MkdirAll(filepath.Dir(trBackfill), 0o755); err != nil {
+		t.Fatalf("mkdir trBackfill: %v", err)
+	}
+	if err := os.WriteFile(trBackfill, []byte(`{"step_index":7,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T22:30:00Z","model":"claude-opus-5-5","output_tokens":100}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write trBackfill: %v", err)
+	}
+
+	// 2. Claude 100 tokens with no step index in DB; transcript has Claude 100 (step 7) + Gemini 200 (step 9).
+	dbMerge := createTestConvDB(t, rootDir, "conv-est-merge")
+	defer dbMerge.Close()
+	usage100 := buildProtoMsg(func(b []byte) []byte {
+		b = appendVarintField(b, 3, 100)
+		return b
+	})
+	innerMerge := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 4, usage100)
+		b = appendStringField(b, 19, "claude-opus-5-5")
+		return b
+	})
+	blobMerge := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 1, innerMerge)
+		return b
+	})
+	if _, err := dbMerge.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES(0, ?, ?)`, blobMerge, len(blobMerge)); err != nil {
+		t.Fatalf("insert conv-est-merge gen: %v", err)
+	}
+	trMerge := TranscriptPath(rootDir, "conv-est-merge")
+	if err := os.MkdirAll(filepath.Dir(trMerge), 0o755); err != nil {
+		t.Fatalf("mkdir trMerge: %v", err)
+	}
+	trMergeLines := "" +
+		`{"step_index":7,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T22:30:00Z","model":"claude-opus-5-5","output_tokens":100}` + "\n" +
+		`{"step_index":9,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T22:31:00Z","model":"gemini-4-neon","output_tokens":200}` + "\n"
+	if err := os.WriteFile(trMerge, []byte(trMergeLines), 0o600); err != nil {
+		t.Fatalf("write trMerge: %v", err)
+	}
+
+	prov, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer prov.Close()
+
+	snap := prov.Snapshot()
+
+	bf, ok := snap.FindConversation("conv-est-backfill")
+	if !ok {
+		t.Fatal("conv-est-backfill not found")
+	}
+	wantCost := 100 * 75.0 / 1e6
+	if bf.TreeMetrics.RequestCount != 1 || bf.TreeMetrics.TotalOutputTokens != 100 || bf.TreeMetrics.SessionCostUSD < wantCost-1e-12 || bf.TreeMetrics.SessionCostUSD > wantCost+1e-12 {
+		t.Fatalf("conv-est-backfill got RequestCount=%d Output=%d Cost=%.8f, want 1 / 100 / %.8f", bf.TreeMetrics.RequestCount, bf.TreeMetrics.TotalOutputTokens, bf.TreeMetrics.SessionCostUSD, wantCost)
+	}
+
+	mg, ok := snap.FindConversation("conv-est-merge")
+	if !ok {
+		t.Fatal("conv-est-merge not found")
+	}
+	if mg.TreeMetrics.RequestCount != 2 || mg.TreeMetrics.TotalOutputTokens != 300 {
+		t.Fatalf("conv-est-merge got RequestCount=%d Output=%d, want 2 / 300", mg.TreeMetrics.RequestCount, mg.TreeMetrics.TotalOutputTokens)
+	}
+}
+
+func TestProvider_TranscriptInPlaceRewriteGrowingReplacesOldRecords(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 25, 23, 0, 0, 0, time.UTC)
+	if _, err := sumDB.Exec(
+		`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time, status) VALUES ('conv-tr-grow', 'Transcript Grow Rewrite', ?, 'CASCADE_RUN_STATUS_RUNNING')`,
+		now.Format(time.RFC3339),
+	); err != nil {
+		t.Fatalf("insert summary: %v", err)
+	}
+
+	trPath := TranscriptPath(rootDir, "conv-tr-grow")
+	if err := os.MkdirAll(filepath.Dir(trPath), 0o755); err != nil {
+		t.Fatalf("mkdir transcript: %v", err)
+	}
+	v1 := `{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T23:00:00Z","model":"gemini-4-neon","output_tokens":50}` + "\n"
+	if err := os.WriteFile(trPath, []byte(v1), 0o600); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+
+	prov, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer prov.Close()
+
+	c1, ok := prov.Snapshot().FindConversation("conv-tr-grow")
+	if !ok || c1.TreeMetrics.RequestCount != 1 || len(c1.Requests) != 1 || c1.Requests[0].StepIndex != 1 {
+		t.Fatalf("initial snapshot got ok=%v count=%d reqs=%+v, want [step 1]", ok, c1.TreeMetrics.RequestCount, c1.Requests)
+	}
+
+	// Rewrite transcript.jsonl IN-PLACE so it replaces step 1 with steps 2 & 3 (strictly longer file).
+	v2 := "" +
+		`{"step_index":2,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T23:01:00Z","model":"gemini-4-neon","output_tokens":100}` + "\n" +
+		`{"step_index":3,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T23:02:00Z","model":"gemini-4-neon","output_tokens":200}` + "\n"
+	if len(v2) <= len(v1) {
+		t.Fatalf("test setup error: v2 len (%d) must be > v1 len (%d)", len(v2), len(v1))
+	}
+	if err := os.WriteFile(trPath, []byte(v2), 0o600); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+
+	if err := prov.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh after growing rewrite: %v", err)
+	}
+	c2, ok := prov.Snapshot().FindConversation("conv-tr-grow")
+	if !ok || c2.TreeMetrics.RequestCount != 2 || len(c2.Requests) != 2 {
+		t.Fatalf("post-rewrite snapshot got ok=%v count=%d reqs=%+v, want [step 2, step 3]", ok, c2.TreeMetrics.RequestCount, c2.Requests)
+	}
+	if c2.Requests[0].StepIndex != 2 || c2.Requests[1].StepIndex != 3 || c2.TreeMetrics.TotalOutputTokens != 300 {
+		t.Fatalf("post-rewrite got steps=[%d, %d] output=%d, want [2, 3] / 300", c2.Requests[0].StepIndex, c2.Requests[1].StepIndex, c2.TreeMetrics.TotalOutputTokens)
+	}
+}
+
+func TestMatchPlanners_DistinctModelsPriorityOrderAndForeignEmptyRow(t *testing.T) {
+	calc, err := metrics.NewDefaultCalculator()
+	if err != nil {
+		t.Fatalf("NewDefaultCalculator: %v", err)
+	}
+
+	// 1. Distinct models sharing a display bucket (gpt-5.4 vs gpt-5.5) with identical 100 output tokens
+	// must NOT be merged into one request.
+	trGPT := TranscriptData{
+		Planners: []TranscriptPlanner{
+			{StepIndex: 7, Model: "gpt-5.5", OutputTokens: 100},
+		},
+	}
+	resGPT := trGPT.MatchPlanners([]GenMetadata{
+		{GenIndex: 0, StepIndex: 0, StepIndexEstimated: true, ModelSlug: "gpt-5.4", OutputTokens: 100},
+	}, "conv-gpt", calc)
+	if resGPT.MatchedByGen[0] != nil {
+		t.Fatalf("gpt-5.4 must not match gpt-5.5, got %+v", resGPT.MatchedByGen[0])
+	}
+	if len(resGPT.UnclaimedPlanners) != 1 || resGPT.UnclaimedPlanners[0].Model != "gpt-5.5" {
+		t.Fatalf("expected gpt-5.5 to remain unclaimed, got %+v", resGPT.UnclaimedPlanners)
+	}
+
+	// 2. Unknown placeholder BEFORE known Claude in DB, with Claude + Gemini in transcript (all 100 output):
+	// Claude must claim Claude first so unknown placeholder gets Gemini -> 2 total requests, not 3.
+	trPriority := TranscriptData{
+		Planners: []TranscriptPlanner{
+			{StepIndex: 5, Model: "claude-opus-5-5", OutputTokens: 100},
+			{StepIndex: 7, Model: "gemini-4-neon", OutputTokens: 100},
+		},
+	}
+	resPriority := trPriority.MatchPlanners([]GenMetadata{
+		{GenIndex: 0, StepIndex: 0, StepIndexEstimated: true, ModelSlug: "MODEL_PLACEHOLDER_M999", OutputTokens: 100},
+		{GenIndex: 1, StepIndex: 1, StepIndexEstimated: true, ModelSlug: "claude-opus-5-5", OutputTokens: 100},
+	}, "conv-prio", calc)
+	if resPriority.MatchedByGen[1] == nil || resPriority.MatchedByGen[1].Model != "claude-opus-5-5" {
+		t.Fatalf("expected DB Claude to match transcript Claude, got %+v", resPriority.MatchedByGen[1])
+	}
+	if resPriority.MatchedByGen[0] == nil || resPriority.MatchedByGen[0].Model != "gemini-4-neon" {
+		t.Fatalf("expected DB unknown placeholder to match transcript Gemini, got %+v", resPriority.MatchedByGen[0])
+	}
+	if len(resPriority.UnclaimedPlanners) != 0 {
+		t.Fatalf("expected 0 unclaimed planners (2 requests total), got %+v", resPriority.UnclaimedPlanners)
+	}
+
+	// 3. Uncorroborated empty cloned parent record (no step index, no model, 0 tokens) must NOT
+	// swallow a child's 100-token Claude transcript request.
+	trChild := TranscriptData{
+		Planners: []TranscriptPlanner{
+			{StepIndex: 3, Model: "claude-opus-5-5", OutputTokens: 100},
+		},
+	}
+	resChild := trChild.MatchPlanners([]GenMetadata{
+		{GenIndex: 0, StepIndex: 0, StepIndexEstimated: true, CascadeID: "conv-parent"},
+	}, "conv-child", calc)
+	if len(resChild.UnclaimedPlanners) != 1 || resChild.UnclaimedPlanners[0].OutputTokens != 100 {
+		t.Fatalf("empty parent row swallowed child request: unclaimed=%+v", resChild.UnclaimedPlanners)
+	}
+}
+
+func TestProvider_SmallTranscriptMidFileRewriteAndAppendUpdatesUsage(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 25, 23, 30, 0, 0, time.UTC)
+	if _, err := sumDB.Exec(
+		`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time, status) VALUES ('conv-tr-mid', 'Mid Transcript Rewrite', ?, 'CASCADE_RUN_STATUS_RUNNING')`,
+		now.Format(time.RFC3339),
+	); err != nil {
+		t.Fatalf("insert summary: %v", err)
+	}
+
+	trPath := TranscriptPath(rootDir, "conv-tr-mid")
+	if err := os.MkdirAll(filepath.Dir(trPath), 0o755); err != nil {
+		t.Fatalf("mkdir transcript: %v", err)
+	}
+
+	// Build a <=64 KiB transcript whose first 4 KiB and last 4 KiB stay identical while
+	// a middle PLANNER_RESPONSE changes output_tokens from 100 -> 200 and a new step (+300) is appended.
+	padHead := `{"step_index":0,"type":"USER_INPUT","created_at":"2026-11-25T23:30:00Z","content":"` + strings.Repeat("H", 16*1024) + `"}` + "\n"
+	midV1 := `{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T23:30:10Z","model":"gemini-4-neon","output_tokens":100}` + "\n"
+	midV2 := `{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T23:30:10Z","model":"gemini-4-neon","output_tokens":200}` + "\n"
+	padTail := `{"step_index":2,"type":"GENERIC","created_at":"2026-11-25T23:30:20Z","content":"` + strings.Repeat("T", 16*1024) + `"}` + "\n"
+	appended := `{"step_index":3,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T23:30:30Z","model":"gemini-4-neon","output_tokens":300}` + "\n"
+
+	v1 := padHead + midV1 + padTail
+	if err := os.WriteFile(trPath, []byte(v1), 0o600); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+
+	prov, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer prov.Close()
+
+	c1, ok := prov.Snapshot().FindConversation("conv-tr-mid")
+	if !ok || c1.TreeMetrics.RequestCount != 1 || c1.TreeMetrics.TotalOutputTokens != 100 {
+		t.Fatalf("initial snapshot got ok=%v count=%d output=%d, want 1 / 100", ok, c1.TreeMetrics.RequestCount, c1.TreeMetrics.TotalOutputTokens)
+	}
+
+	v2 := padHead + midV2 + padTail + appended
+	if err := os.WriteFile(trPath, []byte(v2), 0o600); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	if err := prov.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh after mid-file rewrite + append: %v", err)
+	}
+	c2, ok := prov.Snapshot().FindConversation("conv-tr-mid")
+	if !ok || c2.TreeMetrics.RequestCount != 2 || c2.TreeMetrics.TotalOutputTokens != 500 {
+		t.Fatalf("post-rewrite snapshot got ok=%v count=%d output=%d, want 2 / 500", ok, c2.TreeMetrics.RequestCount, c2.TreeMetrics.TotalOutputTokens)
+	}
+}
+
+func TestProvider_DisplayNameVersionDistinctionAndPlaceholderDisplayFallback(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 25, 23, 45, 0, 0, time.UTC)
+	for _, row := range []struct{ id, title string }{
+		{"conv-disp-distinct", "Display Distinct Version"},
+		{"conv-placeholder-disp", "Placeholder With Display"},
+	} {
+		if _, err := sumDB.Exec(
+			`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time, status) VALUES (?, ?, ?, 'CASCADE_RUN_STATUS_IDLE')`,
+			row.id, row.title, now.Format(time.RFC3339),
+		); err != nil {
+			t.Fatalf("insert summary %s: %v", row.id, err)
+		}
+	}
+
+	// 1. DB has ONLY display name "GPT-5.4" (no slug, no step index), 100 output;
+	// transcript has "gpt-5.5", 100 output -> must stay 2 requests / 200 tokens.
+	dbDist := createTestConvDB(t, rootDir, "conv-disp-distinct")
+	defer dbDist.Close()
+	usage100 := buildProtoMsg(func(b []byte) []byte {
+		b = appendVarintField(b, 3, 100)
+		return b
+	})
+	innerDist := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 4, usage100)
+		b = appendStringField(b, 21, "GPT-5.4")
+		return b
+	})
+	blobDist := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 1, innerDist)
+		return b
+	})
+	if _, err := dbDist.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES(0, ?, ?)`, blobDist, len(blobDist)); err != nil {
+		t.Fatalf("insert conv-disp-distinct: %v", err)
+	}
+	trDist := TranscriptPath(rootDir, "conv-disp-distinct")
+	if err := os.MkdirAll(filepath.Dir(trDist), 0o755); err != nil {
+		t.Fatalf("mkdir trDist: %v", err)
+	}
+	if err := os.WriteFile(trDist, []byte(`{"step_index":7,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T23:45:00Z","model":"gpt-5.5","output_tokens":100}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write trDist: %v", err)
+	}
+
+	// 2. DB has unresolved placeholder MODEL_PLACEHOLDER_M999 + display name "GPT-5.4" (no step index), 100 output;
+	// transcript has "gpt-5.4", 100 output -> must match as 1 request / 100 tokens.
+	dbPh := createTestConvDB(t, rootDir, "conv-placeholder-disp")
+	defer dbPh.Close()
+	innerPh := buildProtoMsg(func(b []byte) []byte {
+		b = appendVarintField(b, 3, 1999) // MODEL_PLACEHOLDER_M999
+		b = appendSubMsg(b, 4, usage100)
+		b = appendStringField(b, 21, "GPT-5.4")
+		return b
+	})
+	blobPh := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 1, innerPh)
+		return b
+	})
+	if _, err := dbPh.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES(0, ?, ?)`, blobPh, len(blobPh)); err != nil {
+		t.Fatalf("insert conv-placeholder-disp: %v", err)
+	}
+	trPh := TranscriptPath(rootDir, "conv-placeholder-disp")
+	if err := os.MkdirAll(filepath.Dir(trPh), 0o755); err != nil {
+		t.Fatalf("mkdir trPh: %v", err)
+	}
+	if err := os.WriteFile(trPh, []byte(`{"step_index":7,"type":"PLANNER_RESPONSE","created_at":"2026-11-25T23:45:00Z","model":"gpt-5.4","output_tokens":100}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write trPh: %v", err)
+	}
+
+	prov, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer prov.Close()
+
+	snap := prov.Snapshot()
+
+	dist, ok := snap.FindConversation("conv-disp-distinct")
+	if !ok {
+		t.Fatal("conv-disp-distinct not found")
+	}
+	if dist.TreeMetrics.RequestCount != 2 || dist.TreeMetrics.TotalOutputTokens != 200 {
+		t.Fatalf("conv-disp-distinct got RequestCount=%d Output=%d, want 2 / 200", dist.TreeMetrics.RequestCount, dist.TreeMetrics.TotalOutputTokens)
+	}
+
+	ph, ok := snap.FindConversation("conv-placeholder-disp")
+	if !ok {
+		t.Fatal("conv-placeholder-disp not found")
+	}
+	if ph.TreeMetrics.RequestCount != 1 || ph.TreeMetrics.TotalOutputTokens != 100 {
+		t.Fatalf("conv-placeholder-disp got RequestCount=%d Output=%d, want 1 / 100", ph.TreeMetrics.RequestCount, ph.TreeMetrics.TotalOutputTokens)
+	}
+}
+
+func TestMatchPlanners_LinearScaling512EstimatedGens(t *testing.T) {
+	calc, err := metrics.NewDefaultCalculator()
+	if err != nil {
+		t.Fatalf("NewDefaultCalculator: %v", err)
+	}
+	const n = 512
+	gens := make([]GenMetadata, n)
+	planners := make([]TranscriptPlanner, n)
+	for i := 0; i < n; i++ {
+		out := int64(100 + i)
+		gens[i] = GenMetadata{
+			GenIndex:           i,
+			StepIndex:          i,
+			StepIndexEstimated: true,
+			ModelSlug:          "claude-opus-5-5",
+			OutputTokens:       out,
+		}
+		planners[i] = TranscriptPlanner{
+			StepIndex:    i*2 + 1,
+			Model:        "claude-opus-5-5",
+			OutputTokens: out,
+		}
+	}
+	tr := TranscriptData{Planners: planners}
+
+	start := time.Now()
+	res := tr.MatchPlanners(gens, "conv-scale", calc)
+	elapsed := time.Since(start)
+	if len(res.UnclaimedPlanners) != 0 {
+		t.Fatalf("expected 0 unclaimed planners, got %d", len(res.UnclaimedPlanners))
+	}
+	for i := 0; i < n; i++ {
+		if res.MatchedByGen[i] == nil || res.MatchedByGen[i].OutputTokens != int64(100+i) {
+			t.Fatalf("gen %d matched wrong planner: %+v", i, res.MatchedByGen[i])
+		}
+	}
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("MatchPlanners(%d) took %v, expected linear sub-250ms execution", n, elapsed)
+	}
+}
+
+func TestTranscriptTailer_DensePlannerLogAppendIsStrictOOfDelta(t *testing.T) {
+	trPath := filepath.Join(t.TempDir(), "transcript.jsonl")
+	now := time.Date(2026, 11, 26, 5, 0, 0, 0, time.UTC)
+
+	// Build a ~4 MiB log consisting ENTIRELY of PLANNER_RESPONSE lines (~30,000 lines).
+	var sb strings.Builder
+	sb.Grow(4 * 1024 * 1024)
+	const initialCount = 30000
+	for step := 1; step <= initialCount; step++ {
+		fmt.Fprintf(&sb, `{"step_index":%d,"type":"PLANNER_RESPONSE","created_at":"2026-11-26T05:00:00Z","model":"gemini-4-neon","output_tokens":100}`+"\n", step)
+	}
+	if err := os.WriteFile(trPath, []byte(sb.String()), 0o600); err != nil {
+		t.Fatalf("write dense planner log: %v", err)
+	}
+
+	tailer := NewTranscriptTailer(trPath)
+	changed, err := tailer.Sync()
+	if err != nil || !changed {
+		t.Fatalf("initial Sync: changed=%v err=%v", changed, err)
+	}
+	if got := len(tailer.Snapshot().Planners); got != initialCount {
+		t.Fatalf("initial planners = %d, want %d", got, initialCount)
+	}
+
+	// Append a single line and verify Sync is strictly O(delta) (<25ms) even on 30,000 PLANNER_RESPONSE lines.
+	f, err := os.OpenFile(trPath, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open append: %v", err)
+	}
+	appended := fmt.Sprintf(`{"step_index":%d,"type":"PLANNER_RESPONSE","created_at":"%s","model":"gemini-4-neon","output_tokens":300}`+"\n", initialCount+1, now.Add(time.Minute).UTC().Format(time.RFC3339))
+	if _, err := f.WriteString(appended); err != nil {
+		_ = f.Close()
+		t.Fatalf("append: %v", err)
+	}
+	_ = f.Close()
+
+	start := time.Now()
+	changed, err = tailer.Sync()
+	elapsed := time.Since(start)
+	if err != nil || !changed {
+		t.Fatalf("append Sync: changed=%v err=%v", changed, err)
+	}
+	if snap := tailer.Snapshot(); len(snap.Planners) != initialCount+1 || snap.Planners[initialCount].OutputTokens != 300 {
+		t.Fatalf("post-append snapshot len=%d last=%+v", len(snap.Planners), snap.Planners[len(snap.Planners)-1])
+	}
+	if elapsed > 25*time.Millisecond {
+		t.Fatalf("dense planner log append Sync took %v, expected strict O(delta) <25ms", elapsed)
+	}
+
+	// Full-file rewrite of a large log (changing head/tail boundaries) must still reset cleanly.
+	rewritten := `{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-26T05:05:00Z","model":"gemini-4-neon","output_tokens":999}` + "\n" +
+		`{"step_index":2,"type":"GENERIC","content":"` + strings.Repeat("R", 5*1024*1024) + `"}` + "\n"
+	if err := os.WriteFile(trPath, []byte(rewritten), 0o600); err != nil {
+		t.Fatalf("rewrite large log: %v", err)
+	}
+	changed, err = tailer.Sync()
+	if err != nil || !changed {
+		t.Fatalf("post-rewrite Sync: changed=%v err=%v", changed, err)
+	}
+	if snap := tailer.Snapshot(); len(snap.Planners) != 1 || snap.Planners[0].OutputTokens != 999 {
+		t.Fatalf("post-rewrite planners = %+v, want [999]", snap.Planners)
+	}
+}
+
+func TestProvider_CatalogDisplayAliasMatchesTranscriptModel(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 26, 1, 0, 0, 0, time.UTC)
+	cases := []struct {
+		id      string
+		display string
+		trModel string
+	}{
+		{"conv-orch-carbon", "Orchestrator (Carbon)", "gemini-pro-orchestrator"},
+		{"conv-orch-worker", "Orchestrator Worker (Hydrogen)", "gemini-flash-worker-agy"},
+	}
+
+	usage100 := buildProtoMsg(func(b []byte) []byte {
+		b = appendVarintField(b, 3, 100)
+		return b
+	})
+
+	for _, tc := range cases {
+		if _, err := sumDB.Exec(
+			`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time, status) VALUES (?, ?, ?, 'CASCADE_RUN_STATUS_IDLE')`,
+			tc.id, tc.display, now.Format(time.RFC3339),
+		); err != nil {
+			t.Fatalf("insert summary %s: %v", tc.id, err)
+		}
+
+		db := createTestConvDB(t, rootDir, tc.id)
+		inner := buildProtoMsg(func(b []byte) []byte {
+			b = appendSubMsg(b, 4, usage100)
+			b = appendStringField(b, 21, tc.display)
+			return b
+		})
+		blob := buildProtoMsg(func(b []byte) []byte {
+			b = appendSubMsg(b, 1, inner)
+			return b
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES(0, ?, ?)`, blob, len(blob)); err != nil {
+			_ = db.Close()
+			t.Fatalf("insert gen %s: %v", tc.id, err)
+		}
+		_ = db.Close()
+
+		trPath := TranscriptPath(rootDir, tc.id)
+		if err := os.MkdirAll(filepath.Dir(trPath), 0o755); err != nil {
+			t.Fatalf("mkdir transcript %s: %v", tc.id, err)
+		}
+		line := fmt.Sprintf(`{"step_index":7,"type":"PLANNER_RESPONSE","created_at":"2026-11-26T01:00:00Z","model":%q,"output_tokens":100}`+"\n", tc.trModel)
+		if err := os.WriteFile(trPath, []byte(line), 0o600); err != nil {
+			t.Fatalf("write transcript %s: %v", tc.id, err)
+		}
+	}
+
+	prov, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer prov.Close()
+
+	snap := prov.Snapshot()
+	for _, tc := range cases {
+		conv, ok := snap.FindConversation(tc.id)
+		if !ok {
+			t.Fatalf("%s not found", tc.id)
+		}
+		if conv.TreeMetrics.RequestCount != 1 || conv.TreeMetrics.TotalOutputTokens != 100 {
+			t.Fatalf("%s (%s <-> %s) got RequestCount=%d Output=%d, want 1 / 100", tc.id, tc.display, tc.trModel, conv.TreeMetrics.RequestCount, conv.TreeMetrics.TotalOutputTokens)
+		}
+	}
+}
+
+func TestProvider_LargeTranscriptAtomicReplaceMatchesFreshReload(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 26, 2, 0, 0, 0, time.UTC)
+	if _, err := sumDB.Exec(
+		`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time, status) VALUES ('conv-64-planners', '64 Planners Large Log', ?, 'CASCADE_RUN_STATUS_RUNNING')`,
+		now.Format(time.RFC3339),
+	); err != nil {
+		t.Fatalf("insert summary: %v", err)
+	}
+
+	trPath := TranscriptPath(rootDir, "conv-64-planners")
+	if err := os.MkdirAll(filepath.Dir(trPath), 0o755); err != nil {
+		t.Fatalf("mkdir transcript: %v", err)
+	}
+
+	buildLog := func(step10Out int64, includeStep65 bool) string {
+		var sb strings.Builder
+		pad := strings.Repeat("X", 9*1024)
+		for step := 1; step <= 64; step++ {
+			out := int64(100)
+			if step == 10 {
+				out = step10Out
+			}
+			ts := now.Add(time.Duration(step) * time.Second).UTC().Format(time.RFC3339)
+			fmt.Fprintf(&sb, `{"step_index":%d,"type":"PLANNER_RESPONSE","created_at":"%s","model":"gemini-4-neon","output_tokens":%d}`+"\n", step, ts, out)
+			fmt.Fprintf(&sb, `{"step_index":%d,"type":"GENERIC","created_at":"%s","content":"%s"}`+"\n", step*100, ts, pad)
+		}
+		if includeStep65 {
+			ts := now.Add(65 * time.Second).UTC().Format(time.RFC3339)
+			fmt.Fprintf(&sb, `{"step_index":65,"type":"PLANNER_RESPONSE","created_at":"%s","model":"gemini-4-neon","output_tokens":100}`+"\n", ts)
+		}
+		return sb.String()
+	}
+
+	v1 := buildLog(100, false)
+	if len(v1) <= 512*1024 {
+		t.Fatalf("test setup error: v1 len (%d) must exceed 512 KiB", len(v1))
+	}
+	if err := os.WriteFile(trPath, []byte(v1), 0o600); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+
+	prov, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer prov.Close()
+
+	c1, ok := prov.Snapshot().FindConversation("conv-64-planners")
+	if !ok || c1.TreeMetrics.RequestCount != 64 || c1.TreeMetrics.TotalOutputTokens != 6400 {
+		t.Fatalf("initial got ok=%v count=%d output=%d, want 64 / 6400", ok, c1.TreeMetrics.RequestCount, c1.TreeMetrics.TotalOutputTokens)
+	}
+
+	// Atomically replace the >512 KiB file (step 10: 100 -> 200, plus step 65: +100).
+	tmpPath := trPath + ".tmp"
+	v2 := buildLog(200, true)
+	if err := os.WriteFile(tmpPath, []byte(v2), 0o600); err != nil {
+		t.Fatalf("write tmp v2: %v", err)
+	}
+	if err := os.Rename(tmpPath, trPath); err != nil {
+		t.Fatalf("rename tmp v2: %v", err)
+	}
+	if err := prov.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	cLive, ok := prov.Snapshot().FindConversation("conv-64-planners")
+	if !ok {
+		t.Fatal("conv-64-planners not found after refresh")
+	}
+
+	fresh, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("fresh NewProvider: %v", err)
+	}
+	defer fresh.Close()
+
+	cFresh, ok := fresh.Snapshot().FindConversation("conv-64-planners")
+	if !ok {
+		t.Fatal("conv-64-planners not found in fresh provider")
+	}
+
+	if cLive.TreeMetrics.RequestCount != 65 || cLive.TreeMetrics.TotalOutputTokens != 6600 {
+		t.Fatalf("live refresh got count=%d output=%d, want 65 / 6600 (fresh=%d / %d)", cLive.TreeMetrics.RequestCount, cLive.TreeMetrics.TotalOutputTokens, cFresh.TreeMetrics.RequestCount, cFresh.TreeMetrics.TotalOutputTokens)
+	}
+	if cLive.TreeMetrics.TotalOutputTokens != cFresh.TreeMetrics.TotalOutputTokens {
+		t.Fatalf("live output (%d) != fresh reload output (%d)", cLive.TreeMetrics.TotalOutputTokens, cFresh.TreeMetrics.TotalOutputTokens)
+	}
+}
+
+func TestProvider_ClaudeHaikuDisplayAndOrchestratorWorkerPricing(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 26, 3, 0, 0, 0, time.UTC)
+	for _, row := range []struct{ id, title string }{
+		{"conv-haiku-disp", "Haiku Display"},
+		{"conv-worker-pricing", "Worker Display Pricing"},
+	} {
+		if _, err := sumDB.Exec(
+			`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time, status) VALUES (?, ?, ?, 'CASCADE_RUN_STATUS_IDLE')`,
+			row.id, row.title, now.Format(time.RFC3339),
+		); err != nil {
+			t.Fatalf("insert summary %s: %v", row.id, err)
+		}
+	}
+
+	usage100 := buildProtoMsg(func(b []byte) []byte {
+		b = appendVarintField(b, 3, 100)
+		return b
+	})
+
+	// 1. DB has display "Claude Haiku 5.5" (no slug, no step index), transcript has "claude-haiku-5-5-high" -> 1 request / 100 tokens.
+	dbHaiku := createTestConvDB(t, rootDir, "conv-haiku-disp")
+	innerHaiku := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 4, usage100)
+		b = appendStringField(b, 21, "Claude Haiku 5.5")
+		return b
+	})
+	blobHaiku := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 1, innerHaiku)
+		return b
+	})
+	if _, err := dbHaiku.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES(0, ?, ?)`, blobHaiku, len(blobHaiku)); err != nil {
+		_ = dbHaiku.Close()
+		t.Fatalf("insert conv-haiku-disp: %v", err)
+	}
+	_ = dbHaiku.Close()
+
+	trHaiku := TranscriptPath(rootDir, "conv-haiku-disp")
+	if err := os.MkdirAll(filepath.Dir(trHaiku), 0o755); err != nil {
+		t.Fatalf("mkdir trHaiku: %v", err)
+	}
+	if err := os.WriteFile(trHaiku, []byte(`{"step_index":7,"type":"PLANNER_RESPONSE","created_at":"2026-11-26T03:00:00Z","model":"claude-haiku-5-5-high","output_tokens":100}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write trHaiku: %v", err)
+	}
+
+	// 2. DB has ONLY display "Orchestrator Worker (Hydrogen)" and 100 output tokens, NO transcript -> cost must be $0.000250.
+	dbWorker := createTestConvDB(t, rootDir, "conv-worker-pricing")
+	innerWorker := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 4, usage100)
+		b = appendStringField(b, 21, "Orchestrator Worker (Hydrogen)")
+		return b
+	})
+	blobWorker := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 1, innerWorker)
+		return b
+	})
+	if _, err := dbWorker.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES(0, ?, ?)`, blobWorker, len(blobWorker)); err != nil {
+		_ = dbWorker.Close()
+		t.Fatalf("insert conv-worker-pricing: %v", err)
+	}
+	_ = dbWorker.Close()
+
+	prov, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer prov.Close()
+
+	snap := prov.Snapshot()
+
+	haiku, ok := snap.FindConversation("conv-haiku-disp")
+	if !ok {
+		t.Fatal("conv-haiku-disp not found")
+	}
+	if haiku.TreeMetrics.RequestCount != 1 || haiku.TreeMetrics.TotalOutputTokens != 100 {
+		t.Fatalf("conv-haiku-disp got RequestCount=%d Output=%d, want 1 / 100", haiku.TreeMetrics.RequestCount, haiku.TreeMetrics.TotalOutputTokens)
+	}
+
+	worker, ok := snap.FindConversation("conv-worker-pricing")
+	if !ok {
+		t.Fatal("conv-worker-pricing not found")
+	}
+	wantCost := 100 * 2.50 / 1e6
+	if worker.TreeMetrics.RequestCount != 1 || math.Abs(worker.TreeMetrics.SessionCostUSD-wantCost) > 1e-12 {
+		t.Fatalf("conv-worker-pricing got count=%d cost=%.6f, want 1 / %.6f", worker.TreeMetrics.RequestCount, worker.TreeMetrics.SessionCostUSD, wantCost)
+	}
+}
+
+func TestProvider_TranscriptAliasPricingMatchesDisplayName(t *testing.T) {
+	rootDir := t.TempDir()
+	sumDB := createTestSummariesDB(t, rootDir)
+	defer sumDB.Close()
+
+	now := time.Date(2026, 11, 26, 5, 30, 0, 0, time.UTC)
+	if _, err := sumDB.Exec(
+		`INSERT INTO conversation_summaries(conversation_id, title, last_modified_time, status) VALUES ('conv-tr-alias', 'Transcript Alias Pricing', ?, 'CASCADE_RUN_STATUS_IDLE')`,
+		now.Format(time.RFC3339),
+	); err != nil {
+		t.Fatalf("insert summary: %v", err)
+	}
+
+	trPath := TranscriptPath(rootDir, "conv-tr-alias")
+	if err := os.MkdirAll(filepath.Dir(trPath), 0o755); err != nil {
+		t.Fatalf("mkdir transcript: %v", err)
+	}
+	trLine := `{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-26T05:30:00Z","model":"Orchestrator Worker (Hydrogen)","output_tokens":100}` + "\n"
+	if err := os.WriteFile(trPath, []byte(trLine), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	prov, err := NewProvider(Options{RootDir: rootDir, DisableWatcher: true})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	defer prov.Close()
+
+	conv, ok := prov.Snapshot().FindConversation("conv-tr-alias")
+	if !ok {
+		t.Fatal("conv-tr-alias not found")
+	}
+	wantCost := 100 * 2.50 / 1e6
+	if conv.TreeMetrics.RequestCount != 1 || math.Abs(conv.TreeMetrics.SessionCostUSD-wantCost) > 1e-12 {
+		t.Fatalf("conv-tr-alias got count=%d cost=%.6f, want 1 / %.6f", conv.TreeMetrics.RequestCount, conv.TreeMetrics.SessionCostUSD, wantCost)
 	}
 }

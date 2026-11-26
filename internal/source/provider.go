@@ -793,6 +793,7 @@ func preferSummaryCandidate(cand SummaryRow, candRoot string, cur SummaryRow, cu
 func mergeSummaryMetadata(primary, fallback SummaryRow) SummaryRow {
 	if strings.TrimSpace(primary.Title) == "" {
 		primary.Title = fallback.Title
+		primary.TitleFromAnnotation = fallback.TitleFromAnnotation
 	}
 	if strings.TrimSpace(primary.Preview) == "" {
 		primary.Preview = fallback.Preview
@@ -1208,8 +1209,10 @@ func (p *Provider) buildConversationSnapshot(tree ConversationTree, hydrate bool
 	for i, child := range tree.Children {
 		var gens []GenMetadata
 		var stepTimes map[int]time.Time
+		var trajMeta TrajectoryMetadata
 		if rs := p.rootForConvLocked(child.ConversationID); rs != nil {
 			gens, stepTimes = rs.convPool.cachedState(child.ConversationID)
+			trajMeta = rs.convPool.cachedMeta(child.ConversationID)
 		}
 		var tr TranscriptData
 		if tailer := p.tailers[child.ConversationID]; tailer != nil {
@@ -1223,15 +1226,24 @@ func (p *Provider) buildConversationSnapshot(tree ConversationTree, hydrate bool
 		}
 		subType := ""
 		for j := len(gens) - 1; j >= 0; j-- {
+			if !gens[j].BelongsTo(child.ConversationID) {
+				continue
+			}
 			if gens[j].SubagentType != "" {
 				subType = gens[j].SubagentType
 				break
 			}
 		}
+		metaType := trajMeta.SubagentTypeName
+		if metaType == "" {
+			metaType = trajMeta.AgentScriptName
+		}
 		descriptors[i] = SubagentDescriptor{
 			ID:               child.ConversationID,
 			SummaryAgentName: child.AgentName,
 			SubagentType:     subType,
+			MetaRole:         trajMeta.SubagentRole,
+			MetaTypeName:     metaType,
 		}
 	}
 
@@ -1409,119 +1421,146 @@ func (p *Provider) buildAgentRecords(
 ) []model.RequestRecord {
 	var records []model.RequestRecord
 
-	if len(gens) > 0 {
-		records = make([]model.RequestRecord, 0, len(gens))
-		for _, g := range gens {
-			if g.IsEmptyFailure() {
-				continue
-			}
+	matchRes := tr.MatchPlanners(gens, sum.ConversationID, p.calc)
 
-			rec := model.RequestRecord{
-				GenIndex:         g.GenIndex,
-				StepIndex:        g.StepIndex,
-				ConversationID:   sum.ConversationID,
-				AgentID:          agentID,
-				AgentName:        agentName,
-				ModelSlug:        g.ModelSlug,
-				ModelDisplay:     g.ModelDisplay,
-				InputTokens:      g.InputTokens,
-				CacheReadTokens:  g.CacheReadTokens,
-				CacheWriteTokens: g.CacheWriteTokens,
-				OutputTokens:     g.OutputTokens,
-				ThinkingTokens:   g.ThinkingTokens,
-				ResponseTokens:   g.ResponseTokens,
-				ContextUsed:      g.ContextUsed,
-				ContextLimit:     g.ContextLimit,
-				ContextSegments:  g.ContextSegments,
-				TTFT:             g.TTFT,
-				TotalDuration:    g.TotalDuration,
-			}
-
-			// Timestamp priority: L2 step metadata (ns precision) -> L3 transcript -> L1 summary mtime.
-			if ts, ok := stepTimes[g.StepIndex]; ok && !ts.IsZero() {
-				rec.Timestamp = ts
-			} else if ts, ok := tr.StepTimestamps[g.StepIndex]; ok && !ts.IsZero() {
-				rec.Timestamp = ts
-			} else {
-				rec.Timestamp = sum.LastModifiedTime
-			}
-
-			// Graceful L3 fallback if L2 Protobuf omitted token fields or model slug.
-			if pl, ok := tr.PlannersByStep[g.StepIndex]; ok {
-				if rec.InputTokens == 0 && rec.OutputTokens == 0 && rec.CacheReadTokens == 0 {
-					rec.InputTokens = pl.InputTokens
-					rec.CacheReadTokens = pl.CacheReadTokens
-					rec.OutputTokens = pl.OutputTokens
-					rec.ResponseTokens = pl.OutputTokens
-				}
-				if rec.ModelSlug == "" && pl.Model != "" {
-					rec.ModelSlug = pl.Model
-				}
-				if rec.Timestamp.IsZero() && !pl.CreatedAt.IsZero() {
-					rec.Timestamp = pl.CreatedAt
-				}
-			}
-
-			// Turn alignment.
-			if isRoot {
-				rec.TurnIndex, rec.InCurrentTurn = tr.TurnForStep(rec.StepIndex, sum.LastUserInputStepIndex)
-			} else {
-				if !rootLastUserTime.IsZero() && !rec.Timestamp.IsZero() {
-					rec.InCurrentTurn = !rec.Timestamp.Before(rootLastUserTime)
-					if rec.InCurrentTurn {
-						rec.TurnIndex = rootTurnCount
-					} else {
-						rec.TurnIndex = 1
-					}
-				} else {
-					rec.TurnIndex, rec.InCurrentTurn = tr.TurnForStep(rec.StepIndex, sum.LastUserInputStepIndex)
-				}
-			}
-
-			p.calc.EnrichRecord(&rec)
-			records = append(records, rec)
+	maxGenIdx := -1
+	for i, g := range gens {
+		if !g.BelongsTo(sum.ConversationID) || g.IsEmptyFailure() {
+			continue
 		}
-		return records
-	}
-
-	// Full L3 fallback when L2 conversations/<id>.db is missing or empty.
-	if len(tr.Planners) == 0 {
-		return nil
-	}
-	records = make([]model.RequestRecord, 0, len(tr.Planners))
-	for i, pl := range tr.Planners {
+		if g.GenIndex > maxGenIdx {
+			maxGenIdx = g.GenIndex
+		}
+		if records == nil {
+			records = make([]model.RequestRecord, 0, len(gens)+len(matchRes.UnclaimedPlanners))
+		}
+		knownSteps := g.KnownStepIndices()
 		rec := model.RequestRecord{
-			GenIndex:        i,
-			StepIndex:       pl.StepIndex,
-			ConversationID:  sum.ConversationID,
-			AgentID:         agentID,
-			AgentName:       agentName,
-			ModelSlug:       pl.Model,
-			Timestamp:       pl.CreatedAt,
-			InputTokens:     pl.InputTokens,
-			CacheReadTokens: pl.CacheReadTokens,
-			OutputTokens:    pl.OutputTokens,
-			ResponseTokens:  pl.OutputTokens,
+			GenIndex:         g.GenIndex,
+			StepIndex:        g.StepIndex,
+			ConversationID:   sum.ConversationID,
+			AgentID:          agentID,
+			AgentName:        agentName,
+			ModelSlug:        g.ModelSlug,
+			ModelDisplay:     g.ModelDisplay,
+			InputTokens:      g.InputTokens,
+			CacheReadTokens:  g.CacheReadTokens,
+			CacheWriteTokens: g.CacheWriteTokens,
+			OutputTokens:     g.OutputTokens,
+			ThinkingTokens:   g.ThinkingTokens,
+			ResponseTokens:   g.ResponseTokens,
+			ContextUsed:      g.ContextUsed,
+			ContextLimit:     g.ContextLimit,
+			ContextSegments:  g.ContextSegments,
+			TTFT:             g.TTFT,
+			TotalDuration:    g.TotalDuration,
+		}
+
+		// Timestamp priority: L2 step metadata (ns precision) -> L3 transcript -> L1 summary mtime.
+		if ts := firstStepTimestamp(stepTimes, knownSteps); !ts.IsZero() {
+			rec.Timestamp = ts
+		} else if ts := firstStepTimestamp(tr.StepTimestamps, knownSteps); !ts.IsZero() {
+			rec.Timestamp = ts
+		}
+
+		// Graceful L3 backfill from the matched planner (explicit multi-step or single-gen fallback).
+		if pl := matchRes.MatchedByGen[i]; pl != nil {
+			if g.StepIndexEstimated && pl.StepIndex >= 0 {
+				rec.StepIndex = pl.StepIndex
+			}
+			if rec.InputTokens == 0 && rec.OutputTokens == 0 && rec.CacheReadTokens == 0 && rec.CacheWriteTokens == 0 {
+				rec.InputTokens = pl.InputTokens
+				rec.CacheReadTokens = pl.CacheReadTokens
+				rec.OutputTokens = pl.OutputTokens
+				rec.ResponseTokens = pl.OutputTokens
+			}
+			if p.calc.PreferTranscriptModel(rec.ModelSlug, rec.ModelDisplay, pl.Model) {
+				if p.calc.IsUnresolvedModelEnum(rec.ModelDisplay) {
+					rec.ModelDisplay = ""
+				}
+				rec.ModelSlug = pl.Model
+			}
+			if rec.Timestamp.IsZero() && !pl.CreatedAt.IsZero() {
+				rec.Timestamp = pl.CreatedAt
+			}
 		}
 		if rec.Timestamp.IsZero() {
 			rec.Timestamp = sum.LastModifiedTime
 		}
+
+		// Turn alignment.
 		if isRoot {
 			rec.TurnIndex, rec.InCurrentTurn = tr.TurnForStep(rec.StepIndex, sum.LastUserInputStepIndex)
-		} else if !rootLastUserTime.IsZero() && !rec.Timestamp.IsZero() {
-			rec.InCurrentTurn = !rec.Timestamp.Before(rootLastUserTime)
-			if rec.InCurrentTurn {
-				rec.TurnIndex = rootTurnCount
-			} else {
-				rec.TurnIndex = 1
-			}
 		} else {
-			rec.TurnIndex, rec.InCurrentTurn = tr.TurnForStep(rec.StepIndex, sum.LastUserInputStepIndex)
+			if !rootLastUserTime.IsZero() && !rec.Timestamp.IsZero() {
+				rec.InCurrentTurn = !rec.Timestamp.Before(rootLastUserTime)
+				if rec.InCurrentTurn {
+					rec.TurnIndex = rootTurnCount
+				} else {
+					rec.TurnIndex = 1
+				}
+			} else {
+				rec.TurnIndex, rec.InCurrentTurn = tr.TurnForStep(rec.StepIndex, sum.LastUserInputStepIndex)
+			}
 		}
+
 		p.calc.EnrichRecord(&rec)
 		records = append(records, rec)
 	}
+
+	// Merge unclaimed L3 transcript planners representing requests not yet persisted to L2.
+	if len(matchRes.UnclaimedPlanners) > 0 {
+		if records == nil {
+			records = make([]model.RequestRecord, 0, len(matchRes.UnclaimedPlanners))
+		}
+		nextGenIdx := maxGenIdx + 1
+		for _, pl := range matchRes.UnclaimedPlanners {
+			rec := model.RequestRecord{
+				GenIndex:        nextGenIdx,
+				StepIndex:       pl.StepIndex,
+				ConversationID:  sum.ConversationID,
+				AgentID:         agentID,
+				AgentName:       agentName,
+				ModelSlug:       pl.Model,
+				Timestamp:       pl.CreatedAt,
+				InputTokens:     pl.InputTokens,
+				CacheReadTokens: pl.CacheReadTokens,
+				OutputTokens:    pl.OutputTokens,
+				ResponseTokens:  pl.OutputTokens,
+			}
+			nextGenIdx++
+			if rec.Timestamp.IsZero() {
+				rec.Timestamp = sum.LastModifiedTime
+			}
+			if isRoot {
+				rec.TurnIndex, rec.InCurrentTurn = tr.TurnForStep(rec.StepIndex, sum.LastUserInputStepIndex)
+			} else if !rootLastUserTime.IsZero() && !rec.Timestamp.IsZero() {
+				rec.InCurrentTurn = !rec.Timestamp.Before(rootLastUserTime)
+				if rec.InCurrentTurn {
+					rec.TurnIndex = rootTurnCount
+				} else {
+					rec.TurnIndex = 1
+				}
+			} else {
+				rec.TurnIndex, rec.InCurrentTurn = tr.TurnForStep(rec.StepIndex, sum.LastUserInputStepIndex)
+			}
+			p.calc.EnrichRecord(&rec)
+			records = append(records, rec)
+		}
+	}
+	if len(records) == 0 {
+		return nil
+	}
 	return records
+}
+
+func firstStepTimestamp(times map[int]time.Time, steps []int) time.Time {
+	for _, si := range steps {
+		if ts, ok := times[si]; ok && !ts.IsZero() {
+			return ts
+		}
+	}
+	return time.Time{}
 }
 
 func (p *Provider) buildAgentNode(id, parentID, name, role string, active bool, reqs []model.RequestRecord) model.AgentNode {

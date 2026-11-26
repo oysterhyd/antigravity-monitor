@@ -26,6 +26,7 @@ type watchEvent struct {
 type dirWatcher struct {
 	rootDir  string
 	convDir  string
+	annDir   string
 	debounce time.Duration
 	onEvent  func(watchEvent)
 
@@ -55,6 +56,7 @@ func newDirWatcher(rootDir string, debounce time.Duration, onEvent func(watchEve
 	w := &dirWatcher{
 		rootDir:     rootDir,
 		convDir:     filepath.Join(rootDir, "conversations"),
+		annDir:      filepath.Join(rootDir, "annotations"),
 		debounce:    debounce,
 		onEvent:     onEvent,
 		fsw:         fsw,
@@ -64,9 +66,12 @@ func newDirWatcher(rootDir string, debounce time.Duration, onEvent func(watchEve
 		timers:      make(map[string]*time.Timer),
 	}
 
-	// Best-effort add rootDir and conversations dir if they exist.
+	// Best-effort add rootDir, conversations dir, and annotations dir if they exist.
 	w.addDirIfExists(w.rootDir)
 	w.addDirIfExists(w.convDir)
+	if !w.addDirIfExists(w.annDir) {
+		w.pendingDirs = append(w.pendingDirs, filepath.Clean(w.annDir))
+	}
 
 	go w.loop()
 	return w, nil
@@ -131,9 +136,10 @@ func (w *dirWatcher) WatchTranscriptDirs(convIDs map[string]bool) map[string]boo
 	}
 
 	nextIDs := make(map[string]bool, len(convIDs))
-	dirs := make(map[string]bool, len(convIDs)+2)
+	dirs := make(map[string]bool, len(convIDs)+3)
 	dirs[filepath.Clean(w.rootDir)] = true
 	dirs[filepath.Clean(w.convDir)] = true
+	dirs[filepath.Clean(w.annDir)] = true
 	for id := range convIDs {
 		if id == "" {
 			continue
@@ -216,19 +222,34 @@ func (w *dirWatcher) loop() {
 }
 
 func (w *dirWatcher) handleFSNotifyEvent(ev fsnotify.Event) {
-	// Ignore pure chmod/remove noise unless write/create/rename occurred.
-	if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
+	// Ignore pure chmod noise; allow write/create/rename (plus remove for annotations/*.pbtxt).
+	if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
 		return
 	}
 	name := filepath.Clean(ev.Name)
 	base := strings.ToLower(filepath.Base(name))
 	dir := filepath.Clean(filepath.Dir(name))
 
-	// L1: conversation_summaries.db / -wal / -shm
+	// L1b: annotations/<conv_id>.pbtxt
+	if strings.EqualFold(dir, filepath.Clean(w.annDir)) {
+		if strings.HasSuffix(base, ".pbtxt") {
+			w.schedule(summariesTimerKey, watchEvent{Summaries: true})
+		}
+		return
+	}
+
+	if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
+		return
+	}
+
+	// L1: conversation_summaries.db / -wal / -shm (or newly created annotations/ dir)
 	if strings.EqualFold(dir, filepath.Clean(w.rootDir)) {
 		if base == "conversation_summaries.db" ||
 			base == "conversation_summaries.db-wal" ||
 			base == "conversation_summaries.db-shm" {
+			w.schedule(summariesTimerKey, watchEvent{Summaries: true})
+		} else if base == "annotations" {
+			w.retryPendingDirs()
 			w.schedule(summariesTimerKey, watchEvent{Summaries: true})
 		}
 		return

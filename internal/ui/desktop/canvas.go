@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/egoist/mygo/ui"
@@ -235,20 +236,36 @@ func (a *App) renderHeroContextCard(c *ui.Context, pal theme.Palette, conv model
 					if legendAgent.ContextLimit > 0 {
 						sharePct = float64(seg.Tokens) / float64(legendAgent.ContextLimit) * 100
 					}
+					hoverLabel := fmt.Sprintf("%s %s (%.1f%%)", tr.SegmentLabel(seg.Key), fmtTokensK(seg.Tokens), sharePct)
+					if len(seg.SubItems) > 1 {
+						var sb strings.Builder
+						sb.WriteString(hoverLabel)
+						for _, sub := range seg.SubItems {
+							if sub.Tokens <= 0 {
+								continue
+							}
+							sb.WriteString(" · ")
+							sb.WriteString(tr.SegmentSubLabel(sub.Key))
+							sb.WriteByte(' ')
+							sb.WriteString(fmtTokensK(sub.Tokens))
+						}
+						hoverLabel = sb.String()
+					}
 					ui.Row(c.Key("ctx-hover-pill")).
 						Padding(2, 8).
 						Radius(999).
 						Background(pal.SegBg).
 						Gap(5).
 						AlignItems(ui.Center).
+						MinWidth(0).
 						Children(func() {
 							ui.Box(c).Size(6, 6).Radius(3).Background(segCol).Shrink(0)
-							ui.Textf(c, "%s %s (%.1f%%)", tr.SegmentLabel(seg.Key), fmtTokensK(seg.Tokens), sharePct).
+							ui.Text(c, hoverLabel).
 								FontSize(10.5).
 								FontWeight(500).
 								FontFeatures("tnum").
 								TextColor(pal.Ink1).
-								NoWrap()
+								SingleLine()
 						})
 				}
 			})

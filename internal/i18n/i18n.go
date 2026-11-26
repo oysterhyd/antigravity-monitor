@@ -65,6 +65,15 @@ type Strings struct {
 	CtxSegCache    string
 	CtxSegInput    string
 	CtxSegOutput   string
+	CtxSubPrompt   string
+	CtxSubRules    string
+	CtxSubPlugins  string
+	CtxSubBuiltIn  string
+	CtxSubMCP      string
+	CtxSubSkills   string
+	CtxSubUser     string
+	CtxSubModel    string
+	CtxSubSubagent string
 
 	// KPI Tiles (Tree vs Single-Node)
 	KPITreeTurnCost    string
@@ -228,6 +237,15 @@ var zhStrings = Strings{
 	CtxSegCache:    "缓存",
 	CtxSegInput:    "输入",
 	CtxSegOutput:   "输出",
+	CtxSubPrompt:   "提示词",
+	CtxSubRules:    "规则",
+	CtxSubPlugins:  "插件",
+	CtxSubBuiltIn:  "内置",
+	CtxSubMCP:      "MCP",
+	CtxSubSkills:   "Skills",
+	CtxSubUser:     "用户",
+	CtxSubModel:    "回复",
+	CtxSubSubagent: "子代理",
 
 	KPITreeTurnCost:    "全树本轮",
 	KPINodeTurnCost:    "本轮费用",
@@ -384,6 +402,15 @@ var enStrings = Strings{
 	CtxSegCache:    "Cache",
 	CtxSegInput:    "Input",
 	CtxSegOutput:   "Output",
+	CtxSubPrompt:   "Prompt",
+	CtxSubRules:    "Rules",
+	CtxSubPlugins:  "Plugins",
+	CtxSubBuiltIn:  "Built-in",
+	CtxSubMCP:      "MCP",
+	CtxSubSkills:   "Skills",
+	CtxSubUser:     "User",
+	CtxSubModel:    "Model",
+	CtxSubSubagent: "Subagent",
 
 	KPITreeTurnCost:    "Tree Turn",
 	KPINodeTurnCost:    "Turn Cost",
@@ -544,6 +571,32 @@ func (s Strings) SegmentLabel(key model.ContextSegmentKey) string {
 		return s.CtxSegInput
 	case model.ContextSegOutput:
 		return s.CtxSegOutput
+	default:
+		return string(key)
+	}
+}
+
+// SegmentSubLabel returns the short localized label for a fine-grained context sub-bucket.
+func (s Strings) SegmentSubLabel(key model.ContextSubKey) string {
+	switch key {
+	case model.ContextSubSystemPrompt:
+		return s.CtxSubPrompt
+	case model.ContextSubUserRules:
+		return s.CtxSubRules
+	case model.ContextSubSubagentDefs:
+		return s.CtxSubPlugins
+	case model.ContextSubSystemTools:
+		return s.CtxSubBuiltIn
+	case model.ContextSubMCPTools:
+		return s.CtxSubMCP
+	case model.ContextSubSkills:
+		return s.CtxSubSkills
+	case model.ContextSubUserInput:
+		return s.CtxSubUser
+	case model.ContextSubAssistant:
+		return s.CtxSubModel
+	case model.ContextSubSubagentMsg:
+		return s.CtxSubSubagent
 	default:
 		return string(key)
 	}

@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "default_rule": {
     "model_pattern": "*",
     "display_name": "Default Model",
@@ -63,6 +63,15 @@
       "long_output_per_million": 15.0
     },
     {
+      "model_pattern": "gemini-4-helix",
+      "display_name": "Gemini 4 Helix",
+      "context_limit": 512000,
+      "input_per_million": 0.30,
+      "cache_read_per_million": 0.015,
+      "cache_write_per_million": 0.075,
+      "output_per_million": 2.50
+    },
+    {
       "model_pattern": "gemini-4-flash",
       "display_name": "Gemini 4 Flash",
       "context_limit": 512000,
@@ -94,6 +103,110 @@
       "long_output_per_million": 15.0
     },
     {
+      "model_pattern": "gemini-3.8-flash",
+      "display_name": "Gemini 3.8 Flash",
+      "context_limit": 512000,
+      "input_per_million": 0.75,
+      "cache_read_per_million": 0.075,
+      "cache_write_per_million": 0.1875,
+      "output_per_million": 3.75,
+      "phases": [
+        {
+          "until": "2027-01-01T00:00:00Z",
+          "input_per_million": 0.75,
+          "cache_read_per_million": 0.075,
+          "cache_write_per_million": 0.1875,
+          "output_per_million": 3.75
+        },
+        {
+          "from": "2027-01-01T00:00:00Z",
+          "input_per_million": 1.50,
+          "cache_read_per_million": 0.15,
+          "cache_write_per_million": 0.375,
+          "output_per_million": 7.50
+        }
+      ]
+    },
+    {
+      "model_pattern": "gemini-3.7-flash",
+      "display_name": "Gemini 3.7 Flash",
+      "context_limit": 512000,
+      "input_per_million": 0.75,
+      "cache_read_per_million": 0.075,
+      "cache_write_per_million": 0.1875,
+      "output_per_million": 3.75,
+      "phases": [
+        {
+          "until": "2027-01-01T00:00:00Z",
+          "input_per_million": 0.75,
+          "cache_read_per_million": 0.075,
+          "cache_write_per_million": 0.1875,
+          "output_per_million": 3.75
+        },
+        {
+          "from": "2027-01-01T00:00:00Z",
+          "input_per_million": 1.50,
+          "cache_read_per_million": 0.15,
+          "cache_write_per_million": 0.375,
+          "output_per_million": 7.50
+        }
+      ]
+    },
+    {
+      "model_pattern": "gemini-3.6-flash",
+      "display_name": "Gemini 3.6 Flash",
+      "context_limit": 512000,
+      "input_per_million": 0.75,
+      "cache_read_per_million": 0.075,
+      "cache_write_per_million": 0.1875,
+      "output_per_million": 3.75
+    },
+    {
+      "model_pattern": "gemini-3.5-flash-lite",
+      "display_name": "Gemini 3.5 Flash Lite",
+      "context_limit": 512000,
+      "input_per_million": 0.30,
+      "cache_read_per_million": 0.03,
+      "cache_write_per_million": 0.075,
+      "output_per_million": 2.50
+    },
+    {
+      "model_pattern": "gemini-3.5-flash",
+      "display_name": "Gemini 3.5 Flash",
+      "context_limit": 512000,
+      "input_per_million": 1.50,
+      "cache_read_per_million": 0.15,
+      "cache_write_per_million": 0.375,
+      "output_per_million": 9.00
+    },
+    {
+      "model_pattern": "gemini-3.1-pro",
+      "display_name": "Gemini 3.1 Pro",
+      "context_limit": 1048576,
+      "input_per_million": 2.00,
+      "cache_read_per_million": 0.20,
+      "cache_write_per_million": 0.50,
+      "output_per_million": 12.0
+    },
+    {
+      "model_pattern": "gemini-3.1-flash-lite",
+      "display_name": "Gemini 3.1 Flash Lite",
+      "context_limit": 1048576,
+      "input_per_million": 0.25,
+      "cache_read_per_million": 0.025,
+      "cache_write_per_million": 0.0625,
+      "output_per_million": 1.50
+    },
+    {
+      "model_pattern": "gemini-3-flash",
+      "display_name": "Gemini 3 Flash",
+      "context_limit": 1048576,
+      "input_per_million": 0.50,
+      "cache_read_per_million": 0.05,
+      "cache_write_per_million": 0.125,
+      "output_per_million": 3.00
+    },
+    {
       "model_pattern": "gemini-2.5-pro",
       "display_name": "Gemini 2.5 Pro",
       "context_limit": 1048576,
@@ -107,6 +220,15 @@
       "long_output_per_million": 15.0
     },
     {
+      "model_pattern": "gemini-2.5-flash-lite",
+      "display_name": "Gemini 2.5 Flash Lite",
+      "context_limit": 1048576,
+      "input_per_million": 0.10,
+      "cache_read_per_million": 0.01,
+      "cache_write_per_million": 0.025,
+      "output_per_million": 0.40
+    },
+    {
       "model_pattern": "gemini-2.5-flash",
       "display_name": "Gemini 2.5 Flash",
       "context_limit": 1048576,
@@ -116,6 +238,24 @@
       "output_per_million": 2.50
     },
     {
+      "model_pattern": "claude-fable-5-2",
+      "display_name": "Claude Fable 5.2",
+      "context_limit": 840000,
+      "input_per_million": 8.00,
+      "cache_read_per_million": 0.20,
+      "cache_write_per_million": 10.0,
+      "output_per_million": 40.0
+    },
+    {
+      "model_pattern": "claude-fable-5",
+      "display_name": "Claude Fable 5",
+      "context_limit": 840000,
+      "input_per_million": 10.0,
+      "cache_read_per_million": 1.00,
+      "cache_write_per_million": 12.5,
+      "output_per_million": 50.0
+    },
+    {
       "model_pattern": "claude-opus-5",
       "display_name": "Claude Opus 5.5",
       "context_limit": 840000,
@@ -123,6 +263,24 @@
       "cache_read_per_million": 1.50,
       "cache_write_per_million": 18.75,
       "output_per_million": 75.0
+    },
+    {
+      "model_pattern": "claude-sonnet-5",
+      "display_name": "Claude Sonnet 5.5",
+      "context_limit": 840000,
+      "input_per_million": 2.00,
+      "cache_read_per_million": 0.10,
+      "cache_write_per_million": 2.50,
+      "output_per_million": 10.0
+    },
+    {
+      "model_pattern": "claude-haiku-5",
+      "display_name": "Claude Haiku 5.5",
+      "context_limit": 400000,
+      "input_per_million": 0.10,
+      "cache_read_per_million": 0.01,
+      "cache_write_per_million": 0.125,
+      "output_per_million": 0.50
     },
     {
       "model_pattern": "claude-opus-4",
@@ -152,6 +310,132 @@
       "output_per_million": 4.0
     },
     {
+      "model_pattern": "gpt-6-astra",
+      "display_name": "GPT-6 Astra",
+      "context_limit": 400000,
+      "input_per_million": 10.0,
+      "cache_read_per_million": 1.00,
+      "cache_write_per_million": 10.0,
+      "output_per_million": 50.0
+    },
+    {
+      "model_pattern": "gpt-6.1-sol",
+      "display_name": "GPT-6.1 Sol",
+      "context_limit": 400000,
+      "input_per_million": 2.00,
+      "cache_read_per_million": 0.10,
+      "cache_write_per_million": 2.00,
+      "output_per_million": 10.0
+    },
+    {
+      "model_pattern": "gpt-6.1-terra",
+      "display_name": "GPT-6.1 Terra",
+      "context_limit": 400000,
+      "input_per_million": 1.00,
+      "cache_read_per_million": 0.05,
+      "cache_write_per_million": 1.00,
+      "output_per_million": 5.0
+    },
+    {
+      "model_pattern": "gpt-6-sol",
+      "display_name": "GPT-6 Sol",
+      "context_limit": 400000,
+      "input_per_million": 2.00,
+      "cache_read_per_million": 0.20,
+      "cache_write_per_million": 2.00,
+      "output_per_million": 10.0
+    },
+    {
+      "model_pattern": "gpt-6-luna",
+      "display_name": "GPT-6 Luna",
+      "context_limit": 400000,
+      "input_per_million": 0.10,
+      "cache_read_per_million": 0.01,
+      "cache_write_per_million": 0.10,
+      "output_per_million": 0.50
+    },
+    {
+      "model_pattern": "gpt-5.6",
+      "display_name": "GPT-5.6",
+      "context_limit": 400000,
+      "input_per_million": 4.00,
+      "cache_read_per_million": 0.40,
+      "cache_write_per_million": 4.00,
+      "output_per_million": 20.0
+    },
+    {
+      "model_pattern": "gpt-5.5",
+      "display_name": "GPT-5.5",
+      "context_limit": 400000,
+      "input_per_million": 5.00,
+      "cache_read_per_million": 0.50,
+      "cache_write_per_million": 5.00,
+      "output_per_million": 30.0
+    },
+    {
+      "model_pattern": "gpt-5.4-mini",
+      "display_name": "GPT-5.4 Mini",
+      "context_limit": 400000,
+      "input_per_million": 0.75,
+      "cache_read_per_million": 0.075,
+      "cache_write_per_million": 0.75,
+      "output_per_million": 4.50
+    },
+    {
+      "model_pattern": "gpt-5.4-nano",
+      "display_name": "GPT-5.4 Nano",
+      "context_limit": 400000,
+      "input_per_million": 0.20,
+      "cache_read_per_million": 0.02,
+      "cache_write_per_million": 0.20,
+      "output_per_million": 1.25
+    },
+    {
+      "model_pattern": "gpt-5.4",
+      "display_name": "GPT-5.4",
+      "context_limit": 400000,
+      "input_per_million": 2.50,
+      "cache_read_per_million": 0.25,
+      "cache_write_per_million": 2.50,
+      "output_per_million": 15.0
+    },
+    {
+      "model_pattern": "gpt-5.3-codex",
+      "display_name": "GPT-5.3 Codex",
+      "context_limit": 400000,
+      "input_per_million": 1.75,
+      "cache_read_per_million": 0.175,
+      "cache_write_per_million": 1.75,
+      "output_per_million": 14.0
+    },
+    {
+      "model_pattern": "gpt-5.2",
+      "display_name": "GPT-5.2",
+      "context_limit": 400000,
+      "input_per_million": 1.75,
+      "cache_read_per_million": 0.175,
+      "cache_write_per_million": 1.75,
+      "output_per_million": 14.0
+    },
+    {
+      "model_pattern": "gpt-5-mini",
+      "display_name": "GPT-5 Mini",
+      "context_limit": 400000,
+      "input_per_million": 0.25,
+      "cache_read_per_million": 0.025,
+      "cache_write_per_million": 0.25,
+      "output_per_million": 2.00
+    },
+    {
+      "model_pattern": "gpt-5-nano",
+      "display_name": "GPT-5 Nano",
+      "context_limit": 400000,
+      "input_per_million": 0.05,
+      "cache_read_per_million": 0.005,
+      "cache_write_per_million": 0.05,
+      "output_per_million": 0.40
+    },
+    {
       "model_pattern": "gpt-5",
       "display_name": "GPT-5",
       "context_limit": 400000,
@@ -159,6 +443,116 @@
       "cache_read_per_million": 0.125,
       "cache_write_per_million": 1.25,
       "output_per_million": 10.0
+    },
+    {
+      "model_pattern": "o4-mini",
+      "display_name": "o4-mini",
+      "context_limit": 200000,
+      "input_per_million": 1.10,
+      "cache_read_per_million": 0.275,
+      "cache_write_per_million": 1.10,
+      "output_per_million": 4.40
+    },
+    {
+      "model_pattern": "o3-mini",
+      "display_name": "o3-mini",
+      "context_limit": 200000,
+      "input_per_million": 1.10,
+      "cache_read_per_million": 0.55,
+      "cache_write_per_million": 1.10,
+      "output_per_million": 4.40
+    },
+    {
+      "model_pattern": "o3",
+      "display_name": "o3",
+      "context_limit": 200000,
+      "input_per_million": 2.00,
+      "cache_read_per_million": 0.50,
+      "cache_write_per_million": 2.00,
+      "output_per_million": 8.00
+    },
+    {
+      "model_pattern": "gpt-oss-120b",
+      "display_name": "GPT-OSS 120B",
+      "context_limit": 131072,
+      "input_per_million": 0.80,
+      "cache_read_per_million": 0.10,
+      "cache_write_per_million": 0.80,
+      "output_per_million": 2.40
     }
-  ]
+  ],
+  "placeholders": {
+    "MODEL_PLACEHOLDER_M667": { "model_id": "gemini-pro-orchestrator", "label": "Orchestrator (Carbon)" },
+    "MODEL_PLACEHOLDER_M681": { "model_id": "gemini-pro-orchestrator-argon", "label": "Orchestrator (Argon)" },
+    "MODEL_PLACEHOLDER_M537": { "model_id": "gemini-pro-orchestrator-neon", "label": "Orchestrator (Neon)" },
+    "MODEL_PLACEHOLDER_M669": { "model_id": "gemini-flash-worker-agy", "label": "Orchestrator Worker (Hydrogen)" },
+    "MODEL_PLACEHOLDER_M535": { "model_id": "gemini-4-neon-xhigh", "label": "Gemini 4 Neon (XHigh)" },
+    "MODEL_PLACEHOLDER_M429": { "model_id": "gemini-4-carbon-high", "label": "Gemini 4 Carbon (High)" },
+    "MODEL_PLACEHOLDER_M427": { "model_id": "gemini-4-carbon-high", "label": "Gemini 4 Carbon (High)" },
+    "MODEL_PLACEHOLDER_M437": { "model_id": "gemini-4-carbon-medium", "label": "Gemini 4 Carbon (Medium)" },
+    "MODEL_PLACEHOLDER_M438": { "model_id": "gemini-4-carbon-low", "label": "Gemini 4 Carbon (Low)" },
+    "MODEL_PLACEHOLDER_M528": { "model_id": "gemini-4-hydrogen-xhigh", "label": "Gemini 4 Hydrogen (XHigh)" },
+    "MODEL_PLACEHOLDER_M525": { "model_id": "gemini-4-hydrogen-high", "label": "Gemini 4 Hydrogen (High)" },
+    "MODEL_PLACEHOLDER_M526": { "model_id": "gemini-4-hydrogen-medium", "label": "Gemini 4 Hydrogen (Medium)" },
+    "MODEL_PLACEHOLDER_M527": { "model_id": "gemini-4-hydrogen-low", "label": "Gemini 4 Hydrogen (Low)" },
+    "MODEL_PLACEHOLDER_M417": { "model_id": "gemini-4-argon-high", "label": "Gemini 4 Argon (High)" },
+    "MODEL_PLACEHOLDER_M418": { "model_id": "gemini-4-argon-medium", "label": "Gemini 4 Argon (Medium)" },
+    "MODEL_PLACEHOLDER_M419": { "model_id": "gemini-4-argon-low", "label": "Gemini 4 Argon (Low)" },
+    "MODEL_PLACEHOLDER_M318": { "model_id": "gemini-3.8-flash-high", "label": "Gemini 3.8 Flash (High)" },
+    "MODEL_PLACEHOLDER_M319": { "model_id": "gemini-3.8-flash-medium", "label": "Gemini 3.8 Flash (Medium)" },
+    "MODEL_PLACEHOLDER_M320": { "model_id": "gemini-3.8-flash-low", "label": "Gemini 3.8 Flash (Low)" },
+    "MODEL_PLACEHOLDER_M322": { "model_id": "gemini-3.8-flash-tiered", "label": "Gemini 3.8 Flash (Tiered)" },
+    "MODEL_PLACEHOLDER_M298": { "model_id": "gemini-3.7-flash-high", "label": "Gemini 3.7 Flash (High)" },
+    "MODEL_PLACEHOLDER_M299": { "model_id": "gemini-3.7-flash-medium", "label": "Gemini 3.7 Flash (Medium)" },
+    "MODEL_PLACEHOLDER_M300": { "model_id": "gemini-3.7-flash-low", "label": "Gemini 3.7 Flash (Low)" },
+    "MODEL_PLACEHOLDER_M301": { "model_id": "gemini-3.7-flash-tiered", "label": "Gemini 3.7 Flash (Tiered)" },
+    "MODEL_PLACEHOLDER_M264": { "model_id": "gemini-3.6-flash-high", "label": "Gemini 3.6 Flash (High)" },
+    "MODEL_PLACEHOLDER_M71": { "model_id": "gemini-3.6-flash-high", "label": "Gemini 3.6 Flash (High)" },
+    "MODEL_PLACEHOLDER_M72": { "model_id": "gemini-3.6-flash-medium", "label": "Gemini 3.6 Flash (Medium)" },
+    "MODEL_PLACEHOLDER_M73": { "model_id": "gemini-3.6-flash-low", "label": "Gemini 3.6 Flash (Low)" },
+    "MODEL_PLACEHOLDER_M196": { "model_id": "gemini-3.6-flash", "label": "Gemini 3.6 Flash" },
+    "MODEL_PLACEHOLDER_M149": { "model_id": "gemini-3.5-flash-high", "label": "Gemini 3.5 Flash (High)" },
+    "MODEL_PLACEHOLDER_M132": { "model_id": "gemini-3.5-flash-high", "label": "Gemini 3.5 Flash (High)" },
+    "MODEL_PLACEHOLDER_M84": { "model_id": "gemini-3.5-flash-high", "label": "Gemini 3.5 Flash (High)" },
+    "MODEL_PLACEHOLDER_M15": { "model_id": "gemini-3.5-flash-high", "label": "Gemini 3.5 Flash (High)" },
+    "MODEL_PLACEHOLDER_M133": { "model_id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash" },
+    "MODEL_PLACEHOLDER_M20": { "model_id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash" },
+    "MODEL_PLACEHOLDER_M187": { "model_id": "gemini-3.5-flash-extra-low", "label": "Gemini 3.5 Flash (Extra Low)" },
+    "MODEL_PLACEHOLDER_M198": { "model_id": "gemini-3.5-flash-lite", "label": "Gemini 3.5 Flash Lite" },
+    "MODEL_PLACEHOLDER_M37": { "model_id": "gemini-3.1-pro-high", "label": "Gemini 3.1 Pro (High)" },
+    "MODEL_PLACEHOLDER_M16": { "model_id": "gemini-3.1-pro-high", "label": "Gemini 3.1 Pro (High)" },
+    "MODEL_PLACEHOLDER_M36": { "model_id": "gemini-3.1-pro-low", "label": "Gemini 3.1 Pro (Low)" },
+    "MODEL_PLACEHOLDER_M50": { "model_id": "gemini-3.1-flash-lite", "label": "Gemini 3.1 Flash Lite" },
+    "MODEL_PLACEHOLDER_M59": { "model_id": "gemini-3-flash", "label": "Gemini 3.1 Flash" },
+    "MODEL_PLACEHOLDER_M47": { "model_id": "gemini-3-flash", "label": "Gemini 3 Flash" },
+    "MODEL_PLACEHOLDER_M18": { "model_id": "gemini-3-flash", "label": "Gemini 3 Flash" },
+    "MODEL_GOOGLE_GEMINI_2_5_PRO": { "model_id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro" },
+    "MODEL_GOOGLE_GEMINI_2_5_FLASH": { "model_id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash" },
+    "MODEL_GOOGLE_GEMINI_2_5_FLASH_THINKING": { "model_id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash (Thinking)" },
+    "MODEL_PLACEHOLDER_M330": { "model_id": "gemini-2.5-flash-lite", "label": "Gemini 2.5 Flash Lite" },
+    "MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE": { "model_id": "gemini-2.5-flash-lite", "label": "Gemini 2.5 Flash Lite" },
+    "MODEL_PLACEHOLDER_M406": { "model_id": "claude-opus-5-5-max", "label": "Claude Opus 5.5 (Max)" },
+    "MODEL_PLACEHOLDER_M402": { "model_id": "claude-opus-5-5-high", "label": "Claude Opus 5.5 (High)" },
+    "MODEL_PLACEHOLDER_M401": { "model_id": "claude-opus-5-5-medium", "label": "Claude Opus 5.5 (Medium)" },
+    "MODEL_PLACEHOLDER_M400": { "model_id": "claude-opus-5-5-low", "label": "Claude Opus 5.5 (Low)" },
+    "MODEL_PLACEHOLDER_M368": { "model_id": "claude-opus-5-5", "label": "Claude Opus 5.5" },
+    "MODEL_PLACEHOLDER_M407": { "model_id": "claude-sonnet-5-5-max", "label": "Claude Sonnet 5.5 (Max)" },
+    "MODEL_PLACEHOLDER_M405": { "model_id": "claude-sonnet-5-5-high", "label": "Claude Sonnet 5.5 (High)" },
+    "MODEL_PLACEHOLDER_M404": { "model_id": "claude-sonnet-5-5-medium", "label": "Claude Sonnet 5.5 (Medium)" },
+    "MODEL_PLACEHOLDER_M403": { "model_id": "claude-sonnet-5-5-low", "label": "Claude Sonnet 5.5 (Low)" },
+    "MODEL_PLACEHOLDER_M254": { "model_id": "claude-opus-4-8", "label": "Claude Opus 4.8" },
+    "MODEL_PLACEHOLDER_M26": { "model_id": "claude-opus-4-6-thinking", "label": "Claude Opus 4.6 (Thinking)" },
+    "MODEL_PLACEHOLDER_M35": { "model_id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6 (Thinking)" },
+    "MODEL_PLACEHOLDER_M12": { "model_id": "claude-opus-4-5-thinking", "label": "Claude Opus 4.5 (Thinking)" },
+    "MODEL_PLACEHOLDER_M11": { "model_id": "claude-opus-4-5", "label": "Claude Opus 4.5" },
+    "MODEL_CLAUDE_4_5_SONNET_THINKING": { "model_id": "claude-sonnet-4-5-thinking", "label": "Claude Sonnet 4.5 (Thinking)" },
+    "MODEL_CLAUDE_4_5_SONNET": { "model_id": "claude-sonnet-4-5", "label": "Claude Sonnet 4.5" },
+    "MODEL_CLAUDE_4_5_HAIKU": { "model_id": "claude-haiku-4-5", "label": "Claude Haiku 4.5" },
+    "MODEL_CLAUDE_4_5_HAIKU_THINKING": { "model_id": "claude-haiku-4-5", "label": "Claude Haiku 4.5 (Thinking)" },
+    "MODEL_CLAUDE_4_SONNET": { "model_id": "claude-sonnet-4", "label": "Claude Sonnet 4" },
+    "MODEL_CLAUDE_4_SONNET_THINKING": { "model_id": "claude-sonnet-4-thinking", "label": "Claude Sonnet 4 (Thinking)" },
+    "MODEL_CLAUDE_4_OPUS": { "model_id": "claude-opus-4", "label": "Claude Opus 4" },
+    "MODEL_CLAUDE_4_OPUS_THINKING": { "model_id": "claude-opus-4-thinking", "label": "Claude Opus 4 (Thinking)" },
+    "MODEL_OPENAI_GPT_OSS_120B_MEDIUM": { "model_id": "gpt-oss-120b-medium", "label": "GPT-OSS 120B (Medium)" }
+  }
 }

@@ -19,6 +19,7 @@ import (
 type SummaryRow struct {
 	ConversationID         string
 	Title                  string
+	TitleFromAnnotation    bool
 	Preview                string
 	StepCount              int
 	LastModifiedTime       time.Time
@@ -91,12 +92,14 @@ type ConversationTree struct {
 
 // SummariesReader maintains a single read-only WAL handle to conversation_summaries.db.
 type SummariesReader struct {
-	mu           sync.Mutex
-	dbPath       string
-	db           *sql.DB
-	version      int64
-	versionKnown bool
-	missingKnown bool
+	mu             sync.Mutex
+	dbPath         string
+	db             *sql.DB
+	version        int64
+	versionKnown   bool
+	missingKnown   bool
+	cachedRows     []SummaryRow
+	emptyTitleIdxs []int
 }
 
 // NewSummariesReader creates a read-only L1 reader for conversation_summaries.db.
@@ -108,6 +111,8 @@ func NewSummariesReader(dbPath string) *SummariesReader {
 func (r *SummariesReader) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.cachedRows = nil
+	r.emptyTitleIdxs = nil
 	if r.db != nil {
 		err := r.db.Close()
 		r.db = nil
@@ -146,12 +151,12 @@ func (r *SummariesReader) ReadAll(ctx context.Context) ([]SummaryRow, error) {
 		return nil, err
 	}
 
-	rows, _, err := r.readAllLocked(ctx, db)
+	rows, _, _, err := r.readAllLocked(ctx, db)
 	return rows, err
 }
 
-// ReadChanges incrementally reads conversation summaries only when SQLite's
-// PRAGMA data_version changes since the last successful read.
+// ReadChanges incrementally reads conversation summaries when SQLite's
+// PRAGMA data_version changes or when standalone annotations/*.pbtxt titles change.
 func (r *SummariesReader) ReadChanges(ctx context.Context) ([]SummaryRow, bool, error) {
 	return r.readChanges(ctx)
 }
@@ -167,6 +172,8 @@ func (r *SummariesReader) readChanges(ctx context.Context) ([]SummaryRow, bool, 
 		}
 		r.missingKnown = true
 		r.versionKnown = false
+		r.cachedRows = nil
+		r.emptyTitleIdxs = nil
 		return nil, true, nil
 	}
 	if err != nil {
@@ -177,23 +184,69 @@ func (r *SummariesReader) readChanges(ctx context.Context) ([]SummaryRow, bool, 
 	var version int64
 	err = db.QueryRowContext(ctx, `PRAGMA data_version`).Scan(&version)
 	if err == nil && r.versionKnown && r.version == version {
+		if r.refreshAnnotationsLocked() {
+			return cloneSummaryRows(r.cachedRows), true, nil
+		}
 		return nil, false, nil
 	}
 	if ctx.Err() != nil {
 		return nil, false, ctx.Err()
 	}
 	r.versionKnown = false
-	rows, parentsRead, readErr := r.readAllLocked(ctx, db)
+	rows, emptyTitleIdxs, parentsRead, readErr := r.readAllLocked(ctx, db)
 	if readErr != nil {
 		return nil, false, readErr
 	}
 	if err == nil && ctx.Err() == nil && parentsRead {
 		r.version, r.versionKnown = version, true
+		r.cachedRows = cloneSummaryRows(rows)
+		r.emptyTitleIdxs = emptyTitleIdxs
+	} else {
+		r.cachedRows = nil
+		r.emptyTitleIdxs = nil
 	}
 	return rows, true, nil
 }
 
-func (r *SummariesReader) readAllLocked(ctx context.Context, db *sql.DB) ([]SummaryRow, bool, error) {
+func (r *SummariesReader) refreshAnnotationsLocked() bool {
+	if len(r.emptyTitleIdxs) == 0 {
+		return false
+	}
+	rootDir := filepath.Dir(r.dbPath)
+	annDir := filepath.Join(rootDir, "annotations")
+	if fi, err := os.Stat(annDir); err != nil || !fi.IsDir() {
+		changed := false
+		for _, idx := range r.emptyTitleIdxs {
+			if r.cachedRows[idx].Title != "" {
+				r.cachedRows[idx].Title = ""
+				r.cachedRows[idx].TitleFromAnnotation = false
+				changed = true
+			}
+		}
+		return changed
+	}
+	changed := false
+	for _, idx := range r.emptyTitleIdxs {
+		nextTitle := ReadAnnotationTitle(rootDir, r.cachedRows[idx].ConversationID)
+		if nextTitle != r.cachedRows[idx].Title {
+			r.cachedRows[idx].Title = nextTitle
+			r.cachedRows[idx].TitleFromAnnotation = nextTitle != ""
+			changed = true
+		}
+	}
+	return changed
+}
+
+func cloneSummaryRows(src []SummaryRow) []SummaryRow {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]SummaryRow, len(src))
+	copy(out, src)
+	return out
+}
+
+func (r *SummariesReader) readAllLocked(ctx context.Context, db *sql.DB) ([]SummaryRow, []int, bool, error) {
 	const q = `
 		SELECT
 			conversation_id,
@@ -220,7 +273,7 @@ func (r *SummariesReader) readAllLocked(ctx context.Context, db *sql.DB) ([]Summ
 		_ = r.db.Close()
 		r.db = nil
 		r.versionKnown = false
-		return nil, false, fmt.Errorf("query conversation_summaries: %w", err)
+		return nil, nil, false, fmt.Errorf("query conversation_summaries: %w", err)
 	}
 	defer rows.Close()
 
@@ -252,7 +305,7 @@ func (r *SummariesReader) readAllLocked(ctx context.Context, db *sql.DB) ([]Summ
 			&lastUserRaw,
 			&row.LastUserInputStepIndex,
 		); err != nil {
-			return nil, false, fmt.Errorf("scan conversation_summaries: %w", err)
+			return nil, nil, false, fmt.Errorf("scan conversation_summaries: %w", err)
 		}
 		row.LastModifiedTime = parseSQLiteTime(modRaw)
 		row.LastUserInputTime = parseSQLiteTime(lastUserRaw)
@@ -264,12 +317,27 @@ func (r *SummariesReader) readAllLocked(ctx context.Context, db *sql.DB) ([]Summ
 		result = append(result, row)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, false, fmt.Errorf("iterate conversation_summaries: %w", err)
+		return nil, nil, false, fmt.Errorf("iterate conversation_summaries: %w", err)
 	}
 
 	// Best-effort backfill from conversation_parents if the table exists.
 	parentsRead := r.mergeConversationParentsLocked(ctx, db, &result, indexByID)
-	return result, parentsRead, nil
+
+	// Fill empty titles from standalone annotations/<conv_id>.pbtxt files and track those
+	// rows so subsequent ReadChanges calls detect created/modified/deleted annotation files
+	// even when conversation_summaries.db's data_version is unchanged.
+	rootDir := filepath.Dir(r.dbPath)
+	var emptyTitleIdxs []int
+	for i := range result {
+		if strings.TrimSpace(result[i].Title) == "" {
+			emptyTitleIdxs = append(emptyTitleIdxs, i)
+			if annTitle := ReadAnnotationTitle(rootDir, result[i].ConversationID); annTitle != "" {
+				result[i].Title = annTitle
+				result[i].TitleFromAnnotation = true
+			}
+		}
+	}
+	return result, emptyTitleIdxs, parentsRead, nil
 }
 
 func (r *SummariesReader) mergeConversationParentsLocked(ctx context.Context, db *sql.DB, rows *[]SummaryRow, indexByID map[string]int) bool {

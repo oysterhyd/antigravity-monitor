@@ -21,10 +21,32 @@ const (
 	ContextSegOutput ContextSegmentKey = "output"
 )
 
+// ContextSubKey identifies a fine-grained semantic sub-bucket inside a top-level ContextSegment.
+type ContextSubKey string
+
+const (
+	ContextSubSystemPrompt ContextSubKey = "system_prompt"
+	ContextSubUserRules    ContextSubKey = "user_rules"
+	ContextSubSubagentDefs ContextSubKey = "subagent_defs"
+	ContextSubSystemTools  ContextSubKey = "system_tools"
+	ContextSubMCPTools     ContextSubKey = "mcp_tools"
+	ContextSubSkills       ContextSubKey = "skills"
+	ContextSubUserInput    ContextSubKey = "user_input"
+	ContextSubAssistant    ContextSubKey = "assistant"
+	ContextSubSubagentMsg  ContextSubKey = "subagent_msg"
+)
+
+// ContextSubSegment represents one fine-grained breakdown item nested inside a ContextSegment.
+type ContextSubSegment struct {
+	Key    ContextSubKey `json:"key"`
+	Tokens int64         `json:"tokens"`
+}
+
 // ContextSegment represents one colored slice of the context window breakdown bar.
 type ContextSegment struct {
-	Key    ContextSegmentKey `json:"key"`
-	Tokens int64             `json:"tokens"`
+	Key      ContextSegmentKey   `json:"key"`
+	Tokens   int64               `json:"tokens"`
+	SubItems []ContextSubSegment `json:"sub_items,omitempty"`
 }
 
 // RequestRecord represents a single LLM generation call from gen_metadata (or transcript fallback).
@@ -191,14 +213,14 @@ func DefaultSettings() Settings {
 	}
 }
 
-// PricingRule defines per-million-token pricing and context ceiling for a model pattern.
-type PricingRule struct {
-	ModelPattern            string  `json:"model_pattern"`
-	DisplayName             string  `json:"display_name"`
-	ContextLimit            int64   `json:"context_limit"`
+// PricingPhase defines a time-bounded pricing window [From, Until) for a PricingRule.
+// Either From or Until may be omitted for an open-ended interval.
+type PricingPhase struct {
+	From                    string  `json:"from,omitempty"`
+	Until                   string  `json:"until,omitempty"`
 	InputPerMillion         float64 `json:"input_per_million"`
 	CacheReadPerMillion     float64 `json:"cache_read_per_million"`
-	CacheWritePerMillion    float64 `json:"cache_write_per_million"`
+	CacheWritePerMillion    float64 `json:"cache_write_per_million,omitempty"`
 	OutputPerMillion        float64 `json:"output_per_million"`
 	LongContextThreshold    int64   `json:"long_context_threshold,omitempty"`
 	LongInputPerMillion     float64 `json:"long_input_per_million,omitempty"`
@@ -206,9 +228,33 @@ type PricingRule struct {
 	LongOutputPerMillion    float64 `json:"long_output_per_million,omitempty"`
 }
 
+// ModelPlaceholder maps an opaque Antigravity model enum/placeholder identifier
+// (such as MODEL_PLACEHOLDER_M535) to a canonical model slug and display label.
+type ModelPlaceholder struct {
+	ModelID string `json:"model_id"`
+	Label   string `json:"label"`
+}
+
+// PricingRule defines per-million-token pricing and context ceiling for a model pattern.
+type PricingRule struct {
+	ModelPattern            string         `json:"model_pattern"`
+	DisplayName             string         `json:"display_name"`
+	ContextLimit            int64          `json:"context_limit"`
+	InputPerMillion         float64        `json:"input_per_million"`
+	CacheReadPerMillion     float64        `json:"cache_read_per_million"`
+	CacheWritePerMillion    float64        `json:"cache_write_per_million"`
+	OutputPerMillion        float64        `json:"output_per_million"`
+	LongContextThreshold    int64          `json:"long_context_threshold,omitempty"`
+	LongInputPerMillion     float64        `json:"long_input_per_million,omitempty"`
+	LongCacheReadPerMillion float64        `json:"long_cache_read_per_million,omitempty"`
+	LongOutputPerMillion    float64        `json:"long_output_per_million,omitempty"`
+	Phases                  []PricingPhase `json:"phases,omitempty"`
+}
+
 // PricingConfig is the root schema for pricing.default.json and user override files.
 type PricingConfig struct {
-	Version     int           `json:"version"`
-	DefaultRule PricingRule   `json:"default_rule"`
-	Rules       []PricingRule `json:"rules"`
+	Version      int                         `json:"version"`
+	DefaultRule  PricingRule                 `json:"default_rule"`
+	Rules        []PricingRule               `json:"rules"`
+	Placeholders map[string]ModelPlaceholder `json:"placeholders,omitempty"`
 }

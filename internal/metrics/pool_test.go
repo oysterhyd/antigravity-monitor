@@ -1,6 +1,10 @@
 package metrics
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/oysterhyd/antigravity-monitor/internal/model"
+)
 
 func TestClassifyPoolAndSubModelRealPairs(t *testing.T) {
 	cases := []struct {
@@ -214,6 +218,38 @@ func TestClassifyPoolAndSubModelRealPairs(t *testing.T) {
 			wantQuotaSub: "Gemini 4 Neon (High)",
 		},
 		{
+			name:         "claude fable 5.2",
+			slug:         "claude-fable-5-2-high",
+			display:      "Claude Fable 5.2 (High)",
+			wantPool:     PoolClaudeGPT,
+			wantSubModel: SubModelClaudeFable5,
+			wantQuotaSub: "Claude 4.5 Sonnet / Opus",
+		},
+		{
+			name:         "claude sonnet 5.5",
+			slug:         "claude-sonnet-5-5-high",
+			display:      "Claude Sonnet 5.5 (High)",
+			wantPool:     PoolClaudeGPT,
+			wantSubModel: SubModelClaudeSonnet55,
+			wantQuotaSub: "Claude 4.5 Sonnet / Opus",
+		},
+		{
+			name:         "gemini 4 helix",
+			slug:         "gemini-4-helix-high",
+			display:      "Gemini 4 Helix (High)",
+			wantPool:     PoolGemini,
+			wantSubModel: SubModelGeminiHelix,
+			wantQuotaSub: "Gemini 4 Neon (High)",
+		},
+		{
+			name:         "gpt 6 astra",
+			slug:         "gpt-6-astra",
+			display:      "GPT-6 Astra",
+			wantPool:     PoolClaudeGPT,
+			wantSubModel: SubModelGPT6,
+			wantQuotaSub: "GPT-5.2 / Codex",
+		},
+		{
 			name:         "both empty fallback",
 			slug:         "",
 			display:      "",
@@ -280,5 +316,70 @@ func TestBoundarySafeOpenAITokens(t *testing.T) {
 		if got := ClassifySubModel(tc.slug, tc.display); got == SubModelGPTCodex {
 			t.Errorf("ClassifySubModel(%q, %q) = %q, must not match GPT bucket", tc.slug, tc.display, got)
 		}
+	}
+}
+
+func TestClassifySubModelDottedVersionsAndDisplayOnlyHistoryPath(t *testing.T) {
+	calc, err := NewDefaultCalculator()
+	if err != nil {
+		t.Fatalf("NewDefaultCalculator: %v", err)
+	}
+
+	cases := []struct {
+		name         string
+		slug         string
+		display      string
+		wantSubModel string
+	}{
+		{
+			name:         "claude 4.5 sonnet display only",
+			display:      "Claude 4.5 Sonnet",
+			wantSubModel: SubModelClaude45,
+		},
+		{
+			name:         "claude 4.5 opus display only",
+			display:      "Claude 4.5 Opus",
+			wantSubModel: SubModelClaude45,
+		},
+		{
+			name:         "claude 4.5 sonnet slug only",
+			slug:         "claude-sonnet-4-5",
+			wantSubModel: SubModelClaude45,
+		},
+		{
+			name:         "gemini 3.1 pro slug only",
+			slug:         "gemini-3.1-pro-high",
+			wantSubModel: SubModelGemini31Pro,
+		},
+		{
+			name:         "gemini 3.1 pro display only",
+			display:      "Gemini 3.1 Pro (Thinking)",
+			wantSubModel: SubModelGemini31Pro,
+		},
+		{
+			name:         "gemini 2.5 pro slug only",
+			slug:         "gemini-2.5-pro",
+			wantSubModel: SubModelGemini25Pro,
+		},
+		{
+			name:         "gemini 2.5 pro display only",
+			display:      "Gemini 2.5 Pro (Thinking)",
+			wantSubModel: SubModelGemini25Pro,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := model.RequestRecord{
+				ModelSlug:    tc.slug,
+				ModelDisplay: tc.display,
+				OutputTokens: 1_000,
+			}
+			calc.EnrichRecord(&rec)
+			if got := ClassifySubModel(rec.ModelSlug, rec.ModelDisplay); got != tc.wantSubModel {
+				t.Errorf("EnrichRecord+ClassifySubModel(%q, %q) = %q (after enrich: slug=%q display=%q), want %q",
+					tc.slug, tc.display, got, rec.ModelSlug, rec.ModelDisplay, tc.wantSubModel)
+			}
+		})
 	}
 }

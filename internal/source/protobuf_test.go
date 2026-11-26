@@ -277,19 +277,136 @@ func TestDecodeGenMetadata_ContextBreakdown(t *testing.T) {
 	}
 
 	got := map[model.ContextSegmentKey]int64{}
+	gotSubs := map[model.ContextSegmentKey]map[model.ContextSubKey]int64{}
 	for _, s := range gm.ContextSegments {
 		got[s.Key] = s.Tokens
+		if len(s.SubItems) > 0 {
+			m := make(map[model.ContextSubKey]int64, len(s.SubItems))
+			for _, sub := range s.SubItems {
+				m[sub.Key] = sub.Tokens
+			}
+			gotSubs[s.Key] = m
+		}
 	}
 	want := map[model.ContextSegmentKey]int64{
 		model.ContextSegSystem:     3981 + 439,
 		model.ContextSegTools:      4826 + 10903 + 575,
-		model.ContextSegToolOutput: 77432 + 4002,
-		model.ContextSegMessages:   26302 + 1333,
+		model.ContextSegToolOutput: 77432,
+		model.ContextSegMessages:   26302 + 1333 + 4002,
 		model.ContextSegSummary:    11895,
 	}
 	for k, w := range want {
 		if got[k] != w {
 			t.Fatalf("segment %s = %d, want %d (all=%+v)", k, got[k], w, gm.ContextSegments)
+		}
+	}
+	if gotSubs[model.ContextSegSystem][model.ContextSubSystemPrompt] != 3981 ||
+		gotSubs[model.ContextSegSystem][model.ContextSubUserRules] != 439 {
+		t.Fatalf("unexpected system sub-items: %+v", gotSubs[model.ContextSegSystem])
+	}
+	if gotSubs[model.ContextSegTools][model.ContextSubSystemTools] != 10903 ||
+		gotSubs[model.ContextSegTools][model.ContextSubMCPTools] != 575 ||
+		gotSubs[model.ContextSegTools][model.ContextSubSkills] != 4826 {
+		t.Fatalf("unexpected tools sub-items: %+v", gotSubs[model.ContextSegTools])
+	}
+	if gotSubs[model.ContextSegMessages][model.ContextSubAssistant] != 26302 ||
+		gotSubs[model.ContextSegMessages][model.ContextSubUserInput] != 1333 ||
+		gotSubs[model.ContextSegMessages][model.ContextSubSubagentMsg] != 4002 {
+		t.Fatalf("unexpected messages sub-items: %+v", gotSubs[model.ContextSegMessages])
+	}
+}
+
+func TestDecodeGenMetadata_ModelEnumAndBelongsTo(t *testing.T) {
+	usage := buildProtoMsg(func(b []byte) []byte {
+		b = appendVarintField(b, 2, 1000)
+		b = appendVarintField(b, 3, 200)
+		b = appendVarintField(b, 6, 26) // API_PROVIDER_ANTHROPIC_VERTEX
+		return b
+	})
+	inner := buildProtoMsg(func(b []byte) []byte {
+		b = appendVarintField(b, 3, 1535) // MODEL_PLACEHOLDER_M535
+		b = appendSubMsg(b, 4, usage)
+		b = appendKV(b, 20, "cascade_id", "Conv-Parent-1")
+		return b
+	})
+	raw := appendSubMsg(nil, 1, inner)
+
+	gm, err := DecodeGenMetadata(0, raw)
+	if err != nil {
+		t.Fatalf("DecodeGenMetadata: %v", err)
+	}
+	if gm.ModelEnum != "MODEL_PLACEHOLDER_M535" || gm.ModelSlug != "MODEL_PLACEHOLDER_M535" {
+		t.Fatalf("unexpected model enum/slug: enum=%q slug=%q", gm.ModelEnum, gm.ModelSlug)
+	}
+	if gm.APIProvider != "API_PROVIDER_ANTHROPIC_VERTEX" {
+		t.Fatalf("APIProvider = %q, want API_PROVIDER_ANTHROPIC_VERTEX", gm.APIProvider)
+	}
+	if !gm.BelongsTo("conv-parent-1") {
+		t.Fatal("expected case-insensitive BelongsTo match")
+	}
+	if gm.BelongsTo("conv-child-fork") {
+		t.Fatal("expected BelongsTo=false for cloned parent step in forked child")
+	}
+}
+
+func TestDecodeTrajectoryMetadata(t *testing.T) {
+	spec := buildProtoMsg(func(b []byte) []byte {
+		b = appendStringField(b, 1, "research")
+		b = appendStringField(b, 2, "Codebase Auditor")
+		return b
+	})
+	agentScript := appendStringField(nil, 1, "audit-worker")
+	raw := buildProtoMsg(func(b []byte) []byte {
+		b = appendSubMsg(b, 4, agentScript)
+		b = appendStringField(b, 5, "parent-conv-1")
+		b = appendStringField(b, 6, "root-conv-1")
+		b = appendSubMsg(b, 8, spec)
+		b = appendVarintField(b, 17, 2)
+		return b
+	})
+
+	tm := DecodeTrajectoryMetadata(raw)
+	if tm.ParentConversationID != "parent-conv-1" || tm.RootConversationID != "root-conv-1" {
+		t.Fatalf("unexpected parent/root: %+v", tm)
+	}
+	if tm.SubagentTypeName != "research" || tm.SubagentRole != "Codebase Auditor" || tm.AgentScriptName != "audit-worker" {
+		t.Fatalf("unexpected spec/script: %+v", tm)
+	}
+	if tm.NestingDepth != 2 {
+		t.Fatalf("NestingDepth = %d, want 2", tm.NestingDepth)
+	}
+}
+
+func TestParseAnnotationTitle(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "plain utf8",
+			raw:  "last_user_view_time { seconds: 1700000000 }\ntitle: \"Refactor Telemetry Engine\"\n",
+			want: "Refactor Telemetry Engine",
+		},
+		{
+			name: "octal escaped chinese",
+			raw:  "title: \"\\344\\270\\255\\346\\226\\207\\346\\240\\207\\351\\242\\230 \\\"v2\\\"\"\n",
+			want: "中文标题 \"v2\"",
+		},
+		{
+			name: "hex and single quote",
+			raw:  "title: 'Fix \\x41\\x42 bug'\n",
+			want: "Fix AB bug",
+		},
+		{
+			name: "no title field",
+			raw:  "subtitle: \"ignored\"\n",
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		if got := ParseAnnotationTitle(tc.raw); got != tc.want {
+			t.Errorf("%s: ParseAnnotationTitle = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }

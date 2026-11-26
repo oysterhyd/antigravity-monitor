@@ -17,11 +17,17 @@ const (
 	SubModelGeminiHydrogen    = "Gemini 4 Hydrogen"
 	SubModelGeminiCarbon      = "Gemini 4 Carbon"
 	SubModelGeminiArgon       = "Gemini 4 Argon"
+	SubModelGeminiHelix       = "Gemini 4 Helix"
 	SubModelGeminiProOrch     = "Gemini Pro Orchestrator"
+	SubModelGemini31Pro       = "Gemini 3.1 Pro"
 	SubModelGemini25Pro       = "Gemini 2.5 Pro"
+	SubModelClaudeFable5      = "Claude Fable 5"
 	SubModelClaudeOpus55      = "Claude Opus 5.5"
+	SubModelClaudeSonnet55    = "Claude Sonnet 5.5"
+	SubModelClaudeHaiku55     = "Claude Haiku 5.5"
 	SubModelClaude45          = "Claude 4.5 Sonnet / Opus"
 	SubModelClaudeHaiku4      = "Claude Haiku 4"
+	SubModelGPT6              = "GPT-6"
 	SubModelGPTCodex          = "GPT-5.2 / Codex"
 	SubModelUnknown           = "Unknown Model"
 )
@@ -45,14 +51,16 @@ func classifyPoolNorm(norm string) (ModelPool, bool) {
 	if hasClaudeGPTIndicator(norm) {
 		return PoolClaudeGPT, true
 	}
-	if strings.Contains(norm, "gemini") || strings.Contains(norm, "orchestrator") {
-		return PoolGemini, true
+	for _, kw := range []string{"gemini", "orchestrator", "neon", "hydrogen", "carbon", "argon", "helix"} {
+		if strings.Contains(norm, kw) {
+			return PoolGemini, true
+		}
 	}
 	return "", false
 }
 
 func hasClaudeGPTIndicator(norm string) bool {
-	for _, kw := range []string{"claude", "anthropic", "opus", "sonnet", "haiku", "gpt", "codex", "openai"} {
+	for _, kw := range []string{"claude", "anthropic", "fable", "opus", "sonnet", "haiku", "gpt", "codex", "openai"} {
 		if strings.Contains(norm, kw) {
 			return true
 		}
@@ -133,7 +141,7 @@ func ClassifyQuotaSubModel(modelSlug, modelDisplay string) string {
 }
 
 func hasClaudeFamilyIndicator(norm string) bool {
-	for _, kw := range []string{"claude", "anthropic", "opus", "sonnet", "haiku"} {
+	for _, kw := range []string{"claude", "anthropic", "fable", "opus", "sonnet", "haiku"} {
 		if strings.Contains(norm, kw) {
 			return true
 		}
@@ -145,9 +153,11 @@ func classifySubModelFromSlug(slug string) (string, bool) {
 	switch {
 	case strings.HasPrefix(slug, "gemini-4-neon"):
 		return SubModelGeminiNeon, true
+	case strings.HasPrefix(slug, "gemini-4-helix"):
+		return SubModelGeminiHelix, true
 	case strings.HasPrefix(slug, "gemini-flash-worker"),
 		strings.HasPrefix(slug, "gemini-4-flash"),
-		strings.HasPrefix(slug, "gemini-2.5-flash"),
+		strings.HasPrefix(slug, "gemini-2-5-flash"),
 		strings.Contains(slug, "flash"):
 		return SubModelGeminiFlash, true
 	case strings.HasPrefix(slug, "gemini-4-hydrogen"):
@@ -158,14 +168,24 @@ func classifySubModelFromSlug(slug string) (string, bool) {
 		return SubModelGeminiArgon, true
 	case strings.HasPrefix(slug, "gemini-pro-orchestrator"):
 		return SubModelGeminiProOrch, true
-	case strings.HasPrefix(slug, "gemini-2.5-pro"):
+	case strings.HasPrefix(slug, "gemini-3-1-pro"):
+		return SubModelGemini31Pro, true
+	case strings.HasPrefix(slug, "gemini-2-5-pro"):
 		return SubModelGemini25Pro, true
+	case strings.HasPrefix(slug, "claude-fable-5"):
+		return SubModelClaudeFable5, true
 	case strings.HasPrefix(slug, "claude-opus-5"):
 		return SubModelClaudeOpus55, true
+	case strings.HasPrefix(slug, "claude-sonnet-5"):
+		return SubModelClaudeSonnet55, true
+	case strings.HasPrefix(slug, "claude-haiku-5"):
+		return SubModelClaudeHaiku55, true
 	case strings.HasPrefix(slug, "claude-opus-4"), strings.HasPrefix(slug, "claude-sonnet-4"):
 		return SubModelClaude45, true
 	case strings.HasPrefix(slug, "claude-haiku-4"):
 		return SubModelClaudeHaiku4, true
+	case strings.HasPrefix(slug, "gpt-6"):
+		return SubModelGPT6, true
 	case strings.HasPrefix(slug, "gpt-"),
 		strings.HasPrefix(slug, "codex"),
 		strings.HasPrefix(slug, "openai"),
@@ -183,6 +203,8 @@ func classifySubModelFromDisplay(disp string, slugEmpty bool) (string, bool) {
 	switch {
 	case strings.Contains(disp, "gemini-4-neon"):
 		return SubModelGeminiNeon, true
+	case strings.Contains(disp, "gemini-4-helix"):
+		return SubModelGeminiHelix, true
 	case slugEmpty && strings.Contains(disp, "flash"):
 		return SubModelGeminiFlash, true
 	case strings.Contains(disp, "gemini-4-hydrogen"):
@@ -193,17 +215,27 @@ func classifySubModelFromDisplay(disp string, slugEmpty bool) (string, bool) {
 		return SubModelGeminiArgon, true
 	case strings.Contains(disp, "gemini-pro-orchestrator"):
 		return SubModelGeminiProOrch, true
-	case strings.Contains(disp, "gemini-2.5-pro"):
+	case strings.Contains(disp, "gemini-3-1-pro"):
+		return SubModelGemini31Pro, true
+	case strings.Contains(disp, "gemini-2-5-pro"):
 		return SubModelGemini25Pro, true
+	case strings.Contains(disp, "claude-fable-5"):
+		return SubModelClaudeFable5, true
 	case strings.Contains(disp, "claude-opus-5"):
 		return SubModelClaudeOpus55, true
+	case strings.Contains(disp, "claude-sonnet-5"):
+		return SubModelClaudeSonnet55, true
+	case strings.Contains(disp, "claude-haiku-5"):
+		return SubModelClaudeHaiku55, true
 	case strings.Contains(disp, "claude-opus-4"),
 		strings.Contains(disp, "claude-sonnet-4"),
-		strings.Contains(disp, "claude-4.5-sonnet"),
-		strings.Contains(disp, "claude-4.5-opus"):
+		strings.Contains(disp, "claude-4-5-sonnet"),
+		strings.Contains(disp, "claude-4-5-opus"):
 		return SubModelClaude45, true
 	case strings.Contains(disp, "claude-haiku-4"):
 		return SubModelClaudeHaiku4, true
+	case strings.Contains(disp, "gpt-6"):
+		return SubModelGPT6, true
 	case hasGPTIndicator(disp):
 		return SubModelGPTCodex, true
 	default:

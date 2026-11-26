@@ -16,7 +16,7 @@ import (
 	"github.com/oysterhyd/antigravity-monitor/internal/metrics"
 )
 
-const cacheSchemaVersion = 1
+const cacheSchemaVersion = 3
 
 type cacheFile struct {
 	Version       int                    `json:"version"`
@@ -25,15 +25,18 @@ type cacheFile struct {
 }
 
 type cachedConv struct {
-	ConvID     string          `json:"conv_id"`
-	MtimeNs    int64           `json:"mtime_ns"`
-	Size       int64           `json:"size"`
-	DBMtimeNs  int64           `json:"db_mtime_ns,omitempty"`
-	DBSize     int64           `json:"db_size,omitempty"`
-	WalMtimeNs int64           `json:"wal_mtime_ns,omitempty"`
-	WalSize    int64           `json:"wal_size,omitempty"`
-	RootConvID string          `json:"root_conv_id,omitempty"`
-	Requests   []cachedRequest `json:"requests,omitempty"`
+	ConvID               string          `json:"conv_id"`
+	MtimeNs              int64           `json:"mtime_ns"`
+	Size                 int64           `json:"size"`
+	DBMtimeNs            int64           `json:"db_mtime_ns,omitempty"`
+	DBSize               int64           `json:"db_size,omitempty"`
+	WalMtimeNs           int64           `json:"wal_mtime_ns,omitempty"`
+	WalSize              int64           `json:"wal_size,omitempty"`
+	TranscriptMtimeNs    int64           `json:"transcript_mtime_ns,omitempty"`
+	TranscriptSize       int64           `json:"transcript_size,omitempty"`
+	TranscriptUnreadable bool            `json:"transcript_unreadable,omitempty"`
+	RootConvID           string          `json:"root_conv_id,omitempty"`
+	Requests             []cachedRequest `json:"requests,omitempty"`
 }
 
 type cachedRequest struct {
@@ -64,12 +67,15 @@ func (r cachedRequest) totalTokens() int64 {
 }
 
 type convFileStat struct {
-	effectiveMtimeNs int64
-	effectiveSize    int64
-	dbMtimeNs        int64
-	dbSize           int64
-	walMtimeNs       int64
-	walSize          int64
+	effectiveMtimeNs  int64
+	effectiveSize     int64
+	dbMtimeNs         int64
+	dbSize            int64
+	walMtimeNs        int64
+	walSize           int64
+	transcriptMtimeNs int64
+	transcriptSize    int64
+	transcriptStatErr bool
 }
 
 func statConvDB(dbPath string) (convFileStat, error) {
@@ -99,8 +105,26 @@ func statConvDBWithInfo(dbPath string, dbInfo os.FileInfo) convFileStat {
 	return st
 }
 
+func attachTranscriptStat(st convFileStat, transcriptPath string) convFileStat {
+	if transcriptPath == "" {
+		return st
+	}
+	trInfo, err := os.Stat(transcriptPath)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			st.transcriptStatErr = true
+		}
+		return st
+	}
+	if !trInfo.IsDir() {
+		st.transcriptMtimeNs = trInfo.ModTime().UnixNano()
+		st.transcriptSize = trInfo.Size()
+	}
+	return st
+}
+
 func (c *cachedConv) matches(st convFileStat) bool {
-	if c == nil {
+	if c == nil || c.TranscriptUnreadable || st.transcriptStatErr {
 		return false
 	}
 	return c.MtimeNs == st.effectiveMtimeNs &&
@@ -108,7 +132,9 @@ func (c *cachedConv) matches(st convFileStat) bool {
 		c.DBMtimeNs == st.dbMtimeNs &&
 		c.DBSize == st.dbSize &&
 		c.WalMtimeNs == st.walMtimeNs &&
-		c.WalSize == st.walSize
+		c.WalSize == st.walSize &&
+		c.TranscriptMtimeNs == st.transcriptMtimeNs &&
+		c.TranscriptSize == st.transcriptSize
 }
 
 // DefaultCachePath returns the default incremental usage history cache path:

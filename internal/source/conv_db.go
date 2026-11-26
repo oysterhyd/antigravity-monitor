@@ -24,6 +24,7 @@ type convCacheState struct {
 	lastIdx      int
 	records      []GenMetadata
 	stepTimes    map[int]time.Time
+	trajMeta     TrajectoryMetadata
 	syncedOnce   bool
 	dbMtimeNs    int64
 	dbSize       int64
@@ -104,6 +105,49 @@ func (p *ConvDBPool) cachedState(convID string) ([]GenMetadata, map[int]time.Tim
 		return nil, nil
 	}
 	return cloneGenMetadata(state.records), cloneStepTimes(state.stepTimes)
+}
+
+func (p *ConvDBPool) cachedMeta(convID string) TrajectoryMetadata {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	state := p.states[convID]
+	if state == nil {
+		return TrajectoryMetadata{}
+	}
+	return state.trajMeta
+}
+
+// ReadTrajectoryMetadata best-effort reads and decodes trajectory_metadata_blob (id='main')
+// from an open read-only conversation SQLite DB, returning a zero value if the table or row is absent.
+func ReadTrajectoryMetadata(ctx context.Context, db *sql.DB) TrajectoryMetadata {
+	tm, _ := readTrajectoryMetadata(ctx, db)
+	return tm
+}
+
+func readTrajectoryMetadata(ctx context.Context, db *sql.DB) (TrajectoryMetadata, error) {
+	if db == nil {
+		return TrajectoryMetadata{}, errors.New("nil sqlite db")
+	}
+	var blob []byte
+	err := db.QueryRowContext(ctx, `SELECT data FROM trajectory_metadata_blob WHERE id = 'main' LIMIT 1`).Scan(&blob)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) || isMissingTableError(err) {
+			return TrajectoryMetadata{}, nil
+		}
+		return TrajectoryMetadata{}, err
+	}
+	if len(blob) == 0 {
+		return TrajectoryMetadata{}, nil
+	}
+	return DecodeTrajectoryMetadata(blob), nil
+}
+
+func isMissingTableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "no such table")
 }
 
 func (p *ConvDBPool) syncBatch(ctx context.Context, ids []string, activeIDs map[string]bool) (map[string]bool, map[string]bool) {
@@ -256,9 +300,11 @@ func (p *ConvDBPool) syncLocked(ctx context.Context, convID string, active bool)
 		}
 		state.records = append(state.records, gm)
 		changed = true
-		if gm.StepIndex >= 0 {
-			if _, ok := state.stepTimes[gm.StepIndex]; !ok {
-				newStepIdxs = append(newStepIdxs, gm.StepIndex)
+		for _, si := range gm.KnownStepIndices() {
+			if si >= 0 {
+				if _, ok := state.stepTimes[si]; !ok {
+					newStepIdxs = append(newStepIdxs, si)
+				}
 			}
 		}
 	}
@@ -272,7 +318,17 @@ func (p *ConvDBPool) syncLocked(ctx context.Context, convID string, active bool)
 		p.fetchStepTimestampsLocked(ctx, db, newStepIdxs, state.stepTimes)
 	}
 
-	if ctx.Err() == nil {
+	// Re-check trajectory_metadata_blob whenever the DB changed (data_version changed or newly opened),
+	// even if no new gen_metadata rows were appended (e.g. standalone subagent role/metadata writes
+	// or deletions). Only accept confirmed reads (including sql.ErrNoRows / missing table) so transient
+	// read errors preserve the cached metadata and retry on the next sync.
+	tm, tmErr := readTrajectoryMetadata(ctx, db)
+	if tmErr == nil && tm != state.trajMeta {
+		state.trajMeta = tm
+		changed = true
+	}
+
+	if ctx.Err() == nil && tmErr == nil {
 		state.syncedOnce = true
 		state.dbMtimeNs = dbMtimeNs
 		state.dbSize = dbSize
